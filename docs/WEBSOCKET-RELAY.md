@@ -50,13 +50,17 @@ node tools/cloudbase-fn/build-channel-gateway.mjs
 
 先运行 `node tools/cloudbase-fn/prepare-channel-gateway.mjs <实际 API HTTPS origin> <实际前端 HTTPS origins> <本地私有输出目录>`，它只生成可审阅的 `create-function.json` 与 `create-route.json`，不会调用云服务。不要把生成的部署站点配置提交到公开仓库。
 
-通过现有 CloudBase MCP `manageFunctions(createFunction)` 部署，`functionRootPath` 指向包含该函数子目录的 `.cloudbase-build` 绝对路径。Windows 打包如不能保留可执行位，运行 `python tools/cloudbase-fn/package-channel-gateway.py <create-function.json> <本地私有输出目录>`，它仅打包这 3 个产物，校验 LF/无 BOM，并明确把 ZIP 内 bootstrap 设为 Unix 0755；改用生成的 `create-function-packaged.json` 调用 MCP，避免依赖宿主文件模式。
+通过现有 CloudBase MCP `manageFunctions(createFunction)` 部署，使用生成的 `create-function.json`，保留指向 `.cloudbase-build` 的绝对 `functionRootPath`，不传 `zipFile`。当前 MCP 的创建分支不会向 Manager SDK 传递 `zipFile`：只传 ZIP 会出现路径错误；同时传目录和 ZIP 仍会重新打包目录，并非优先上传自制 ZIP。该工具链已在 Windows 目录部署中验证可运行，下载产物的启动文件带可执行权限；不同工具版本仍须重新验证。
+
+如需本地留档，可运行 `python tools/cloudbase-fn/package-channel-gateway.py <create-function.json> <本地私有输出目录>`。它校验 3 个产物及 LF/无 BOM，并生成 bootstrap 为 Unix 0755 的审计 ZIP，以及保留目录、移除 `zipFile` 的 `create-function-with-root.json`。**此 ZIP 只是留档，不是该创建请求实际上传的包。** 旧版 helper 生成的 `create-function-packaged.json` 不适用于当前 MCP 创建流程，不要继续使用。
+
+如果必须逐字节部署预制 ZIP，使用 MCP 的两段式路径：`queryFunctions(action=getFunctionUploadUrl)` 获取当前环境的预签名上传信息，原样 PUT ZIP 后，将返回的 `cosBucketName`、`cosObjectName`、`cosBucketRegion` 放入 `manageFunctions(createFunction)` 的 `code` 字段，不传本地目录或 `zipFile`。不要自行猜测桶或对象路径，也不要把预签名地址写入公开日志。已有函数则使用相应 `updateFunctionCode` 操作，不能假定它与创建分支的 ZIP 参数行为相同。
 
 然后创建公开 HTTP 网关映射 `upstreamResourceType: WEB_SCF`，前缀 `/weshirt-channel-gateway`、`enablePathTransmission: false`（匿名仅能到握手，应用票据仍必验）。生成请求带网关 IP/QPS 限制，可按真实校园 NAT 流量调整。使用返回的真实 `wss:` 地址配置应用的 `COMMUNITY_WS_GATEWAY_URL`，不要猜测函数域名。`COMMUNITY_WS_GATEWAY_SECRET` 只在应用后端配置，与 AUTH_SECRET 分离。开启平台 WS 协议后不可取消，回退时移除应用的 gateway URL 即恢复原轮询，独立函数可保留或单独删除。
 
 ## 验收
 
-运行 `node --test tests/channel-gateway.test.js`。测试包含本地真实 WS 握手，不访问外部应用。部署后先检查 `GET /health`，再由合成测试账号取票完成首次 ready、消息版本改变、频道切换、页面隐藏恢复、账号禁用/撤权、过期重连。无票据、跨 Origin、query 票据、跨频道和客户端 publish 均应拒绝。应用 ACL 测试独立覆盖 state 端点。
+运行 `node --test tests/channel-gateway.test.js`。测试包含本地真实 WS 握手，不访问外部应用。部署后下载实际函数代码包，核对仅含这 3 个文件、bundle 与本地构建一致、bootstrap 无 BOM/CRLF 且具有 Unix 可执行位；本地审计 ZIP 的权限不能证明云端实际使用的权限。再检查 `GET /health`，并由合成测试账号取票完成首次 ready、消息版本改变、频道切换、页面隐藏恢复、账号禁用/撤权、过期重连。无票据、跨 Origin、query 票据、跨频道和客户端 publish 均应拒绝。应用 ACL 测试独立覆盖 state 端点。
 
 ## 官方依据
 
