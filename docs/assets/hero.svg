@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="408" viewBox="0 0 1200 408" role="img" aria-labelledby="title desc">
+  <title id="title">WeShirt · 等衣</title>
+  <desc id="desc">洗衣机、晾晒的衣服与手机，组成一间清爽的宿舍洗衣房。</desc>
+  <defs>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="#cce3d8"/></pattern>
+    <clipPath id="door"><circle cx="916" cy="227" r="59"/></clipPath>
+  </defs>
+  <rect x="1" y="1" width="1198" height="406" rx="26" fill="#f1faf6" stroke="#c8e2d5" stroke-width="2"/>
+  <path d="M688 1h485a26 26 0 0 1 26 26v354a26 26 0 0 1-26 26H688Z" fill="url(#dots)"/>
+  <g font-family="Arial, 'Microsoft YaHei', sans-serif" fill="#0b1220">
+    <rect x="48" y="46" width="46" height="46" rx="12" fill="#0b1220"/>
+    <text x="71" y="78" text-anchor="middle" font-size="30" font-weight="800" fill="#fff">W</text>
+    <text x="111" y="77" font-size="23" font-weight="700">WeShirt <tspan font-size="19" font-weight="400" fill="#496457">/ 等衣</tspan></text>
+    <text x="48" y="170" font-size="49" font-weight="750" letter-spacing="-1.5">先看空机，再下楼。</text>
+    <text x="49" y="214" font-size="21" fill="#496457">宿舍洗衣房，手机上一眼看清。</text>
+    <g font-size="13" font-weight="700" letter-spacing="1.3">
+      <rect x="48" y="268" width="111" height="32" rx="16" fill="#fff" stroke="#c8e2d5"/>
+      <text x="104" y="289" text-anchor="middle">MOBILE WEB</text>
+      <rect x="169" y="268" width="130" height="32" rx="16" fill="#fff" stroke="#c8e2d5"/>
+      <text x="234" y="289" text-anchor="middle">CLOUD HOSTED</text>
+      <rect x="309" y="268" width="101" height="32" rx="16" fill="#fff" stroke="#c8e2d5"/>
+      <text x="360" y="289" text-anchor="middle">OPEN · MIT</text>
+    </g>
+  </g>
+  <g fill="none" stroke="#0b1220" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M750 112c91 9 184 9 281-9" stroke="#7d9f8c"/>
+    <path d="m770 114 1 25m44-24 1 23" stroke="#496457"/>
+    <path d="m764 138 16-10 13 6 13-6 16 10-9 19-9-4v45h-24v-45l-8 4Z" fill="#fff"/>
+    <path d="M785 133q8 10 15 0"/>
+    <path d="M725 343h348" stroke="#7d9f8c"/>
+    <rect x="826" y="111" width="180" height="224" rx="18" fill="#fff"/>
+    <path d="M827 162h178"/>
+    <rect x="843" y="130" width="44" height="13" rx="4" fill="#d7f1e3" stroke="none"/>
+    <circle cx="974" cy="137" r="8" fill="#e7f2ec"/>
+    <circle cx="951" cy="137" r="3" fill="#0b1220" stroke="none"/>
+    <circle cx="916" cy="227" r="72" fill="#e7f2ec"/>
+    <circle cx="916" cy="227" r="59" fill="#d7f1e3"/>
+    <g clip-path="url(#door)">
+      <path d="M851 242q24-22 56 0t77 0v60H851Z" fill="#a7dbc2" stroke="none"/>
+      <path d="m890 202 13-8 13 6 13-6 13 8-8 14-8-3v35h-20v-35l-8 3Z" fill="#fff" stroke="#7d9f8c" stroke-width="2"/>
+      <path d="M868 253q28-17 54 0t48-1" stroke="#6cae8c" stroke-width="2"/>
+    </g>
+    <path d="M840 336v7m152-7v7" stroke-width="5"/>
+    <g transform="rotate(9 1052 229)">
+      <rect x="1014" y="159" width="80" height="146" rx="15" fill="#0b1220"/>
+      <rect x="1020" y="166" width="68" height="130" rx="10" fill="#fff" stroke="none"/>
+      <path d="M1042 172h23" stroke-width="3"/>
+      <circle cx="1054" cy="215" r="19" fill="#d7f1e3" stroke="none"/>
+      <path d="m1046 215 6 6 11-13" stroke="#26734b" stroke-width="3"/>
+      <path d="M1032 250h43m-43 10h32" stroke="#7d9f8c" stroke-width="3"/>
+      <rect x="1032" y="276" width="43" height="8" rx="4" fill="#d7f1e3" stroke="none"/>
+    </g>
+    <g stroke="#7d9f8c"><path d="M1061 100v14m-7-7h14M741 260v12m-6-6h12"/><circle cx="1100" cy="132" r="5"/><circle cx="782" cy="228" r="4"/></g>
+  </g>
+</svg>

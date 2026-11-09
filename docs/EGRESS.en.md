@@ -31,7 +31,7 @@ Check the latest sync time, consecutive failures and upstream diagnostics. Disti
 
 The server combines sync requests for a partition, limits page concurrency and preserves the previous complete snapshot on failure. A successful subset of floors or categories must not be published as a complete device list. Stale data displays a pending-update state, and unknown data does not advance fault confirmation.
 
-Changing the scheduler platform changes only where the trigger request originates. It does not change the WeShirt server's connection to the upstream machine service. Diagnose connectivity or adjust the server deployment if that egress fails. Do not publish old scraper scripts, real hosts, upstream credentials or raw responses.
+A trigger-only function does not change the Edge server's upstream network route. If a separate route is needed, use the [CloudBase fetch adapter](../tools/cloudbase-fn/weshirt-sync-ingest/README.en.md). It reuses the shared client, fetches a complete snapshot and forwards it to the same Edge processing flow. Do not publish legacy scripts containing real hosts, upstream credentials or raw responses.
 
 ## Local validation
 

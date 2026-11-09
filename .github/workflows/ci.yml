@@ -21,11 +21,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Set up Node.js 22
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -35,6 +35,8 @@ jobs:
         run: npm test
       - name: Build frontend
         run: npm run build
+      - name: Build CloudBase fetch adapter
+        run: npm run build:cloudbase
       - name: Check Edge bundle compatibility
         if: ${{ hashFiles('functions/**/*.js') != '' }}
         run: npx --no-install esbuild 'functions/api/[[default]].js' --bundle --format=esm --platform=browser --target=es2022 --outfile=/tmp/weshirt-edge-check.mjs

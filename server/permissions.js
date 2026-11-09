@@ -6,6 +6,21 @@ import { withOperationLock } from '../packages/core/operations.js'
 
 const idOk=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(value)
 const readMethod=method=>['GET','HEAD','OPTIONS'].includes(method)
+// These are the only admin mutations whose handlers operate on one bounded target.
+// Global handlers must never become scoped just because their body names a dorm.
+const SCOPED_ADMIN_WRITES=[
+  ['adminUsers','POST',/^\/api\/admin\/user\/[^/]+$/],
+  ['adminUsers','DELETE',/^\/api\/admin\/users?\/[^/]+$/],
+  ['adminMachines','POST',/^\/api\/admin\/machine\/[^/]+\/(?:clear-occupancy|clear-queue)$/],
+  ['adminMessages','DELETE',/^\/api\/(?:admin\/message|messages)\/[^/]+$/],
+  ['adminMessages','POST',/^\/api\/messages\/[^/]+\/pin$/],
+  ['adminMessages','PATCH',/^\/api\/messages\/[^/]+\/pin$/],
+  ['adminMessages','POST',/^\/api\/moderation\/mutes$/],
+  ['adminMessages','DELETE',/^\/api\/moderation\/mutes\/[^/]+$/],
+  ['adminAnnouncements','POST',/^\/api\/admin\/announcements$/],
+  ['adminAnnouncements','DELETE',/^\/api\/admin\/announcements\/[^/]+$/],
+]
+const scopedAdminWriteAllowed=(resource,method,path)=>SCOPED_ADMIN_WRITES.some(([key,verb,pattern])=>key===resource&&verb===method&&pattern.test(path))
 export function resourceFor(path,method='GET'){
   if(/^\/api\/admin\/(?:login|logout|session|permissions)(?:\/|$)/.test(path)||path==='/api/user/permissions')return null
   if(path.startsWith('/api/admin/')){
@@ -68,6 +83,9 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     if(explicit.some(code=>!allowed(code)))return apiErr('forbidden','该楼栋不在授权范围内',403)
     if(c.req.query('machineId')&&!allowed(dormOf(c.req.query('machineId'))))return apiErr('forbidden','该机器不在授权范围内',403)
     const isWrite=mode==='operate'
+    const isAdminWrite=isWrite&&resource.startsWith('admin')
+    if(isAdminWrite&&!scopedAdminWriteAllowed(resource,c.req.method,c.req.path))return apiErr('forbidden','此批量操作需要全部楼栋权限，请选择具体楼栋目标',403)
+    if(isAdminWrite&&c.req.query('building')&&c.req.query('building')!==bid)return apiErr('forbidden','该数据源不在授权操作范围内',403)
     let body={}
     if(isWrite&&c.req.raw.body){
       if(Number(c.req.header('content-length'))>1024*1024)return apiErr('too_large','请求内容过长',413)
@@ -78,8 +96,10 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
       }catch{}
     }
     let targetCodes=[]
-    if(body?.dorm||body?.channel||body?.dormBuilding)targetCodes.push(body.dorm||body.channel||body.dormBuilding)
-    if(body?.machineId)targetCodes.push(dormOf(body.machineId))
+    if(!isAdminWrite){
+      if(body?.dorm||body?.channel||body?.dormBuilding)targetCodes.push(body.dorm||body.channel||body.dormBuilding)
+      if(body?.machineId)targetCodes.push(dormOf(body.machineId))
+    }
     const suffix=decodeURIComponent(c.req.path.split('/').at(-1)||'')
     if(resource==='tasks'&&c.req.path!=='/api/tasks'){
       const taskId=c.req.path.endsWith('/take')?c.req.path.split('/').at(-2):suffix
@@ -92,21 +112,26 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     }
     if(resource==='adminUsers'&&/^\/api\/admin\/users?\/[^/]+$/.test(c.req.path)){
       const target=await store.get('user:'+suffix,null)
-      if(target)targetCodes.push(target.dormBuilding)
+      if(target||isAdminWrite)targetCodes.push(target?.dormBuilding)
+      if(isAdminWrite&&Object.hasOwn(body||{},'dormBuilding'))targetCodes.push(body.dormBuilding)
     }
     if(resource==='adminMachines'&&/^\/api\/admin\/machine\//.test(c.req.path))targetCodes.push(dormOf(c.req.path.split('/')[4]))
     if(['messages','adminMessages'].includes(resource)&&/^\/api\/(?:messages|admin\/message)\//.test(c.req.path)){
       const msgId=c.req.path.endsWith('/pin')?c.req.path.split('/').at(-2):suffix
       const messages=await store.get('messages:'+bid,[]),message=messages.find(m=>m.id===msgId)
-      if(message)targetCodes.push(message.channel||message.dormBuilding||dormOf(message.machineId))
+      if(message||isAdminWrite)targetCodes.push(message&&(message.channel||message.dormBuilding||dormOf(message.machineId)))
     }
     if(isWrite&&resource==='messages'&&!targetCodes.length)targetCodes.push(user?.dormBuilding||site.buildings[0]?.code)
     if(resource==='inspections'&&c.req.path.endsWith('/photo')){const id=c.req.path.split('/').at(-2),rows=await store.get('inspections:'+bid,[]),entry=rows.find(row=>row.id===id);if(entry)targetCodes.push(entry.dormBuilding)}
-    if(resource==='adminMessages'&&body?.userId){const target=await store.get('user:'+body.userId,null);targetCodes.push(target?.dormBuilding)}
+    if(resource==='adminMessages'&&isAdminWrite&&/^\/api\/moderation\/mutes(?:\/[^/]+)?$/.test(c.req.path)){
+      const uid=c.req.method==='DELETE'?suffix:body?.userId
+      const target=uid?await store.get('user:'+uid,null):null
+      targetCodes.push(target?.dormBuilding)
+    }
     if(resource==='adminAnnouncements'&&isWrite){
       if(c.req.method==='POST')targetCodes.push(body?.dormBuilding||null)
-      const announcementId=body?.id||(c.req.method==='DELETE'?suffix:null)
-      if(announcementId){const announcements=await store.get('announcements',[]),entry=announcements.find(row=>row.id===announcementId);if(entry)targetCodes.push(entry.dormBuilding)}
+      const announcementId=c.req.method==='DELETE'?suffix:body?.id
+      if(announcementId){const announcements=await store.get('announcements',[]),entry=announcements.find(row=>row.id===announcementId);targetCodes.push(entry?.dormBuilding)}
     }
     if(targetCodes.some(code=>!allowed(code)))return apiErr('forbidden','目标不在授权操作范围内',403)
     // A scoped manager cannot use an unscoped bulk operation or write an all-building announcement.
