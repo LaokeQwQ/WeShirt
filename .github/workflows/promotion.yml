@@ -1,0 +1,31 @@
+name: Promotion
+
+# 只检查可信 base 上的元数据规则。绝不 checkout 或运行 PR 的代码，也不使用 secrets。
+on:
+  pull_request_target:
+    branches: [master]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Promotion policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require same-repository dev to master
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+          const pr = event.pull_request;
+          const repository = process.env.GITHUB_REPOSITORY;
+          if (!pr || pr.base?.ref !== 'master' || pr.head?.ref !== 'dev' ||
+              pr.head?.repo?.full_name !== repository || pr.base?.repo?.full_name !== repository) {
+            console.error('Production changes must come from this repository\'s dev branch into master.');
+            process.exit(1);
+          }
+          console.log('Verified same-repository dev → master promotion.');
+          NODE
