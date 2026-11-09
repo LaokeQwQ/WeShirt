@@ -27,7 +27,7 @@
 
 ## 结果
 
-成功返回 `{ "ok": true, "status": 200 }`。失败只返回固定原因分类和可选 HTTP 状态：`missing_sync_key`、`invalid_sync_url`、`timeout`、`network_error`、`response_error`、`request_error` 或 `http_error`。
+成功返回 `{ "ok": true, "status": 200 }`。失败返回固定原因分类、`status` 和 `eventId`：`missing_sync_key`、`invalid_sync_url`、`timeout`、`network_error`、`response_error`、`request_error` 或 `http_error`。收到服务端事件标识时沿用该标识；否则生成 `trigger_` 标识，未获得 HTTP 响应时状态为 `0`。失败执行仅记录这三个安全字段，便于查找对应调用。
 
 函数不打印请求配置、密钥、完整 URL 或响应正文。部署验证时在后台查看同步时间是否推进、告警是否出现；不要把密钥粘贴到公开问题、截图或日志中。
 

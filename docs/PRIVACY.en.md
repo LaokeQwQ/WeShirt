@@ -16,6 +16,8 @@ CloudBase runs only the sync trigger. EdgeOne APIs store application data in bou
 
 Application telemetry accepts fixed events, route categories, dorm codes and bounded numbers. It aggregates by day and retains at most 14 days. It does not store user IDs, IP addresses, full URL queries, message bodies, error stacks or credentials. Infrastructure access logs are separately managed by the deployment operator.
 
+Error records may include a random event ID, status and an allowed error category to correlate page feedback with recent admin errors. Browser exceptions without an HTTP response use status `0`; the same exception object is deduplicated. Console output contains only these safe fields, without exception messages or stacks. Disabling telemetry or enabling Do Not Track prevents client uploads.
+
 Telemetry respects browser Do Not Track and can be disabled in Settings. API latency, Web Vitals and 3D performance are sampled metrics and cannot establish precise active-user counts.
 
 ## User controls and third parties
@@ -36,7 +38,7 @@ Status depends on the upstream service and sync cycle. Estimated times are label
 
 Exclude `.env`, live data, account pools, DingTalk credentials, VAPID private keys, AI keys, personal screenshots and deployment caches. Inspect files and history before publication. Rotate exposed credentials; deleting a file does not invalidate its old contents.
 
-The sync trigger returns fixed result categories and HTTP status without printing URL secrets, request bodies or response bodies. Share sanitized timestamps, categories and status codes when troubleshooting. See the repository license and acknowledgment section for project and third-party licensing.
+The sync trigger returns a fixed result category, status and event ID, and logs only these three fields on failure. It does not print URL secrets, request bodies or response bodies. Share sanitized timestamps, event IDs, categories and status codes when troubleshooting. See the repository license and acknowledgment section for project and third-party licensing.
 
 ## Operation records
 

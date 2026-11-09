@@ -3,22 +3,39 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createSingleFlight } from '../frontend/src/loginFlow.js'
 
-async function frontend(fetch) {
+async function frontend(fetch, track = () => {}) {
   const source = await readFile(new URL('../frontend/src/api.js', import.meta.url), 'utf8')
   const map = new Map([['ws_token', 'initial-user-token']])
   const localStorage = { getItem: (key) => map.get(key) || null, setItem: (key, value) => map.set(key, String(value)), removeItem: (key) => map.delete(key) }
   const body = source.replace(/^import[^\n]*\n/gm, '').replace(/import\.meta\.env\.VITE_API_BASE/g, "''").replace(/import\.meta\.env\.DEV/g, 'false').replace(/^export\s+(?=(?:async\s+)?function|const)/gm, '').replace(/^export\s*\{[^}]*\}\s*;?/gm, '')
-  return new Function('fetch', 'localStorage', 'createSingleFlight', 'track', 'getTelemetryContext', body + '\nreturn { api, claimCode, startDingLogin, setToken, onNeedLogin, NEED_LOGIN }')(fetch, localStorage, createSingleFlight, () => {}, () => ({}))
+  return new Function('fetch', 'localStorage', 'createSingleFlight', 'track', 'getTelemetryContext', body + '\nreturn { api, claimCode, startDingLogin, setToken, onNeedLogin, NEED_LOGIN }')(fetch, localStorage, createSingleFlight, track, () => ({}))
 }
-const reply = (data, status = 200, eventId = 'evt_test123456') => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'X-Event-ID': eventId } })
+const reply = (data, status = 200, eventId = 'evt_1234567890abcdef12345678') => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'X-Event-ID': eventId } })
+
+test('被页面捕获的网络错误仍将同一事件ID传给遥测；非法服务端标识不会回显', async () => {
+  const records = []
+  const client = await frontend(async () => { throw new Error('private network configuration') }, (name, fields) => records.push({ name, fields }))
+  let failure
+  try { await client.api('/api/machines') } catch (error) { failure = error }
+  assert.match(failure.eventId, /^client_[a-f0-9]{24}$/)
+  assert.equal(records[0].name, 'api_request')
+  assert.equal(records[0].fields.eventId, failure.eventId)
+  assert.equal(records[0].fields.status, 0)
+  const invalid = await frontend(async () => reply({ error: { message: '失败' } }, 403, 'private-key-do-not-echo'))
+  await assert.rejects(() => invalid.api('/api/machines'), error => {
+    assert.match(error.eventId, /^client_[a-f0-9]{24}$/)
+    assert.equal(error.message.includes('private-key'), false)
+    return true
+  })
+})
 
 test('前端HTTP错误保留status/code/eventId且展示简短追踪码，不把query或body拼到消息', async () => {
-  const client = await frontend(async () => reply({ error: { code: 'bad_param', message: '内容无效', eventId: 'evt_test123456', status: 400 } }, 400))
+  const client = await frontend(async () => reply({ error: { code: 'bad_param', message: '内容无效', eventId: 'evt_1234567890abcdef12345678', status: 400 } }, 400))
   await assert.rejects(() => client.api('/api/tasks?private=secret-query', { method: 'POST', body: { note: 'private-body' } }), (error) => {
     assert.equal(error.status, 400)
     assert.equal(error.code, 'bad_param')
-    assert.equal(error.eventId, 'evt_test123456')
-    assert.match(error.message, /HTTP 400.*evt_test123456/)
+    assert.equal(error.eventId, 'evt_1234567890abcdef12345678')
+    assert.match(error.message, /HTTP 400.*evt_1234567890abcdef12345678/)
     assert.equal(error.message.includes('secret-query'), false)
     assert.equal(error.message.includes('private-body'), false)
     return true
@@ -73,7 +90,7 @@ test('上传不自动加去重key；登录信号兼容NEED_LOGIN且仍带HTTP追
   await assert.rejects(() => client.api('/api/inspections', { method: 'POST', retry: false, body: { photoData: 'data:image/png' } }), (error) => {
     assert.equal(error.message, client.NEED_LOGIN)
     assert.equal(error.status, 401)
-    assert.equal(error.eventId, 'evt_test123456')
+    assert.equal(error.eventId, 'evt_1234567890abcdef12345678')
     assert.equal(error.code, 'need_login')
     return true
   })

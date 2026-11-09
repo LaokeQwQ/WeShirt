@@ -85,3 +85,43 @@ test('missing eventual-consistency user record returns recoverable status and ne
  await store.put('user:student',{...saved,nick:'保持这个昵称'})
  for(let i=0;i<3;i++)assert.equal((await call('/api/auth/me',{user:'student'})).data.user.nick,'保持这个昵称')
 })
+
+test('machine action aliases follow board operate permission and cancellation checks the existing queue target',async t=>{
+ const {store,call}=await fixture(t)
+ await call('/api/admin/permissions/student',{method:'PATCH',body:{permissions:{board:grant(true,false,['guiyuan'],[]),queue:grant(true,true,['guiyuan'])}}})
+ for(const path of ['/api/marks','/api/faults/recover','/api/urge','/api/dryer/stuck','/api/urge/reveal']){
+  assert.equal((await call(path,{user:'student',method:'POST',body:{machineId:'g1',note:'不能修改'}})).status,403,path)
+ }
+ assert.equal(await store.get('marks:g1',null),null)
+ assert.equal(await store.get('faults:b1',null),null)
+ await store.put('queue:b1',[{id:'q1',userId:'student',machineId:'l1',at:new Date().toISOString()}])
+ assert.equal((await call('/api/queue',{user:'student',method:'DELETE'})).status,403)
+ assert.equal((await store.get('queue:b1',[])).length,1)
+})
+
+test('moderation through public message routes obeys adminMessages permissions while own deletion remains available',async t=>{
+ const {store,call}=await fixture(t)
+ await store.put('messages:b1',[{id:'m_other',userId:'other',channel:'guiyuan',text:'其他人的留言',at:new Date().toISOString()},{id:'m_own',userId:'admin',channel:'guiyuan',text:'我的留言',at:new Date().toISOString()}])
+ await call('/api/admin/permissions/admin',{method:'PATCH',body:{permissions:{adminMessages:grant(true,false)}}})
+ const listed=await call('/api/messages?channel=guiyuan',{user:'admin'})
+ assert.equal(listed.data.permissions.canModerate,false)
+ const other=listed.data.messages.find(row=>row.id==='m_other')
+ assert.deepEqual(other.permissions,{canDelete:false,canPin:false,canMute:false})
+ assert.equal(other.authorId,undefined)
+ for(const method of ['POST','PATCH'])assert.equal((await call('/api/messages/m_other/pin',{user:'admin',method,body:{pinned:true}})).status,403)
+ assert.equal((await call('/api/messages/m_other',{user:'admin',method:'DELETE'})).status,403)
+ assert.equal((await call('/api/messages/m_own',{user:'admin',method:'DELETE'})).status,200)
+ assert.equal((await store.get('messages:b1',[])).some(m=>m.id==='m_other'),true)
+})
+
+test('scoped announcements validate both saved and destination building, including deletion and global moves',async t=>{
+ const {store,call}=await fixture(t)
+ const rows=[{id:'a_gui',version:1,title:'桂园公告',markdown:'原文',dormBuilding:'guiyuan'},{id:'a_liu',version:1,title:'柳园公告',markdown:'原文',dormBuilding:'liuyuan'}]
+ await store.put('announcements',structuredClone(rows))
+ await call('/api/admin/permissions/admin',{method:'PATCH',body:{permissions:{adminAnnouncements:grant(true,true,['guiyuan'])}}})
+ for(const body of [{id:'a_liu',dormBuilding:'guiyuan'},{id:'a_gui',dormBuilding:null},{id:'a_gui'}])assert.equal((await call('/api/admin/announcements',{user:'admin',method:'POST',body:{version:1,title:'不可修改',markdown:'新文',...body}})).status,403)
+ assert.deepEqual(await store.get('announcements',[]),rows)
+ assert.equal((await call('/api/admin/announcements/a_liu',{user:'admin',method:'DELETE'})).status,403)
+ assert.equal((await call('/api/admin/announcements/a_gui',{user:'admin',method:'DELETE'})).status,200)
+ assert.deepEqual((await store.get('announcements',[])).map(row=>row.id),['a_liu'])
+})

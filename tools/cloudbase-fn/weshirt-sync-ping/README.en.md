@@ -27,7 +27,7 @@ Each request has a 30-second total timeout, follows no redirects and does not re
 
 ## Results
 
-HTTP success returns `{ "ok": true, "status": 200 }`. Failures return a fixed category and optional status: `missing_sync_key`, `invalid_sync_url`, `timeout`, `network_error`, `response_error`, `request_error` or `http_error`.
+HTTP success returns `{ "ok": true, "status": 200 }`. Failures return a fixed category, `status` and `eventId`: `missing_sync_key`, `invalid_sync_url`, `timeout`, `network_error`, `response_error`, `request_error` or `http_error`. A valid server event ID is preserved; otherwise a `trigger_` ID is generated. Status `0` means no HTTP response was obtained. Failure logs contain only these three safe fields for correlation.
 
 The function does not print configuration, secrets, full URLs or response bodies. Check admin sync timestamps and alerts to assess actual business health. Do not paste keys into public issues, screenshots or logs.
 

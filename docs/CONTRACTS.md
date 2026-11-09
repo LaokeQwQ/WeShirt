@@ -121,7 +121,7 @@ export const DEFAULT_STATE_MAP
 
 ```js
 export function computeLeftMin(finishAt, nowISOstr)      // → 整数分钟，null 安全
-export function buildBoard(machines, { buildingId, buildingName }) 
+export function buildBoard(machines, { buildingId, buildingName })
 //   → { buildingId, buildingName, updatedAt, total, idle, occupied,
 //       floors: [{ code, machines: [{...machine, leftMin, stateSince?}] }] }
 export function diffEvents(prevMachines, nextMachines)
@@ -163,7 +163,7 @@ export function createWebPush(env)
 
 ## 3. HTTP API（全部 `/api` 前缀，JSON）
 
-统一错误：`{ error: { code, message } }`，HTTP 4xx/5xx。
+统一错误：`{ error: { code, message, status, eventId } }`，HTTP 4xx/5xx，并通过 `X-Event-ID` 返回相同关联标识。
 鉴权：`Authorization: Bearer <token>`（除公开接口）。
 
 | 方法 | 路径 | 入参 | 出参 | 鉴权 |
@@ -318,7 +318,7 @@ notices:{building} [ { id, title, body, at, pin } ]
 - 机器返回 `dormBuilding`、`kind`、`slot`、`displayName`；人工桂园机位绑定优先，其次设备明确住宿楼，最后名称归属；无法确认归属的设备不混入任意楼。`GET /api/admin/status` 增加 `dormBuildings:[{code,name,total,idle,occupied,faulty,unknown}]`。
 - `POST /api/telemetry` 公开接收 `{events:[{name,route,dorm,...白名单数值/枚举}]}`，每批最多20、正文16KiB；仅接受 page_view / api_request / web_vital / client_error / room_performance / room_interaction / dorm_select。服务端去掉任意额外字段，时间以服务端为准，不存用户ID、IP、凭据、查询参数、消息正文或错误堆栈。
 - 遥测按天/楼栋聚合，最多保存14天，单日事件数有上限；浏览器批量发送并限制队列，失败不影响主业务。尊重浏览器Do Not Track及本机关闭设置。
-- `GET /api/admin/telemetry?days=7&dorm=code` 必须后台鉴权，days为1–14，返回 `{days,received,pageViews,errors,api:{count,failed,avgMs,p95Ms},vitals:{lcpMs,cls,inpMs},room:{samples,avgFps,avgDrawCalls,avgTriangles,quality:{}},routes:[{route,views}],buildings:[{code,count}],recentErrors:[{at,route,kind,status?}],retentionDays:14}`。接口耗时为采样请求，INP为浏览器交互延迟近似值，不用于识别个人或推算准确活跃人数。
+- `GET /api/admin/telemetry?days=7&dorm=code` 必须后台鉴权，days为1–14，返回 `{days,received,pageViews,errors,api:{count,failed,avgMs,p95Ms},vitals:{lcpMs,cls,inpMs},room:{samples,avgFps,avgDrawCalls,avgTriangles,quality:{}},routes:[{route,views}],buildings:[{code,count}],recentErrors:[{at,route,kind,status,eventId?}],retentionDays:14}`。接口耗时为采样请求，INP为浏览器交互延迟近似值，不用于识别个人或推算准确活跃人数。
 - 任务倒计时到点只描述计时结束；实际机器空闲事件才明确设备已结束，洗衣与烘干文案分别表达，并给出取衣确认入口。
 
 ## 2026-11-09 第三轮：运营、朋友与助手
@@ -363,5 +363,6 @@ notices:{building} [ { id, title, body, at, pin } ]
 - 范围限制在服务端验证目标并过滤列表；限定楼栋的管理员不能执行无目标的全局批量操作。全局网站、模型、系统及运营配置不接受楼栋范围设置。身份撤销和个人规则更改使旧幂等响应失效。公开看板仍公开，个人查看规则不是隐藏公开设备数据的安全边界。
 - 资料读空返回可恢复的 `409 account_out_of_sync`，不生成临时账号或随机昵称覆盖缓存；前端忽略旧账号和旧版本响应。用户界面不显示内部 ID，管理定位仍使用稳定服务器 ID。
 - 所有 API 响应带 `X-Event-ID`；HTTP 错误为 `{error:{code,message,status,eventId}}`，5xx 不返回异常堆栈或配置。前端保留错误属性并展示状态码与事件 ID；网络失败使用 `client_` 事件 ID 和状态 `0`，表示请求未获得可关联的服务端响应。
+- 浏览器 Vue、全局异常及未处理 Promise 共享安全追踪器，同一异常对象仅记录一次，沿用合法 API 事件或生成 `client_24hex`；没有 HTTP 响应时状态为 `0`。匿名遥测只接受这些严格格式的 ID、状态和白名单错误类别，后台最近错误可查看，仍尊重遥测关闭与 Do Not Track。
 - 普通已登录 JSON 写请求可使用 `Idempotency-Key`，相同账号、请求与标识仅执行一次，不同正文复用标识返回409；前端并发同内容共用请求，网络失败重试保留标识。回复最多缓存2分钟、每用户12条；上传、认证和系统触发等不参与通用回复缓存。
 - 业务写操作及后台敏感读取、导出记录操作者、路由模板、目标、结果、状态码和事件 ID，不记录正文、查询凭据、照片、私聊或密钥。普通轮询与匿名遥测不产生身份审计。日志按天500条环形保留，默认30天有限清理；运行时互斥避免同实例写覆盖。跨 Edge 节点的严格事务仍需强一致存储或单写入协调，不能宣称全局事务或绝对零丢失。

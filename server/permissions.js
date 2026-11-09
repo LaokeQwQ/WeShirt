@@ -20,13 +20,16 @@ export function resourceFor(path,method='GET'){
     if(part==='building-groups')return 'adminSite'
     if(part==='site')return 'adminSite'
     if(part==='assistant')return 'adminAssistant'
-    if(part.startsWith('audit'))return 'adminAudit'
+    if(part.startsWith('audit')||part.startsWith('urge-audit'))return 'adminAudit'
     return 'adminSystem'
   }
+  if(path.startsWith('/api/debug/')||path==='/api/upstream-info')return 'adminSystem'
   if(path==='/api/mapping')return readMethod(method)?'board':'adminMachines'
   if(/^\/api\/(?:machines|occupancy)(?:\/|$)/.test(path))return 'board'
+  if(['/api/marks','/api/faults/recover','/api/urge','/api/urge/reveal','/api/dryer/stuck'].includes(path))return 'board'
   if(path.startsWith('/api/tasks'))return 'tasks'
   if(path.startsWith('/api/queue'))return 'queue'
+  if(/^\/api\/messages\/[^/]+\/pin$/.test(path))return 'adminMessages'
   if(path.startsWith('/api/messages'))return 'messages'
   if(path.startsWith('/api/moderation'))return 'adminMessages'
   if(path.startsWith('/api/inspections'))return 'inspections'
@@ -37,12 +40,18 @@ export function resourceFor(path,method='GET'){
 
 export function registerPermissionMiddleware(app,{store,env={},authenticate,checkSuperAdmin}){
   app.use('/api/*',async(c,next)=>{
-    const resource=resourceFor(c.req.path,c.req.method)
+    let resource=resourceFor(c.req.path,c.req.method)
     if(!resource||c.req.method==='OPTIONS')return next()
     if(await checkSuperAdmin?.(c))return next()
     const user=await authenticate(c)
     // Existing role guards remain authoritative; sparse rules only add restrictions.
     if(!user || !await store.get('access:user:'+user.id,null))return next()
+    if(c.req.method==='DELETE'&&/^\/api\/messages\/[^/]+$/.test(c.req.path)){
+      const messageId=c.req.path.split('/').at(-1)
+      const messages=await store.get('messages:'+(env.BUILDING_ID||'b1'),[])
+      const message=messages.find(row=>row.id===messageId)
+      if(message&&message.userId!==user.id)resource='adminMessages'
+    }
     const site=await getSiteConfig(store),access=await getUserPermissions(store,user,site.buildings)
     c.set('userAccess',access)
     const row=access.permissions[resource],mode=readMethod(c.req.method)||c.req.path==='/api/mcp'?'view':'operate'
@@ -77,6 +86,10 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
       const own=await store.get('tasks:'+user?.id,[]),task=own.find(t=>t.id===taskId)
       if(task)targetCodes.push(dormOf(task.machineId))
     }
+    if(resource==='queue'&&c.req.method==='DELETE'&&!c.req.query('machineId')){
+      const queue=await store.get('queue:'+bid,[])
+      targetCodes.push(...queue.filter(row=>row.userId===user.id).map(row=>dormOf(row.machineId)))
+    }
     if(resource==='adminUsers'&&/^\/api\/admin\/users?\/[^/]+$/.test(c.req.path)){
       const target=await store.get('user:'+suffix,null)
       if(target)targetCodes.push(target.dormBuilding)
@@ -90,6 +103,11 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     if(isWrite&&resource==='messages'&&!targetCodes.length)targetCodes.push(user?.dormBuilding||site.buildings[0]?.code)
     if(resource==='inspections'&&c.req.path.endsWith('/photo')){const id=c.req.path.split('/').at(-2),rows=await store.get('inspections:'+bid,[]),entry=rows.find(row=>row.id===id);if(entry)targetCodes.push(entry.dormBuilding)}
     if(resource==='adminMessages'&&body?.userId){const target=await store.get('user:'+body.userId,null);targetCodes.push(target?.dormBuilding)}
+    if(resource==='adminAnnouncements'&&isWrite){
+      if(c.req.method==='POST')targetCodes.push(body?.dormBuilding||null)
+      const announcementId=body?.id||(c.req.method==='DELETE'?suffix:null)
+      if(announcementId){const announcements=await store.get('announcements',[]),entry=announcements.find(row=>row.id===announcementId);if(entry)targetCodes.push(entry.dormBuilding)}
+    }
     if(targetCodes.some(code=>!allowed(code)))return apiErr('forbidden','目标不在授权操作范围内',403)
     // A scoped manager cannot use an unscoped bulk operation or write an all-building announcement.
     if(isWrite&&resource.startsWith('admin')&&!targetCodes.length)return apiErr('forbidden','此批量操作需要全部楼栋权限，请选择具体楼栋目标',403)

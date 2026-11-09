@@ -37,7 +37,7 @@
               <p class="msg-text">{{ message.text }}</p>
               <div class="msg-actions">
                 <button type="button" @click="replyTo(message)">回复</button>
-                <button v-if="message.permissions?.canDelete || message.mine" type="button" :disabled="Boolean(moderatingId)" @click="remove(message)">{{ moderatingId === 'delete:' + message.id ? '删除中…' : '删除' }}</button>
+                <button v-if="message.permissions?.canDelete ?? message.mine" type="button" :disabled="Boolean(moderatingId)" @click="remove(message)">{{ moderatingId === 'delete:' + message.id ? '删除中…' : '删除' }}</button>
                 <button v-if="message.permissions?.canPin" type="button" :disabled="Boolean(moderatingId)" @click="togglePin(message)">{{ message.pinned ? '取消置顶' : '置顶' }}</button>
                 <button v-if="message.permissions?.canMute && message.authorId" type="button" :disabled="Boolean(moderatingId)" @click="openMute(message)">禁言</button>
               </div>
