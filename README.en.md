@@ -33,7 +33,7 @@ The recommended **Tencent CloudBase + Tencent EdgeOne Pages** setup gives your l
 
 <img src="docs/assets/cloud.en.svg" alt="CloudBase triggers sync; EdgeOne Pages hosts the frontend, APIs and persistent KV; browsers access the site." width="100%" />
 
-EdgeOne Pages hosts the frontend, Edge APIs and persistent KV. CloudBase periodically calls the sync endpoint so machine checks continue when nobody has the page open. This setup does not use a CloudBase database.
+EdgeOne Pages hosts the frontend, Edge APIs and persistent KV. CloudBase schedules sync and can also fetch complete machine snapshots through a separate network route, then pass them to the same processing flow. Checks continue without an open page. This setup does not use a CloudBase database.
 
 Use `master` for production, `npm ci && npm run build` as the build command, and `dist` as the output directory. Follow the [deployment guide](docs/DEPLOYMENT.en.md) for KV, login and scheduled sync.
 

@@ -10,7 +10,7 @@ The public message channel and every dorm channel are public discussion areas. M
 
 Inspection data is separate from those public task records. Inspection photos and on-site notes are available only to volunteers currently assigned to that dorm, super-admins and admins; revocation blocks further access. The frontend compresses and re-encodes images, but inspect the photo for unrelated people or personal information before submitting. Server-side format and size checks do not review image content. Inspection history is limited to 200 records and 30 days. Expired entries cannot be read; associated photos are deleted in bounded batches on later reads or submissions. Issue notifications send machine details and an issue notice, without inspection photos or note text.
 
-CloudBase runs only the sync trigger. EdgeOne APIs store application data in bound persistent KV. Optional Node deployments use `DATA_DIR`. The operator manages access, backups and data lifecycle.
+CloudBase runs scheduled sync functions. The optional separate-fetch mode temporarily processes upstream machine status and forwards it without logging raw responses or credentials. EdgeOne APIs store application data in bound persistent KV; no CloudBase database is used. Optional Node deployments use `DATA_DIR`. The operator manages access, backups and data lifecycle.
 
 ## Telemetry
 

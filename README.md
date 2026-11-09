@@ -33,7 +33,7 @@
 
 <img src="docs/assets/cloud.svg" alt="CloudBase 触发同步，EdgeOne Pages 承载页面、API 和持久化 KV，手机浏览器访问站点。" width="100%" />
 
-EdgeOne Pages 负责网页、Edge API 和持久化 KV；CloudBase 定时调用同步接口，让无人访问时也能持续检查机器状态。这里不使用 CloudBase 数据库。
+EdgeOne Pages 负责网页、Edge API 和持久化 KV；CloudBase 定时触发同步，也可作为独立抓取出口，将完整设备快照交回同一套处理流程。无人访问时也会检查机器状态，不使用 CloudBase 数据库。
 
 生产分支选 `master`，构建命令为 `npm ci && npm run build`，输出目录为 `dist`。KV 绑定、登录配置和定时触发步骤见[部署指南](docs/DEPLOYMENT.md)。
 

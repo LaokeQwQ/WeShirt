@@ -710,7 +710,7 @@ let environmentTarget = null
 let resizeObserver = null
 let interacting = false
 let lastInteractionAt = 0
-let clock = null
+let timer = null
 let flicker = 0
 let prevT = 0
 
@@ -2668,7 +2668,8 @@ function initThree() {
     scene.add(pl)
   }
 
-  clock = new THREE.Clock()
+  timer = new THREE.Timer()
+  timer.connect(document)
   animate()
 
   // 交互
@@ -2705,7 +2706,8 @@ function initThree() {
       syncData().catch(() => {})
       lastRafTs = 0
       rafAccMs = 0
-      prevT = clock?.getElapsedTime() || 0
+      timer?.reset()
+      prevT = timer?.getElapsed() || 0
       if (!rafId) animate()
     } else if (rafId) {
       cancelAnimationFrame(rafId)
@@ -2778,7 +2780,7 @@ function applyQuality(tier) {
   if (renderer) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.dprCap))
     renderer.shadowMap.enabled = q.shadow
-    renderer.shadowMap.type = tier === 'high' ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap
+    renderer.shadowMap.type = THREE.PCFShadowMap
     renderer.shadowMap.needsUpdate = true
   }
 }
@@ -2895,7 +2897,8 @@ function animate(ts) {
   // 只扣掉一个周期，积压最多留一个周期：落后时不要「连追几帧」，那样更抖
   rafAccMs = interval > 0 ? Math.max(0, Math.min(rafAccMs - interval, interval)) : 0
 
-  const t = clock ? clock.getElapsedTime() : 0
+  timer?.update(ts)
+  const t = timer?.getElapsed() || 0
   const dt = Math.min(0.06, Math.max(0.001, t - prevT))
   prevT = t
 
@@ -3532,6 +3535,7 @@ function releaseThree() {
   resizeObserver = null
   window.removeEventListener('resize', resizeHandler)
   document.removeEventListener('visibilitychange', visHandler)
+  timer?.dispose()
   controls?.removeEventListener('start', onControlsStart)
   controls?.removeEventListener('end', onControlsEnd)
   controls?.dispose()
@@ -3549,7 +3553,7 @@ function releaseThree() {
   renderer?.renderLists.dispose()
   renderer?.dispose()
   renderer?.domElement.remove()
-  renderer = scene = camera = controls = clock = null
+  renderer = scene = camera = controls = timer = null
   windowSashes.length = 0
   machines.length = 0
   clickTargets = []
