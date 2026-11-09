@@ -1,4 +1,5 @@
 import { normalizeDormBuilding, dormBuildingName, filterDormFloors } from './buildings.js'
+import { resolveMachineKind } from './machine-kind.js'
 
 export const ASSISTANT_LIMITS = Object.freeze({ daily: 20, minute: 3, input: 1000, history: 20, context: 16, retentionDays: 14, responseBytes: 131072, timeoutMs: 15000 })
 export const BUILTIN_SKILLS = Object.freeze([
@@ -119,7 +120,7 @@ export function machineStatus(result, user, kind = 'all', now = Date.now()) {
   const machines = []
   for (const floor of floors) for (const machine of floor.machines || []) {
     const slot = Object.entries(mapping).find(([, id]) => String(id) === String(machine.id))?.[0] || ''
-    const type = slot ? (/(?:^|-)D\d+$/.test(slot) ? 'dryer' : 'washer') : machine.kind === 'dryer' || /烘干|dry/i.test(machine.name || '') ? 'dryer' : 'washer'
+    const type = resolveMachineKind(machine,mapping)
     if (kind !== 'all' && type !== kind) continue
     const state = !stale && ['idle', 'occupied', 'abnormal', 'faulty', 'busy', 'offline', 'unknown'].includes(machine.state) ? machine.state : 'unknown'
     const finishAt = Date.parse(machine.finishAt)

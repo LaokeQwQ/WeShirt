@@ -13,8 +13,9 @@ import { normalizeAvatar, normalizeAvatarUrl } from '../packages/core/profile.js
 import { verifyAdminSession, issueAdminSession, verifyToken } from '../packages/core/auth.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { withOperationLock } from '../packages/core/operations.js'
-import { DORM_BUILDINGS, normalizeDormBuilding, dormBuildingName, resolveMachineDorm } from '../packages/core/buildings.js'
+import { DORM_BUILDINGS, normalizeDormBuilding, normalizeKnownDormBuilding, dormBuildingName, resolveMachineDorm } from '../packages/core/buildings.js'
 import { computeLeftMin } from '../packages/core/machines.js'
+import { resolveMachineKind } from '../packages/core/machine-kind.js'
 
 // 管理鉴权：两种凭据都收
 //   1) 原始 ADMIN_TOKEN —— 脚本/自检/同步密钥场景，长期有效，别外传
@@ -61,7 +62,7 @@ function publicUserForAdmin(u, opts = {}) {
     // 与前台同一套白名单，脏值不要直接透出去
     notifyLeadMin: [0, 3, 5, 10].includes(Number(u.notifyLeadMin)) ? Number(u.notifyLeadMin) : 0,
     karma: u.karma || 0,
-    dormBuilding: normalizeDormBuilding(u.dormBuilding, opts.buildings),
+    dormBuilding: normalizeKnownDormBuilding(u.dormBuilding, opts.buildings),
     dormBuildingName: dormBuildingName(u.dormBuilding, opts.buildings),
   }
 }
@@ -674,7 +675,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       const q = String(c.req.query('q') || '').trim().toLowerCase()
       const dorm = c.req.query('dorm') || ''
       const buildings = (await getSiteConfig(store)).buildings
-      if (dorm && dorm !== 'unbound' && !normalizeDormBuilding(dorm,buildings)) return apiErr('bad_param', '住宿楼筛选无效')
+      if (dorm && dorm !== 'unbound' && !normalizeKnownDormBuilding(dorm,buildings)) return apiErr('bad_param', '住宿楼筛选无效')
       const requestedLimit = Number(c.req.query('limit') || 200)
       const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 200
       // store.list() 返回 [{ key, value }]，不是字符串数组
@@ -683,7 +684,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       for (const e of Array.isArray(entries) ? entries : []) {
         const u = e && e.value
         if (!u || typeof u !== 'object') continue
-        const userDorm = normalizeDormBuilding(u.dormBuilding,buildings)
+        const userDorm = normalizeKnownDormBuilding(u.dormBuilding,buildings)
         if (dorm && (dorm === 'unbound' ? Boolean(userDorm) : userDorm !== dorm)) continue
         if (q) {
           const hay = `${u.id} ${u.nick} ${u.dingUserId || ''} ${u.dingNick || ''}`.toLowerCase()
@@ -857,7 +858,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       const bid = buildingIdOf(c)
       const dorm = c.req.query('dorm') || ''
       const buildings = (await getSiteConfig(store)).buildings
-      if (dorm && dorm !== 'unbound' && !normalizeDormBuilding(dorm,buildings)) return apiErr('bad_param', '住宿楼筛选无效')
+      if (dorm && dorm !== 'unbound' && !normalizeKnownDormBuilding(dorm,buildings)) return apiErr('bad_param', '住宿楼筛选无效')
       const [entry, occ, queue, mapping] = await Promise.all([
         store.get(`machines:${bid}`, null), store.get(`occupancy:${bid}`, {}),
         store.get(`queue:${bid}`, []), store.get(`mapping:${bid}`, null),
@@ -886,8 +887,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
           if (dorm && (dorm === 'unbound' ? Boolean(machineDorm) : machineDorm !== dorm)) continue
           const o = occ?.[m.id] || null
           const slots = slotsById.get(String(m.id)) || []
-          const kind = slots.length ? (slots[0].startsWith('D') ? 'dryer' : 'washer')
-            : ['dryer', 'washer'].includes(m.kind) ? m.kind : String(m.name || '').includes('烘干') ? 'dryer' : 'washer'
+          const kind = resolveMachineKind(m,slotMap)
           const currentLeft = m.finishAt ? computeLeftMin(m.finishAt, now) : m.leftMin
           const leftMin = currentLeft == null ? null : Math.max(0, currentLeft)
           rows.push({

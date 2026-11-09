@@ -47,14 +47,18 @@ import { registerTaskMutationLock, withTaskMutation } from './task-mutation-lock
 import { processFavoriteReminders } from '../packages/core/favorites.js'
 import { processQueueReminders } from '../packages/core/queue-reminders.js'
 import { runOperations, applyMachineHealth, withOperationLock } from '../packages/core/operations.js'
-import { DORM_BUILDINGS, normalizeDormBuilding, dormBuildingName, resolveMachineDorm, filterDormFloors, summarizeDormBuildings } from '../packages/core/buildings.js'
+import { resolveMachineKind, normalizeMachineCategory } from '../packages/core/machine-kind.js'
+import { applyRegisteredAvailability } from '../packages/core/availability.js'
+import { processCommunityNotices } from '../packages/core/community-notices.js'
+import { pruneCommunityMedia } from './community-media.js'
+import { DORM_BUILDINGS, normalizeDormBuilding, dormBuildingName, resolveMachineDorm, filterDormFloors, summarizeDormBuildings, currentDormCatalog, enabledMachineBoard, isMachineDormEnabled } from '../packages/core/buildings.js'
 
 // 登记备注为当前机器面板公开纯文本，不自动发布到留言频道。
 function normalizeTaskNote(value) {
   return typeof value === 'string' ? value.replace(/[\p{Cc}\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/gu, ' ').trim() : ''
 }
 function taskDetailsView(task) {
-  return { note: Array.from(normalizeTaskNote(task?.note)).slice(0, 200).join(''), useDisinfectant: task?.useDisinfectant === true, selfCleaned: task?.selfCleaned === true }
+  return { note: Array.from(normalizeTaskNote(task?.note)).slice(0, 200).join(''), useDisinfectant: task?.useDisinfectant === true, selfCleaned: task?.selfCleaned === true, ...(task?.program==='self_clean'?{program:'self_clean'}:{}) }
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -68,12 +72,23 @@ const NOTIFY_LEADS = [0, 3, 5, 10] // 取衣提醒提前分钟，0 = 洗完再�
 const DORM_BUILDING_CODES = new Set(['guiyuan', 'liuyuan', 'meiyuan', 'zhuyuan'])
 
 // 现场机位类型优先于上游名称（例如 D1 的名字只有“柳园西”）。
-function machineKind(machine, mapping = {}) {
-  const bindings = Object.entries(mapping).filter(([, id]) => String(id) === String(machine?.id))
-  if (bindings.some(([slot]) => /^D\d+$/i.test(slot))) return 'dryer'
-  if (bindings.some(([slot]) => /^\d+$/.test(slot))) return 'washer'
-  if (machine?.kind === 'dryer' || machine?.kind === 'washer') return machine.kind
-  return String(machine?.name || '').includes('烘干') ? 'dryer' : 'washer'
+const machineKind = resolveMachineKind
+
+async function notifyCommunityUser(env,store,uid,notice){
+  const user=await store.get('user:'+uid,null)
+  if(!user||user.disabled||user.blocked||user.notifyOn===false)return {ok:false,skipped:true}
+  let dm={ok:false},pushOK=false
+  if(user.dingUserId){
+    try{const mod=await import('../packages/core/dingtalk.js');dm=await mod.createDingTalk(env).sendSingle(user.dingUserId,notice)}catch{}
+  }
+  if(env.VAPID_PUBLIC_KEY&&env.VAPID_PRIVATE_KEY){
+    const subs=await store.get('subs',[])
+    const mod=await import('../packages/core/webpush.js'),wp=mod.createWebPush(env)
+    for(const sub of (Array.isArray(subs)?subs:[]).filter(sub=>sub.userId===uid).slice(0,5)){
+      try{const result=await wp.send(sub.subscription||{endpoint:sub.endpoint,keys:sub.keys},{...notice,body:notice.text});pushOK ||= result?.ok===true}catch{}
+    }
+  }
+  return {ok:user.dingUserId?dm?.ok===true:pushOK}
 }
 
 function noticeMachine(machine, mapping = {}) {
@@ -174,6 +189,7 @@ function publicUser(u) {
     notifyOn: u.notifyOn !== false,
     notifyLeadMin: normalizeLead(u.notifyLeadMin),
     dormBuilding: typeof u.dormBuilding==='string' && /^[a-z][a-z0-9_-]{0,31}$/.test(u.dormBuilding) ? u.dormBuilding : null,
+    dormChangesRemaining: Math.max(0, 1-(Number.isInteger(u.dormChangeCount)?u.dormChangeCount:0)),
   }
 }
 
@@ -371,42 +387,16 @@ function pickFromPool(pool, state, now) {
   return { index: i, headers: pool[i].headers }
 }
 
-// 刚开洗的机器没有 finishAt：按典型时长估一个，并记下来（同一轮保持一致）。
-// 洗衣机 30 分钟、烘干机 60 分钟；上游一旦给出真实 finishAt，这个估值就不再参与。
-const ESTIMATE_WASHER_MIN = 30
-const ESTIMATE_DRYER_MIN = 60
-
 async function estimateFinishAt(store, buildingId, machines) {
   const list = Array.isArray(machines) ? machines : []
-  const now = Date.now()
-  const updates = []
-  for (const m of list) {
-    if (!m || !m.id) continue
-    const key = `est:${buildingId}:${m.id}`
-    if (m.state !== 'occupied') {
-      // 空闲/故障：清掉估值，下次开洗重新计
-      if (m.estimated) delete m.estimated
-      updates.push(store.del(key).catch(() => {}))
-      continue
-    }
-    if (m.finishAt) {
-      // 上游给了真实完成时间，清掉估值
-      updates.push(store.del(key).catch(() => {}))
-      continue
-    }
-    const rec = await store.get(key, null).catch(() => null)
-    if (rec && Number.isFinite(Number(rec.endAt))) {
-      m.finishAt = new Date(Number(rec.endAt)).toISOString()
-      m.estimated = true
-    } else {
-      const mins = m.kind === 'dryer' ? ESTIMATE_DRYER_MIN : ESTIMATE_WASHER_MIN
-      const endAt = now + mins * 60000
-      m.finishAt = new Date(endAt).toISOString()
-      m.estimated = true
-      updates.push(store.put(key, { startAt: now, endAt, mins }).catch(() => {}))
-    }
+  // 上游没有程序/结束时间时保留未知，不能把六分钟桶自洁猜成三十分钟标准洗。
+  for(const m of list)if(m?.estimated){m.finishAt=null;delete m.estimated}
+  const cleanupKey=`meta:estimateCleanup:${buildingId}`
+  if(!await store.get(cleanupKey,false)){
+    const legacy=await store.list(`est:${buildingId}:`)
+    await Promise.all(legacy.map(({key})=>store.del(key)))
+    await store.put(cleanupKey,true)
   }
-  if (updates.length) await Promise.all(updates)
   return list
 }
 
@@ -444,7 +434,8 @@ async function notifyIdleOccupants(env, store, events) {
     if (Date.now() - last < 30 * 60 * 1000) continue
 
     const user = await store.get(`user:${entry.userId}`, null).catch(() => null)
-    if (!user || !user.dingUserId || user.notifyOn === false) continue
+    if (!user || user.disabled || user.blocked || !user.dingUserId || user.notifyOn === false) continue
+    if (!isMachineDormEnabled(e.machine, await currentDormCatalog(store, env.SITE_BUILDINGS), map)) continue
 
     // 有登记任务时由任务提醒统一负责，避免状态事件与到期流程各发一条私信。
     const tasks = await store.get(`tasks:${entry.userId}`, [])
@@ -706,8 +697,7 @@ async function runSyncOnce(env, store, opts = {}) {
     if(Date.now()-cleanupAt>86400000){await pruneAssistantStorage(store);await store.put('assistant:lastPrune',Date.now())}
     const savedMapping = await store.get(`mapping:${buildingId}`, null)
     for (const machine of normalized) machine.kind = machineKind(machine, savedMapping?.mapping || {})
-    // 刚开洗的机器上游还没给 finishAt，先按「典型时长」估一个结束时间，
-    // 否则面板和群通知都只能显示「剩余未知」。等上游给了真值就自动覆盖。
+    // 未提供结束时间时保留未知，清除旧版本按典型程序生成的估时。
     await estimateFinishAt(store, buildingId, normalized)
     let board = machinesMod.buildBoard(normalized, { buildingId, buildingName })
     for (const m of board.floors.flatMap((f)=>f.machines)) m.dormBuilding=resolveMachineDorm(m,savedMapping?.mapping||{},env.SITE_BUILDINGS)
@@ -732,17 +722,25 @@ async function runSyncOnce(env, store, opts = {}) {
     // 预约与收藏共用新鲜快照；各自保存去重和投递状态，不影响主同步。
     const notifyUser = async (uid, notice) => {
       const user = await store.get(`user:${uid}`, null)
-      if (!user?.dingUserId || user.notifyOn === false) return { ok: false, skipped: true }
+      if (!user?.dingUserId || user.disabled || user.blocked || user.notifyOn === false) return { ok: false, skipped: true }
+      const catalog = await currentDormCatalog(store, env.SITE_BUILDINGS)
+      const machine = notice.machineId && nextMachines.find((item) => String(item.id) === String(notice.machineId))
+      if (machine ? !isMachineDormEnabled(machine, catalog, savedMapping?.mapping || {})
+        : catalog.some((building) => building.code === user.dormBuilding && building.enabled === false)) return { ok: false, skipped: true }
       const mod = await import('../packages/core/dingtalk.js')
       return mod.createDingTalk(env).sendSingle(user.dingUserId, notice)
     }
-    const reminderBoard = { board, mapping: savedMapping?.mapping || {} }
+    const reminderBoard = { board: enabledMachineBoard(board, await currentDormCatalog(store, env.SITE_BUILDINGS), savedMapping?.mapping || {}), mapping: savedMapping?.mapping || {} }
     const reminders = await Promise.allSettled([
       processQueueReminders({ store, board, env, notify: notifyUser }),
       processFavoriteReminders({ store, board: reminderBoard, env, notify: notifyUser }),
+      processCommunityNotices({store,env,notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice)}),
+      pruneCommunityMedia({store,now:Date.now(),limit:20}),
     ])
     out.queueReminders = reminders[0].status === 'fulfilled' ? reminders[0].value : { error: 'unavailable' }
     out.favoriteReminders = reminders[1].status === 'fulfilled' ? reminders[1].value : { error: 'unavailable' }
+    out.communityNotices = reminders[2].status === 'fulfilled' ? reminders[2].value : { error: 'unavailable' }
+    out.communityMediaGc = reminders[3].status === 'fulfilled' ? reminders[3].value : { error: 'unavailable' }
 
     // 这次用的账号没问题：解除它的冷却，下标往前拨一格，下次换下一个账号
     if (picked && pool && pool.length) {
@@ -794,7 +792,7 @@ async function runSyncOnce(env, store, opts = {}) {
       const userId = key.slice('tasks:'.length)
       const user = await store.get(`user:${userId}`, null)
       // 取衣提醒关闭时不推；旧用户没有这个字段，默认开启
-      if (user && user.notifyOn === false) continue
+      if (user && (user.disabled || user.blocked || user.notifyOn === false)) continue
       const lead = normalizeLead(user && user.notifyLeadMin)
       const notificationUpdates = new Map()
       for (const original of value) {
@@ -803,6 +801,8 @@ async function runSyncOnce(env, store, opts = {}) {
         t.notifyAttemptAt = nowISO()
         const left = machinesMod.computeLeftMin(t.endAt, now)
         if (left === null || left > lead) continue
+        const currentMachine = nextMachines.find((machine) => String(machine.id) === String(t.machineId)) || { id: t.machineId, name: t.machineName, dormBuilding: t.dormBuilding }
+        if (!isMachineDormEnabled(currentMachine, await currentDormCatalog(store, env.SITE_BUILDINGS), savedMapping?.mapping || {})) continue
         let anyOk = false
         // 统一文案：钉钉用卡片（title + markdown），Web Push 用纯文本兜底
         const notice =
@@ -984,6 +984,11 @@ export function createApp({ store, env }) {
   )
 
   const authenticateRequest=async c=>{const uid=await bearerUser(c,env);return uid?store.get('user:'+uid,null):null}
+  app.use('/api/*',async(c,next)=>{
+    await next()
+    const vary=new Set((c.res.headers.get('Vary')||'').split(',').map(value=>value.trim()).filter(Boolean));vary.add('Authorization');vary.add('X-Admin-Token');c.header('Vary',[...vary].join(', '))
+    if(c.req.header('authorization')||c.req.header('x-admin-token'))c.header('Cache-Control','private, no-store')
+  })
   registerAuditMiddleware(app,{store,env,authenticate:authenticateRequest,checkSuperAdmin:c=>checkSuperAdmin(c,env)})
   registerRequestSafety(app,{store,env,authenticate:authenticateRequest})
   registerTaskMutationLock(app,{store,env})
@@ -1522,22 +1527,27 @@ export function createApp({ store, env }) {
       ])
       const slotMap = savedMapping?.mapping || {}
       const map = overrides && typeof overrides === 'object' ? overrides : {}
-      const board = applyMachineHealth(JSON.parse(JSON.stringify(entry.board)), health)
+      let board = applyMachineHealth(JSON.parse(JSON.stringify(entry.board)), health)
       for (const floor of board.floors || []) {
         for (const m of floor.machines || []) {
           m.kind = machineKind(m, slotMap)
           m.dormBuilding = resolveMachineDorm(m, slotMap,env.SITE_BUILDINGS)
           m.slot = Object.entries(slotMap).find(([, id]) => String(id) === String(m.id))?.[0] || null
-          m.displayName = m.slot ? `${/^D/i.test(m.slot) ? m.slot.slice(1) + '号烘干机' : m.slot + '号洗衣机'}` : m.name
+          m.displayName = m.slot ? `${m.slot.replace(/^D/i,'')}号${m.kind==='dryer'?'烘干机':'洗衣机'}` : m.name
           const ov = map[m.id]
           if (ov && ov.state === 'recovered' && Date.now()-Date.parse(ov.recoveredAt)<3600000 && (m.state === 'faulty' || m.health?.suspectedFault)) {
-            m.state = 'idle'
-            m.leftMin = null
-            m.finishAt = null
+            const upstream = m.upstreamState || 'unknown'
+            m.state = ['idle','occupied','abnormal'].includes(upstream) ? upstream : 'unknown'
+            m.health = { ...m.health, confirmedFault:false, recovering:false, suspectedFault:upstream==='faulty', label:upstream==='faulty'?'现场已报恢复，设备状态待复核':'' }
             m.faultOverride = 'recovered'
           }
         }
       }
+      const occupancy=await store.get(`occupancy:${buildingId}`,{})
+      const ownerIds=[...new Set(Object.values(occupancy||{}).map(o=>o?.userId).filter(id=>typeof id==='string'))]
+      const tasksByUser=new Map(await Promise.all(ownerIds.map(async id=>[id,await store.get('tasks:'+id,[])])))
+      board=applyRegisteredAvailability(board,{occupancy,tasksByUser})
+      board.floors=(board.floors||[]).map(floor=>({...floor,machines:(floor.machines||[]).filter(machine=>!env.SITE_BUILDINGS.some(building=>building.enabled===false&&building.code===resolveMachineDorm(machine,slotMap,env.SITE_BUILDINGS)))})).filter(floor=>floor.machines.length)
       if (dorm) {
         board.floors = filterDormFloors({ ...board, slotMapping: slotMap }, dorm,env.SITE_BUILDINGS)
         board.dormBuilding = dorm
@@ -1588,6 +1598,8 @@ export function createApp({ store, env }) {
             machineId: t.machineId,
             machineName: t.machineName,
             kind: machineKind(boardMachines.find((m) => String(m.id) === String(t.machineId)) || { id: t.machineId, name: t.machineName, kind: t.kind }, savedMapping?.mapping || {}),
+            mode:t.mode||'duration', minutes:t.minutes, timingSource:t.timingSource||(t.mode==='machine'?'upstream':'user'), estimated:t.estimated===true,
+            ...(t.program==='self_clean'?{program:'self_clean'}:{}),
             startAt: t.startAt,
             endAt: t.endAt,
             leftMin: await computeLeftMin(t.endAt, now),
@@ -1654,7 +1666,8 @@ export function createApp({ store, env }) {
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
       const body = await c.req.json().catch(() => null)
       if (!body || typeof body !== 'object' || Array.isArray(body)) return apiErr('bad_param', '登记内容须为 JSON 对象')
-      const { machineId, minutes, note, mode, useDisinfectant, selfCleaned } = body
+      const { machineId, minutes, note, mode, useDisinfectant, selfCleaned, program } = body
+      if(program!==undefined&&program!==null&&program!=='self_clean')return apiErr('bad_param','所选程序无效')
       if (!machineId) return apiErr('bad_param', '缺少 machineId')
       if (Object.hasOwn(body, 'note') && typeof note !== 'string') return apiErr('bad_param', '备注必须是文字')
       const noteText = normalizeTaskNote(note)
@@ -1674,11 +1687,13 @@ export function createApp({ store, env }) {
       // 但看板可能是空的（首次启动 / 上游挂了），那种情况不拦，别把人挡在门外。
       const boardKnown = Boolean(entry?.board?.floors?.length)
       if (boardKnown && !found) return apiErr('not_found', '这台机器不在当前楼栋的看板里', 404)
+      const foundDorm=found&&resolveMachineDorm(found,savedMapping?.mapping||{},env.SITE_BUILDINGS)
+      if(foundDorm&&env.SITE_BUILDINGS.some(building=>building.code===foundDorm&&building.enabled===false))return apiErr('building_disabled','此住宿楼已停用，请选择其他楼栋',403)
 
       // 两种登记方式：
       //   mode='machine' —— 按这台机器自己的剩余时间来提醒（默认，最符合直觉：
       //                    面板上写着「剩余 12 分钟」，通知就该在 12 分钟后响）
-      //   否则按用户选的时长（洗衣机四选；烘干机 10~180 自由填）
+      //   否则按用户选的整数时长；不把程序时长锁死在几个预设档位。
       let mins = 0
       let endAt = null
 
@@ -1696,20 +1711,17 @@ export function createApp({ store, env }) {
           return apiErr('bad_param', '这台机器目前没有剩余时间，请选择时长')
         }
       } else if (isDryer) {
-        // 烘干机原来会被洗衣机白名单 [30,42,50,70] 拒掉（默认 60 分钟直接报错），
-        // 这是个实打实的 bug，顺手修掉：10~180 分钟自由指定。
-        const n = Number(minutes)
+        const n = typeof minutes==='number'||typeof minutes==='string'&&/^\d+$/.test(minutes.trim()) ? Number(minutes) : NaN
         if (!Number.isInteger(n) || n < 10 || n > 180)
           return apiErr('bad_param', '烘干时长请填 10~180 分钟')
         mins = Math.round(n)
       } else {
-        // 洗衣机时长白名单：标准洗 30 / 加强洗 42 / 加强洗40°C 50 / 加强洗60°C 70
-        const ALLOWED_MINUTES = [30, 42, 50, 70]
-        const n = Number(minutes)
-        if (!ALLOWED_MINUTES.includes(n))
-          return apiErr('bad_param', 'minutes 仅支持 30/42/50/70')
+        const n = typeof minutes==='number'||typeof minutes==='string'&&/^\d+$/.test(minutes.trim()) ? Number(minutes) : NaN
+        if (!Number.isInteger(n)||n<1||n>180)
+          return apiErr('bad_param', '洗衣或自洁时长请填 1–180 分钟整数')
         mins = n
       }
+      if(program==='self_clean'&&(isDryer||mode==='machine'||mins!==6))return apiErr('bad_param','桶自洁请明确选择六分钟洗衣机程序')
 
       const startAt = nowISO()
       if (!endAt) endAt = new Date(Date.now() + mins * 60000).toISOString()
@@ -1740,6 +1752,9 @@ export function createApp({ store, env }) {
         // 登记方式：machine=跟着机器剩余时间，duration=用户自己选的时长
         mode: mode === 'machine' ? 'machine' : 'duration',
         minutes: mins,
+        timingSource:mode==='machine'?(found?.estimated?'estimate':'upstream'):'user',
+        estimated:mode==='machine'&&found?.estimated===true,
+        ...(program==='self_clean'?{program:'self_clean'}:{}),
         note: noteText,
         useDisinfectant: useDisinfectant === true,
         selfCleaned: selfCleaned === true,
@@ -1798,6 +1813,7 @@ export function createApp({ store, env }) {
           machineId: task.machineId,
           machineName: task.machineName,
           kind: task.kind,
+          mode:task.mode, minutes:task.minutes, timingSource:task.timingSource, estimated:task.estimated,
           startAt: task.startAt,
           endAt: task.endAt,
           leftMin: await computeLeftMin(task.endAt, startAt),
@@ -1951,7 +1967,10 @@ export function createApp({ store, env }) {
   app.get('/api/occupancy', async (c) => {
     try {
       const buildingId = c.req.query('building') || env.BUILDING_ID || 'b1'
-      const occ = await store.get(`occupancy:${buildingId}`, {})
+      const dorm=c.req.query('dorm')||''
+      if(dorm&&!normalizeDormBuilding(dorm,env.SITE_BUILDINGS))return apiErr('bad_param','住宿楼无效')
+      const [occ,entry,mapping]=await Promise.all([store.get(`occupancy:${buildingId}`, {}),store.get(`machines:${buildingId}`,null),store.get(`mapping:${buildingId}`,null)])
+      const machineDorms=new Map((entry?.board?.floors||[]).flatMap(floor=>floor.machines||[]).map(machine=>[String(machine.id),resolveMachineDorm(machine,mapping?.mapping||{},env.SITE_BUILDINGS)]))
       const occMap = occ && typeof occ === 'object' ? { ...occ } : {}
       const now = Date.now()
       const out = {}
@@ -1960,6 +1979,8 @@ export function createApp({ store, env }) {
       const removals = new Map()
       for (const [machineId, o] of Object.entries(occMap)) {
         if (machineFilter && machineId !== machineFilter) continue
+        const machineDorm=machineDorms.get(machineId)
+        if(dorm&&machineDorm!==dorm||env.SITE_BUILDINGS.some(building=>building.code===machineDorm&&building.enabled===false))continue
         // 到点自动过期
         if (!o || !o.endAt || new Date(o.endAt).getTime() < now - DAY_MS) {
           delete occMap[machineId]
@@ -2266,6 +2287,11 @@ export function createApp({ store, env }) {
 
   // 管理端路由（用户/留言/机器/审计）在 server/admin.js，见文件末尾 registerAdminRoutes
 
+  app.use('/api/user/profile',async(c,next)=>{
+    const uid=await bearerUser(c,env)
+    if(!uid)return next()
+    return withOperationLock(store,'profile:'+uid,()=>next())
+  })
   app.post('/api/user/profile', async (c) => {
     try {
       const userId = await bearerUser(c, env)
@@ -2277,6 +2303,11 @@ export function createApp({ store, env }) {
         return apiErr('account_out_of_sync', '账号资料暂时读不到，请重新用钉钉登录一次', 409)
       if (body.dormBuilding !== undefined) {
         if (!normalizeDormBuilding(body.dormBuilding,env.SITE_BUILDINGS)) return apiErr('bad_param','请选择有效的住宿楼')
+        if(user.dormBuilding&&body.dormBuilding!==user.dormBuilding){
+          const count=Number.isInteger(user.dormChangeCount)?user.dormChangeCount:0
+          if(count>=1)return apiErr('dorm_change_limit','自行修改住宿楼的次数已用完，请联系管理员修改',409)
+          user.dormChangeCount=count+1
+        }
         user.dormBuilding=body.dormBuilding
       }
       if (body.nick != null) {
@@ -3504,6 +3535,7 @@ export function createApp({ store, env }) {
           name: typeof it.name === 'string' ? it.name.slice(0, 64) : '',
           floorCode: it.floorCode != null ? String(it.floorCode).slice(0, 8) : '',
           state,
+          ...(normalizeMachineCategory(it.categoryCode)?{categoryCode:it.categoryCode}:{}),
           finishTime: it.finishTime ?? null,
         })
       }
@@ -3533,7 +3565,7 @@ export function createApp({ store, env }) {
   registerFavoriteRoutes(app,{store,env,authenticate,getBoard})
   registerQueueNoticeRoutes(app,{store,authenticate})
   registerAssistantRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),getBoard:async()=>{const bid=env.BUILDING_ID||'b1';const [entry,mapping]=await Promise.all([store.get(`machines:${bid}`,null),store.get(`mapping:${bid}`,null)]);return {board:entry?.board,mapping:mapping?.mapping||{},buildings:env.SITE_BUILDINGS}}})
-  registerOperationsRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env)})
+  registerOperationsRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env),notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice)})
   registerInspectionRoutes(app,{store,env,authenticate,getBoard,checkSuperAdmin:c=>checkSuperAdmin(c,env),notifyBuilding:async({conversationId,inspection})=>{
     const mod=await import('../packages/core/dingtalk.js')
     const notice=['【等衣 · 楼栋巡检异常】',inspection.machineName,'志愿管理已现场上报异常，请前往洗衣房确认并协助处理。','巡检照片和备注请在管理页面查看。'].join('\n')

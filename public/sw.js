@@ -60,6 +60,13 @@ function targetUrl(raw, fallback = '/#/task') {
     const url = new URL(raw, self.location.origin)
     if (url.origin !== self.location.origin || url.pathname !== '/' || url.search) return fallback
     const [route, query = ''] = url.hash.slice(1).split('?')
+    if(route==='/board'){
+      const params=new URLSearchParams(query),channel=params.get('channel'),message=safeId(params.get('message'))
+      if(channel&&!/^(?:public|[a-z][a-z0-9_-]{0,31})$/.test(channel))return '/#/board'
+      const target=new URLSearchParams();if(channel)target.set('channel',channel);if(message)target.set('message',message)
+      const queryString=target.toString()
+      return '/#/board'+(queryString?'?'+queryString:'')
+    }
     if (route !== '/task' && route !== '/social') return fallback
     const key = route === '/social' ? 'thread' : 'task'
     const id = safeId(new URLSearchParams(query).get(key))
@@ -73,15 +80,16 @@ self.addEventListener('push', (event) => {
   catch { payload = { text: event.data ? event.data.text() : '' } }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) payload = {}
   const social = payload.type === 'social' || typeof payload.url === 'string' && payload.url.startsWith('/#/social')
+  const mention=payload.type==='mention'
   const task = safeId(payload.taskId)
   const thread = safeId(payload.threadId)
-  const fallback = social ? '/#/social' : '/#/task'
+  const fallback = mention ? '/#/board' : social ? '/#/social' : '/#/task'
   const proposed = payload.url || (social && thread ? '/#/social?thread=' + thread : task ? '/#/task?task=' + task : fallback)
   const options = {
     body: line(payload.body, 1200) || line(payload.text, 1200) || '你有一条等衣提醒，点开查看详情。',
     icon: '/icon-192.png',
     badge: '/icon-192.png',
-    tag: social ? 'weshirt-social' + (thread ? '-' + thread : '') : 'weshirt-task' + (task ? '-' + task : ''),
+    tag: mention ? 'weshirt-mention-'+(safeId(payload.noticeId)||safeId(payload.channel)||'channel') : social ? 'weshirt-social' + (thread ? '-' + thread : '') : 'weshirt-task' + (task ? '-' + task : ''),
     renotify: false,
     data: { url: targetUrl(proposed, fallback) }
   }

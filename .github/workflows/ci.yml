@@ -37,6 +37,8 @@ jobs:
         run: npm run build
       - name: Build CloudBase fetch adapter
         run: npm run build:cloudbase
+      - name: Build CloudBase channel gateway
+        run: npm run build:channel-gateway
       - name: Check Edge bundle compatibility
         if: ${{ hashFiles('functions/**/*.js') != '' }}
         run: npx --no-install esbuild 'functions/api/[[default]].js' --bundle --format=esm --platform=browser --target=es2022 --outfile=/tmp/weshirt-edge-check.mjs

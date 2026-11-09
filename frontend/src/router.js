@@ -11,7 +11,7 @@ import Admin from './views/Admin.vue'
 import Login from './views/Login.vue'
 
 // 3D 场景依赖 three（~600KB），按需加载，避免拖慢其他页面
-const Room3D = () => import('./views/Room3D.vue')
+import Room3D from './views/RoomEntry.vue'
 // 管理子页（用户/留言/机器/审计）按需加载，普通用户不会访问
 const AdminDetail = () => import('./views/AdminDetail.vue')
 

@@ -9,9 +9,12 @@
 </template>
 <script setup>
 import { computed,onMounted,onUnmounted,ref,watch } from 'vue'
-import { showImagePreview,showToast } from 'vant'
+import { showImagePreview,showToast,showConfirmDialog } from 'vant'
 import { api } from '../api'
 import { useDormStore } from '../stores/dorm'
+import { createUserActionConfirmation } from '../taskRegistration'
+import '../userActionConfirm.css'
+const confirmAction=createUserActionConfirmation(showConfirmDialog)
 const dorm=useDormStore(),data=ref(null),building=ref(''),machineId=ref(''),status=ref('normal'),note=ref(''),photoData=ref(''),processing=ref(false),saving=ref(false),loading=ref(false),error=ref('')
 const machines=computed(()=>(data.value?.machines||[]).filter(m=>m.dormBuilding===building.value))
 const history=computed(()=>(data.value?.inspections||[]).filter(i=>i.dormBuilding===building.value))
@@ -21,7 +24,20 @@ function clock(value){return new Date(value).toLocaleString('zh-CN')}
 function delivery(n){return ({not_required:'正常巡检，无需群通知',sending:'正在通知本楼群，巡检已保存',sent:'本楼群通知已送达',failed:'本楼群通知未确认送达，后台已记录',cooldown:'同台异常短时间内已尝试通知，本次不重复发送',unconfigured:'本楼尚未指定通知群，巡检已保存'})[n?.status]||'巡检已保存'}
 async function load(){if(loading.value)return;const request=++generation;loading.value=true;error.value='';try{const result=await api('/api/inspections');if(disposed||request!==generation)return;data.value=result;if(!result.buildings.some(b=>b.code===building.value))building.value=result.buildings.find(b=>b.code===dorm.code)?.code||result.buildings[0]?.code||''}catch(e){if(!disposed)error.value=e.message||'巡检记录读取失败'}finally{if(!disposed)loading.value=false}}
 async function choosePhoto(event){const file=event.target.files?.[0];event.target.value='';if(!file)return;if(!/^image\/(jpeg|png|webp)$/.test(file.type)||file.size>20*1024*1024){showToast('请选择20MB以内的照片');return}processing.value=true;const scope=building.value;let objectUrl;try{objectUrl=URL.createObjectURL(file);const img=new Image();img.src=objectUrl;await img.decode();const scale=Math.min(1,960/Math.max(img.width,img.height));const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(img.width*scale));canvas.height=Math.max(1,Math.round(img.height*scale));canvas.getContext('2d').drawImage(img,0,0,canvas.width,canvas.height);let compressed='';for(const quality of [.82,.65,.45,.3]){compressed=canvas.toDataURL('image/jpeg',quality);if(compressed.length<600000)break}if(compressed.length>=600000)throw new Error('照片较复杂，请换一张清晰近照');if(!disposed&&building.value===scope)photoData.value=compressed}catch(e){showToast(e.message||'照片读取失败')}finally{if(objectUrl)URL.revokeObjectURL(objectUrl);processing.value=false}}
-async function submit(){if(saving.value||!machineId.value||!note.value.trim()||!photoData.value)return;saving.value=true;error.value='';try{const result=await api('/api/inspections',{method:'POST',body:{machineId:machineId.value,status:status.value,note:note.value.trim(),photoData:photoData.value},timeout:20000});if(disposed)return;note.value='';photoData.value='';showToast(delivery(result.inspection?.notification));await load()}catch(e){error.value=e.message||'上报失败，照片和备注已保留'}finally{saving.value=false}}
+async function submit(){
+  if(saving.value||!machineId.value||!note.value.trim()||!photoData.value)return
+  saving.value=true;error.value=''
+  try{
+    const outcome=await confirmAction({
+      read:()=>({machineId:machineId.value,machineName:machines.value.find(m=>m.id===machineId.value)?.name||'所选机器',building:building.value,buildingName:data.value?.buildings.find(b=>b.code===building.value)?.name||'所选楼栋',status:status.value,note:note.value.trim(),photoData:photoData.value,disposed}),
+      describe:s=>({title:'确认提交巡检',message:`${s.buildingName} · ${s.machineName}\n现场情况：${s.status==='issue'?'发现异常':'正常'}\n巡检备注：${s.note}\n照片：已选择1张\n${s.status==='issue'?'异常报告可能通知本楼指定群，请确认现场情况。':'将保存本次现场复核记录。'}`}),
+      execute:s=>api('/api/inspections',{method:'POST',body:{machineId:s.machineId,status:s.status,note:s.note,photoData:s.photoData},timeout:20000}),
+      onChanged:()=>showToast('机器或巡检内容已变化，请重新确认'),
+    })
+    if(outcome.status!=='submitted'||disposed)return
+    note.value='';photoData.value='';showToast({message:delivery(outcome.value.inspection?.notification),className:'user-action-feedback'});await load()
+  }catch(e){error.value=e.message||'上报失败，照片和备注已保留'}finally{saving.value=false}
+}
 async function showPhoto(item){try{const result=await api('/api/inspections/'+encodeURIComponent(item.id)+'/photo');showImagePreview({images:[result.photoData],closeable:true,showIndex:false})}catch(e){showToast(e.message||'照片读取失败')}}
 onMounted(load);onUnmounted(()=>{disposed=true;generation++})
 </script>
