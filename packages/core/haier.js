@@ -146,7 +146,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 // 统一请求：code!==0 / 非 2xx / 非 JSON 都抛错，交给调用方保留旧状态
 // 错误文案带上「方法 + 路径 + 状态码」：只写 "HAIER HTTP 405" 时根本没法判断
 // 是哪个端点出的问题（历史上排查过一次，只能靠猜）。
-async function requestJson(url, { method = 'GET', headers, body, timeoutMs = 15000, retries = 2, authFirst = false } = {}) {
+async function requestJson(url, { method = 'GET', headers, body, timeoutMs = 15000, retries = 2, authFirst = false, fetchImpl = globalThis.fetch } = {}) {
   const path = (() => {
     try {
       const u = new URL(url)
@@ -177,7 +177,7 @@ async function requestJson(url, { method = 'GET', headers, body, timeoutMs = 150
     try {
       const init = { method, headers: requestHeaders, signal: ctrl.signal }
       if (body !== undefined) init.body = JSON.stringify(body)
-      const res = await fetch(url, init)
+      const res = await fetchImpl(url, init)
       if (!res.ok) {
         if (res.body && typeof res.body.cancel === 'function') await res.body.cancel().catch(() => {})
         throw new Error(`HAIER HTTP ${res.status} ${method} ${path}`)
@@ -551,7 +551,7 @@ export function parseTokenLines(text, { limit = 20 } = {}) {
   return out
 }
 
-export function createHaierClient(env = {}) {
+export function createHaierClient(env = {}, { fetch: fetchImpl = globalThis.fetch } = {}) {
   const mode = env.HAIER_MODE || 'mock'
 
   if (mode === 'real') {
@@ -580,11 +580,13 @@ export function createHaierClient(env = {}) {
             headers,
             timeoutMs,
             authFirst,
+            fetchImpl,
           }),
           requestJson(`${base}/position/positionDevice?id=${encodeURIComponent(pid)}`, {
             headers,
             timeoutMs,
             authFirst,
+            fetchImpl,
           }),
         ])
 
@@ -605,6 +607,7 @@ export function createHaierClient(env = {}) {
               body: { positionId: pid, floorCode, categoryCode, page, pageSize },
               timeoutMs,
               authFirst,
+              fetchImpl,
             })
             if (!Array.isArray(data?.items)) throw new Error('HAIER invalid device page')
             const items = data.items
@@ -675,6 +678,7 @@ export function createHaierClient(env = {}) {
           body: { ...basePayload, page, pageSize },
           timeoutMs: Number(env.HAIER_TIMEOUT_MS) > 0 ? Number(env.HAIER_TIMEOUT_MS) : 8000,
           authFirst: String(env.HAIER_AUTH_MODE || '').toLowerCase() === 'token',
+          fetchImpl,
         })
         if (!Array.isArray(data?.items)) throw new Error('HAIER invalid device page')
         const arr = data.items

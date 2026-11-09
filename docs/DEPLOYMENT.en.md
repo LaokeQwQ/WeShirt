@@ -11,15 +11,17 @@ This fully cloud-hosted SaaS setup avoids maintaining your own server and reduce
 | EdgeOne Pages | Host the `dist/` frontend and static assets |
 | Edge Functions | Run `functions/api/[[default]].js` for Hono APIs, sync and notification decisions |
 | Bound persistent KV | Store users, tasks, site settings, queues, snapshots and operational state |
-| CloudBase scheduled function | POST to the protected sync endpoint so checks continue without visitors |
+| CloudBase scheduled function | Trigger sync, or fetch complete snapshots through a separate network route and forward them, so checks continue without visitors |
 
-This setup does not use a CloudBase database. The trigger does not query the machine upstream, send raw device lists or generate notifications. Platform and upstream failures can still affect availability; managed hosting does not remove interruption risk.
+This setup does not use a CloudBase database. Edge server code handles notification decisions, fault confirmation and status normalization. Platform and upstream failures can still affect availability; managed hosting does not remove interruption risk.
 
 Select **`master` as the EdgeOne Pages production branch**. Use `dev` only for previews, and promote changes through a `dev` → `master` pull request.
 
 ### 1. Build and API
 
-Import the repository into EdgeOne Pages. Use `npm ci && npm run build` and output directory `dist`. Keep `functions/api/[[default]].js` as the sole `/api/*` function entry. Node.js 22 is recommended for builds.
+Import the repository into EdgeOne Pages. Use `npm ci && npm run build` and output directory `dist`. Keep `functions/api/[[default]].js` as the sole `/api/*` function entry. Build with Node.js 22.18+ (22 LTS) or 24.11+; the older 22.11 runtime does not meet the current dependency requirements.
+
+Existing Upload projects can continue using CLI uploads. Check out the promoted `master`, build in a separate directory and record the release commit. Keep production `.env` files outside the public source checkout. Uploading only `dist` does not include the API functions.
 
 Inject server variables through the platform's supported function configuration. At minimum, set `AUTH_SECRET` and `ADMIN_TOKEN` as described in [Configuration](CONFIGURATION.en.md). Leave `VITE_API_BASE` empty for same-origin production. Use a stable custom HTTPS domain and update DingTalk callbacks.
 
@@ -37,6 +39,8 @@ Upload `index.js` and `package.json` from the [trigger directory](../tools/cloud
 The key stays in environment configuration and is sent in POST JSON `{ "k": "..." }`. Do not include query parameters, URL credentials or secrets in the endpoint. Do not substitute the admin password. Update the trigger key after rotating `AUTH_SECRET`.
 
 Schedule checks at least once per minute where supported. A three-minute advance reminder requires a check within that window; a five-minute schedule may miss it. The trigger has a 30-second total timeout, does not retry within a run or follow redirects, and does not print configuration or response bodies. Also limit concurrency for any platform-level retries.
+
+If an existing deployment relies on CloudBase for a separate upstream network route, use the [fetch adapter](../tools/cloudbase-fn/weshirt-sync-ingest/README.en.md). It reuses the shared client and forwards a complete snapshot to `/api/cron/ingest` only after every floor and category succeeds. Failed fetches preserve the previous data. Do not replace an existing fetch function with the trigger-only function. Keep credentials in CloudBase environment variables and retain the existing sync key and site address.
 
 ### 3. Verify the release
 

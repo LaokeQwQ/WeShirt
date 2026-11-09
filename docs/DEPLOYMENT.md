@@ -11,13 +11,15 @@
 | EdgeOne Pages | 托管 `dist/` 前端与静态资源 |
 | Edge Functions | 运行 `functions/api/[[default]].js`，承载 Hono API、同步和通知判定 |
 | 绑定的持久化 KV | 保存用户、任务、站点配置、队列、快照与运营状态 |
-| CloudBase 定时函数 | 只 POST 到受保护同步端点，保证无人访问时仍有检查机会 |
+| CloudBase 定时函数 | 触发同步，或通过独立出口抓取完整快照后回传，保证无人访问时仍有检查机会 |
 
-此方案没有使用 CloudBase 数据库。CloudBase 触发器不抓上游、不发送原始设备列表、不直接生成通知。平台或上游故障仍可能影响可用性，托管不意味着没有中断风险。
+此方案没有使用 CloudBase 数据库。通知判定、故障复核与状态归一化由 Edge 服务端统一处理。平台或上游故障仍可能影响可用性，托管不意味着没有中断风险。
 
 ### 1. 构建与 API
 
-将仓库导入 EdgeOne Pages，**生产分支选择 `master`**，`dev` 仅用于预览；不要将开发分支自动发布到生产。设置构建命令 `npm ci && npm run build`，输出目录 `dist`。保留 `functions/api/[[default]].js` 为 `/api/*` 的唯一函数入口。选择项目支持的 Node 构建环境，建议 Node.js 22。
+将仓库导入 EdgeOne Pages，**生产分支选择 `master`**，`dev` 仅用于预览；不要将开发分支自动发布到生产。设置构建命令 `npm ci && npm run build`，输出目录 `dist`。保留 `functions/api/[[default]].js` 为 `/api/*` 的唯一函数入口。构建使用 Node.js 22.18+（22 LTS）或 24.11+；旧版 22.11 无法满足当前依赖。
+
+已有 Upload 类型项目可继续使用 CLI 上传，但必须先检出已晋升的 `master`，从独立目录构建，并记录发布 commit。不要在公开源码工作区拉取或写入生产 `.env`，也不要把只含静态页面的 `dist` 当成完整 API 部署。
 
 通过部署平台支持的函数环境配置注入服务端变量，至少填写 `AUTH_SECRET` 与 `ADMIN_TOKEN`，长度要求见 [配置](CONFIGURATION.md)。生产同域访问时 `VITE_API_BASE` 留空。使用自定义 HTTPS 域名，并同步配置钉钉回调。
 
@@ -35,6 +37,8 @@
 密钥放在环境变量中，以 POST JSON `{ "k": "..." }` 发送。URL 不含 query、账号密码或密钥。不要使用管理员口令代替同步密钥。更换 `AUTH_SECRET` 后更新触发器密钥。
 
 按平台能力配置至少每分钟检查一次。提前 3 分钟提醒需要检查进入时间窗口，每 5 分钟调度可能错过。触发器设 30 秒总超时，单次不重试、不跟随重定向，不打印配置或响应正文；平台自身重试也应控制并发。
+
+如果现有部署依赖 CloudBase 的独立抓取出口，使用 [抓取适配器](../tools/cloudbase-fn/weshirt-sync-ingest/README.md)。它复用同一份上游客户端，全部楼层与类别成功后才向 `/api/cron/ingest` 回传完整快照；失败时保留旧数据。不要直接用只触发同步的函数覆盖已有抓取函数。运行时凭据保留在 CloudBase 环境变量内，沿用原来的同步密钥和站点地址。
 
 ### 3. 上线验证
 

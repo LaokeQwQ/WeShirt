@@ -1,40 +1,45 @@
 # WeShirt · 等衣
 
-**中文** · [English](README.en.md)
+<p align="center">
+  <img src="docs/assets/hero.svg" alt="WeShirt：先看空机，再下楼。" width="100%" />
+</p>
 
-面向宿舍洗衣房的状态看板、个人提醒与取衣协作工具。打开手机网页，先看空机、再安排洗衣。
+<p align="center">
+  <b>中文</b> · <a href="README.en.md">English</a> · <a href="docs/DEPLOYMENT.md">部署指南</a> · <a href="https://github.com/LaokeQwQ/WeShirt/issues">反馈问题</a>
+</p>
 
-推荐采用**腾讯 EdgeOne Pages + 腾讯 CloudBase** 全云端 SaaS 部署：EdgeOne Pages 承载静态页面、Edge API 与持久化 KV，CloudBase 定时触发受保护的同步接口。全云端托管、免自建服务器，降低单机故障风险。
+端着衣服出门前，先看看楼里的机器。WeShirt 是一个宿舍洗衣房网页：查空机、记住洗衣进度，也方便大家排队和取衣。
 
-本项目基于海乐生活公开设备状态数据提供服务，不提供机器启动、支付或远程控制。云端服务与通知仍依赖平台、网络及上游可用性。
+手机浏览器就能用。第一次选好住宿楼，下次直接打开自己的楼栋。
 
-## 功能
+<img src="docs/assets/divider.svg" alt="" width="100%" />
 
-- **住宿楼绑定与看板**：首次选择后记住，登录后同步账号；按楼查询设备，支持 3D 和列表视图。
-- **洗衣与烘干任务**：倒计时、提前提醒、取衣确认，公开洗衣备注与消毒液/自清洁记录；烘干支持 10–180 分钟，默认 60 分钟。
-- **收藏与常洗时间**：按星期和时段提醒收藏机器空闲，成功提醒间隔至少 30 分钟，每次时段最多 3 条，登记后停止当次提醒。
-- **排队与留言**：我的排位、预计可用时刻、取消预约、队首结束前约 3 分钟及结束阶段提醒，分楼频道与公共频道、回复、身份标识和禁言管理。
-- **朋友与代取**：二维码邀请、双方确认、联系占用者与代取请求。
-- **个人通知**：钉钉消息与浏览器 Web Push；故障二次复核，疑似未取与设备故障分别展示。
-- **网站运营**：站名图标、学校与楼栋配置、后台成员权限与楼栋志愿巡检、Markdown 公告、整点群摘要、告警与性能统计。
-- **可选 AI 助手**：受限机器查询、用户可控记忆与提示模板，密钥仅保存在服务端。
+## 看空机、排队和取衣
 
-群摘要默认北京时间 8:00–22:00 每整点检查，状态未变时跳过。预计时间与排队用于协调，实际使用前请确认现场状态。
+| 什么时候 | 可以做什么 |
+| --- | --- |
+| 准备洗衣 | 看空闲机器，切换列表或 3D 视图，收藏常用机位 |
+| 等待机器 | 查看排位和预计可用时间，在楼栋留言板交流 |
+| 正在洗衣 | 登记洗衣或烘干，查看倒计时，接收取衣提醒 |
+| 帮忙取衣 | 联系朋友、发起代取，取走后确认完成 |
 
-## 快速开始
+后台可维护楼栋、机位、公告和通知，也能给志愿管理员分配巡检楼栋。更多设置见[配置说明](docs/CONFIGURATION.md)。
 
-### 全云端部署
+设备状态来自海乐生活。预计时间供安排洗衣参考，使用机器前仍请确认现场状态；网页不负责启动机器或支付。
 
-1. 将仓库导入腾讯 EdgeOne Pages，生产分支选择 `master`，构建命令 `npm ci && npm run build`，输出目录 `dist`。
-2. 配置服务端 `AUTH_SECRET`（至少 16 字符）、`ADMIN_TOKEN`（至少 8 字符），创建并绑定持久化 KV。
-3. 部署 API 与页面，在后台配置数据源、钉钉及网站信息。
-4. 在腾讯 CloudBase 部署 [同步触发器](tools/cloudbase-fn/weshirt-sync-ping/README.md)，通过环境变量设置同步地址与密钥，按平台能力至少每分钟检查一次。
+## 全云端部署
 
-完整步骤与存储职责见 [部署说明](docs/DEPLOYMENT.md)。Node 本地开发与可选私有部署也在那里说明。
+推荐使用 **腾讯 CloudBase + 腾讯 EdgeOne Pages**，搭建自己的全云端 SaaS 洗衣房站点，无需自建服务器。
 
-### 本地体验
+<img src="docs/assets/cloud.svg" alt="CloudBase 触发同步，EdgeOne Pages 承载页面、API 和持久化 KV，手机浏览器访问站点。" width="100%" />
 
-需要 Node.js 22 与 npm：
+EdgeOne Pages 负责网页、Edge API 和持久化 KV；CloudBase 定时触发同步，也可作为独立抓取出口，将完整设备快照交回同一套处理流程。无人访问时也会检查机器状态，不使用 CloudBase 数据库。
+
+生产分支选 `master`，构建命令为 `npm ci && npm run build`，输出目录为 `dist`。KV 绑定、登录配置和定时触发步骤见[部署指南](docs/DEPLOYMENT.md)。
+
+## 先在本地看看
+
+需要 **Node.js 22.18+** 和 npm。
 
 ```bash
 git clone https://github.com/LaokeQwQ/WeShirt.git
@@ -43,28 +48,39 @@ npm ci
 cp .env.example .env
 ```
 
-**先编辑 `.env`，填写独立随机的 `AUTH_SECRET`（至少 16 字符）和 `ADMIN_TOKEN`（至少 8 字符），再执行：**
+编辑 `.env`，填写各自独立的随机值：
+
+```dotenv
+AUTH_SECRET=至少16字符的随机值
+ADMIN_TOKEN=至少8字符的随机值
+```
+
+然后启动：
 
 ```bash
 npm run dev
 ```
 
-打开 `http://localhost:5173`，后台为 `/#/admin`。PowerShell 可用 `Copy-Item .env.example .env`。默认模拟设备无需上游配置；真实钉钉登录和通知需另行配置。空密钥时公开模拟看板仍可启动，但登录和管理功能会拒绝请求。
+打开 [localhost:5173](http://localhost:5173)，从模拟设备看起。后台入口是 `/#/admin`。
+
+PowerShell 复制配置可用 `Copy-Item .env.example .env`。真实设备、钉钉登录和消息通知需要另行配置；本地模拟模式不会操作真实机器。
 
 ## 文档
 
 | 文档 | 内容 |
 | --- | --- |
-| [配置](docs/CONFIGURATION.md) | 环境变量、网站管理、通知、AI 与状态规则 |
-| [部署](docs/DEPLOYMENT.md) | EdgeOne Pages + CloudBase、KV、Node 与运行验证 |
-| [开发与发布](docs/DEVELOPMENT.md) | 本地开发、测试、CI、`dev` → `master` |
-| [隐私与使用说明](docs/PRIVACY.md) | 数据范围、遥测、公开源码与功能边界 |
-| [同步与网络](docs/EGRESS.md) | 受保护触发器、调度及上游故障定位 |
+| [配置](docs/CONFIGURATION.md) | 数据源、楼栋、登录、通知和网站设置 |
+| [部署](docs/DEPLOYMENT.md) | EdgeOne Pages、CloudBase、KV 和可选 Node 部署 |
+| [开发](docs/DEVELOPMENT.md) | 本地开发、验证，以及 `dev` → `master` 发布 |
+| [隐私与使用](docs/PRIVACY.md) | 哪些信息公开、保存什么数据、如何管理偏好 |
+| [同步与网络](docs/EGRESS.md) | 定时同步和上游连接排查 |
 
-详细文档均附英文版本入口。
+以上文档均提供英文版本。
+
+<img src="docs/assets/divider.svg" alt="" width="100%" />
 
 ## 致谢
 
-感谢 [PA733 / Laundry-Status-Monitor](https://github.com/PA733/Laundry-Status-Monitor) 的轮子支持，为设备状态监测与通知提供参考。README 内容组织参考 [xm2284 / jsnu-laundry-radar](https://github.com/xm2284/jsnu-laundry-radar)。
+感谢 [PA733 / Laundry-Status-Monitor](https://github.com/PA733/Laundry-Status-Monitor) 的轮子支持，为设备状态监测与通知提供了参考。
 
-项目采用 [MIT 许可证](LICENSE)，第三方依赖遵循各自许可证。
+项目采用 [MIT 许可证](LICENSE)。第三方依赖遵循各自许可证。
