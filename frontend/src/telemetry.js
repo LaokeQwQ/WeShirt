@@ -1,5 +1,6 @@
 import { createTelemetryClient } from './telemetryClient'
 import { telemetryRoute } from '../../packages/core/telemetry.js'
+import { createClientErrorReporter } from './clientTrace'
 
 const KEY = 'ws_telemetry_enabled'
 const BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? 'http://localhost:8787' : '')
@@ -21,6 +22,7 @@ const client = createTelemetryClient({
   },
 })
 export function track(name, fields) { try { client.track(name, fields) } catch { /* 遥测不能打断交互 */ } }
+export const reportClientError = createClientErrorReporter({ track, enabled: telemetryEnabled })
 
 export function initTelemetry({ router, getDorm, app }) {
   context = () => ({ route: router.currentRoute.value.path, dorm: getDorm() || null })
@@ -60,9 +62,9 @@ export function initTelemetry({ router, getDorm, app }) {
   observe('event', (list) => {
     for (const entry of list.getEntries()) if (entry.interactionId) vitals.inp = Math.max(vitals.inp || 0, entry.duration)
   }, { durationThreshold: 40 })
-  window.addEventListener('error', (event) => track('client_error', { kind: event.error?.name || (event.target !== window ? 'resource' : 'Error') }), true)
-  window.addEventListener('unhandledrejection', () => track('client_error', { kind: 'UnhandledRejection' }))
-  app.config.errorHandler = (error) => { track('client_error', { kind: 'vue' }); console.error(error) }
+  window.addEventListener('error', (event) => reportClientError(event.error, { kind: event.target !== window ? 'resource' : undefined, identity: event }), true)
+  window.addEventListener('unhandledrejection', (event) => reportClientError(event.reason, { kind: 'UnhandledRejection', identity: event }))
+  app.config.errorHandler = (error) => { reportClientError(error, { kind: 'vue' }) }
   const flush = () => client.flush()
   setInterval(flush, 15000)
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { reportVitals(); client.flush({ beacon: true }) } })

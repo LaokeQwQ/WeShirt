@@ -25,7 +25,7 @@
         <div><h4>热门页面</h4><p v-for="r in data.routes || []" :key="r.route"><span>{{ r.route }}</span><b>{{ r.views }}</b></p><p v-if="!data.routes?.length" class="text-dim">暂无访问记录</p></div>
         <div><h4>楼栋样本</h4><p v-for="b in data.buildings || []" :key="b.code"><span>{{ buildingName(b.code) }}</span><b>{{ b.count }}</b></p><p v-if="!data.buildings?.length" class="text-dim">暂无分布记录</p></div>
       </div>
-      <details v-if="data.recentErrors?.length"><summary>最近错误（{{ data.recentErrors.length }}）</summary><p v-for="(e, i) in data.recentErrors" :key="i" class="error-row">{{ time(e.at) }} · {{ e.route || '/' }} · {{ e.kind }}<span v-if="e.status"> · HTTP {{ e.status }}</span></p></details>
+      <details v-if="data.recentErrors?.length"><summary>最近错误（{{ data.recentErrors.length }}）</summary><p v-for="(e, i) in data.recentErrors" :key="i" class="error-row">{{ time(e.at) }} · {{ e.route || '/' }} · {{ e.kind }}<span v-if="Number.isInteger(e.status)"> · {{ e.status === 0 ? '状态 0（客户端）' : 'HTTP ' + e.status }}</span><code v-if="e.eventId"> · 事件 {{ e.eventId }}</code></p></details>
       <p v-if="!data.received" class="text-dim empty">暂无上报。用户访问后会逐步显示数据。</p>
     </template>
   </section>

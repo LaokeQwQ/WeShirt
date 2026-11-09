@@ -1,6 +1,7 @@
 'use strict'
 
 const https = require('node:https')
+const { randomUUID } = require('node:crypto')
 
 const TIMEOUT_MS = 30000
 
@@ -21,15 +22,18 @@ function ping(target, key, request = https.request) {
     let finished = false
     let timer = null
     let req
+    let trace = 'trigger_' + randomUUID().replace(/-/g, '').slice(0, 24)
     const finish = (value) => {
       if (finished) return
       finished = true
       clearTimeout(timer)
-      resolve(value)
+      resolve(value.ok ? value : { ...value, status: value.status || 0, eventId: trace })
     }
     try {
       req = request({ protocol: target.protocol, hostname: target.hostname, port: target.port || 443, path: target.pathname, method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'accept': 'application/json' } }, (res) => {
         const status = Number(res.statusCode) || 0
+        const suppliedTrace = res.headers?.['x-event-id']
+        if (typeof suppliedTrace === 'string' && /^evt_[a-f0-9]{24}$/.test(suppliedTrace)) trace = suppliedTrace
         // 响应可能包含部署诊断信息。直接消费并丢弃，不放进日志或返回值。
         res.resume()
         res.on('error', () => finish({ ok: false, reason: 'response_error', status }))
@@ -46,8 +50,12 @@ function ping(target, key, request = https.request) {
 
 exports.main = async () => {
   const config = targetFromEnv(process.env)
-  if (config.error) return { ok: false, reason: config.error }
-  return ping(config.target, config.key)
+  const result = config.error
+    ? { ok: false, reason: config.error, status: 0, eventId: 'trigger_' + randomUUID().replace(/-/g, '').slice(0, 24) }
+    : await ping(config.target, config.key)
+  // 仅留下固定分类、状态码和关联标识，可与服务端事件对照。
+  if (!result.ok) console.warn(JSON.stringify({ eventId: result.eventId, status: result.status, reason: result.reason }))
+  return result
 }
 
 // 纯本地测试入口，不连接真实服务、不输出环境配置。

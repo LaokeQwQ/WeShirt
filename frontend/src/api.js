@@ -23,7 +23,7 @@ const newRequestKey = () => 'req_' + crypto.randomUUID()
 const pendingWrites = new Map()
 
 export function apiError(message, { status = 0, eventId, code = '', idempotencyKey, sentinel = false } = {}) {
-  const trace = typeof eventId === 'string' && /^[A-Za-z0-9_-]{6,80}$/.test(eventId) ? eventId : newClientEvent()
+  const trace = typeof eventId === 'string' && /^(?:evt|client)_[a-f0-9]{24}$/.test(eventId) ? eventId : newClientEvent()
   const text = String(message || '请求未能完成').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 160)
   const error = new Error(sentinel ? NEED_LOGIN : `${text}（${status ? 'HTTP ' + status : '网络 0'}，事件 ${trace}）`)
   Object.assign(error, { status, eventId: trace, code, ...(idempotencyKey ? { idempotencyKey } : {}) })
@@ -195,6 +195,7 @@ export async function api(path, opts = {}) {
       if (writeScope) pendingWrites.delete(writeScope)
       return result
     } catch (error) {
+      if (/^(?:evt|client)_[a-f0-9]{24}$/.test(error.eventId || '')) timing.eventId = error.eventId
       if (writeScope) {
         if (error.status === 0) pendingWrites.set(writeScope, { key: requestOpts.idempotencyKey, expiresAt: Date.now() + 120000, promise: null })
         else pendingWrites.delete(writeScope)
@@ -208,7 +209,7 @@ export async function api(path, opts = {}) {
     while (pendingWrites.size > 30) pendingWrites.delete(pendingWrites.keys().next().value)
   }
   try { return await job }
-  finally { track('api_request', { ...context, endpoint: path, status: timing.status, durationMs: Math.min(60000, performance.now() - started) }) }
+  finally { track('api_request', { ...context, ...timing, endpoint: path, durationMs: Math.min(60000, performance.now() - started) }) }
 }
 
 async function performApi(path, opts, timing) {

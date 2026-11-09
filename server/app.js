@@ -1751,7 +1751,7 @@ export function createApp({ store, env }) {
       await store.put(`tasks:${userId}`, tasks)
 
       // 占用登记：记录"谁在这台机器上开洗"（面板展示头像+昵称打码+几分钟前）
-      const occMap = occ && typeof occ === 'object' ? occ : {}
+      const occMap = occ && typeof occ === 'object' ? { ...occ } : {}
       occMap[machineId] = {
         taskId: task.id,
         userId,

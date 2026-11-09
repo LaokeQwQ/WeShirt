@@ -127,4 +127,3 @@ export function registerOperationsRoutes(app, { store, env = {}, authenticate, c
     })
   })
 }
-

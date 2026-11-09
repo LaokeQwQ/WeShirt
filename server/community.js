@@ -11,6 +11,7 @@ const validId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/
 const maskNick = (value) => Array.from(String(value || '同学'))[0] + '**'
 const text = (value) => value.replace(/[\p{Cc}\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/gu, ' ').trim()
 const array = (value) => Array.isArray(value) ? value : []
+const permittedAt = (row, code, mode = 'operate') => !row || row[mode] === true && (row[mode + 'Buildings'] === null || row[mode + 'Buildings']?.includes(code))
 const fail = (code, message, status = 400) => { const error = new Error(message); Object.assign(error, { code, status }); throw error }
 
 export function registerCommunityRoutes(app, { store, env = {}, authenticate, checkSuperAdmin, now = () => Date.now() }) {
@@ -35,9 +36,12 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     const found = uid ? await store.get('user:' + uid, null) : null
     const user = found?.disabled || found?.blocked ? null : found
     const identity = await checkSuperAdmin?.(c) ? { role: 'super', label: '总管', buildings: [] } : await getUserIdentity(store, user?.id)
+    const rules = c.get('userAccess')?.permissions
+    const moderationRules = rules?.adminMessages
+    const canManage = canModerate(identity) && (!moderationRules || moderationRules.operate && (moderationRules.operateBuildings === null || moderationRules.operateBuildings?.length > 0))
     if (required && !user?.id) fail('unauthorized', '请先登录', 401)
-    if (moderator && !canModerate(identity)) fail(user?.id ? 'forbidden' : 'unauthorized', '需要总管或管理员权限', user?.id ? 403 : 401)
-    return { user, identity, moderator: canModerate(identity) }
+    if (moderator && !canManage) fail(user?.id ? 'forbidden' : 'unauthorized', '需要总管或管理员权限', user?.id ? 403 : 401)
+    return { user, identity, moderator: canManage, rules }
   }
   async function context() {
     const [site, cached, mapping] = await Promise.all([getSiteConfig(store), store.get(`machines:${bid}`, null), store.get(`mapping:${bid}`, null)])
@@ -89,8 +93,8 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
       return { id: message.id, ...publicAuthor, text: message.text, at: message.at, channel, dormBuilding: channel === 'public' ? null : channel,
         machineId: message.machineId || null, machineName: ctx.byId.get(String(message.machineId))?.name || message.machineName || null,
         mine, pinned: message.pinned === true, pinnedAt: message.pinnedAt || null,
-        permissions: { canDelete: mine || requester.moderator, canPin: requester.moderator && (identityInternal.role === 'volunteer' || message.pinned === true), canMute: Boolean(message.userId) && canMuteTarget(requester, identityInternal, message.userId) },
-        ...(requester.moderator ? { authorId: message.userId || null } : {}), replyTo: message.replyTo || null,
+        permissions: { canDelete: mine ? permittedAt(requester.rules?.messages, channel) : requester.moderator && permittedAt(requester.rules?.adminMessages, channel), canPin: requester.moderator && permittedAt(requester.rules?.adminMessages, channel) && (identityInternal.role === 'volunteer' || message.pinned === true), canMute: Boolean(message.userId) && canMuteTarget(requester, identityInternal, message.userId) && permittedAt(requester.rules?.adminMessages, publicAuthor.authorBuilding) },
+        ...(requester.moderator && permittedAt(requester.rules?.adminMessages, channel, 'view') ? { authorId: message.userId || null } : {}), replyTo: message.replyTo || null,
         reply: parent ? { id: parent.id, nick: parentAuthor.nick, text: String(parent.text || '').slice(0, 80), identity: parentAuthor.identity, authorBuilding: parentAuthor.authorBuilding, authorBuildingName: parentAuthor.authorBuildingName } : null }
     })
   }

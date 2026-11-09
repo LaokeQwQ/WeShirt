@@ -9,6 +9,10 @@ const LATENCY_BOUNDS = [100, 300, 600, 1000, 2000, 5000, 10000, 30000, 60000]
 const finite = (value, max, min = 0) => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
 const round = (n) => Math.round(n * 100) / 100
 
+export function telemetryEventId(value) { return typeof value === 'string' && /^(?:evt|client)_[a-f0-9]{24}$/.test(value) ? value : null }
+export function telemetryErrorKind(value) { return ERROR_KINDS.has(value) ? value : 'Error' }
+const errorStatus = (value) => Number.isInteger(value) && (value === 0 || value >= 100 && value <= 599) ? value : 0
+
 export function telemetryRoute(value) {
   const path = typeof value === 'string' ? value.split(/[?#]/)[0] : ''
   return ROUTES.has(path) ? path : null
@@ -32,11 +36,16 @@ export function normalizeTelemetryEvent(raw) {
     const endpoint = telemetryEndpoint(raw.endpoint)
     if (!endpoint || !finite(raw.durationMs, 60000) || !Number.isInteger(raw.status) || raw.status < 0 || raw.status > 599) return null
     Object.assign(event, { endpoint, durationMs: Math.round(raw.durationMs), status: raw.status })
+    const eventId = telemetryEventId(raw.eventId)
+    if (eventId && (raw.status === 0 || raw.status >= 400)) event.eventId = eventId
   } else if (raw.name === 'web_vital') {
     if (!['lcp', 'cls', 'inp'].includes(raw.metric) || !finite(raw.value, raw.metric === 'cls' ? 20 : 60000)) return null
     Object.assign(event, { metric: raw.metric, value: round(raw.value) })
   } else if (raw.name === 'client_error') {
-    event.kind = ERROR_KINDS.has(raw.kind) ? raw.kind : 'Error'
+    event.kind = telemetryErrorKind(raw.kind)
+    event.status = errorStatus(raw.status)
+    const eventId = telemetryEventId(raw.eventId)
+    if (eventId) event.eventId = eventId
   } else if (raw.name === 'room_performance') {
     if (!finite(raw.fps, 240) || !finite(raw.drawCalls, 10000) || !finite(raw.triangles, 10000000) || !['low', 'mid', 'high'].includes(raw.quality)) return null
     Object.assign(event, { fps: round(raw.fps), drawCalls: Math.round(raw.drawCalls), triangles: Math.round(raw.triangles), quality: raw.quality })
@@ -81,7 +90,8 @@ export function addTelemetry(bucket, event, now) {
   }
   if (event.name === 'client_error' || (event.name === 'api_request' && (event.status === 0 || event.status >= 500))) {
     bucket.errors++
-    bucket.recentErrors.push({ at: new Date(now).toISOString(), route: event.route, kind: event.kind || 'NetworkError', ...(event.status != null ? { status: event.status } : {}) })
+    const eventId = telemetryEventId(event.eventId)
+    bucket.recentErrors.push({ at: new Date(now).toISOString(), route: event.route, kind: event.kind || 'NetworkError', status: errorStatus(event.status), ...(eventId ? { eventId } : {}) })
     bucket.recentErrors = bucket.recentErrors.slice(-20)
   }
 }
