@@ -8,7 +8,7 @@ import { deleteAssistantUserData } from './assistant.js'
 // - 不回传任何密钥；手机号默认脱敏，只有明确要求才给全号
 // - 删除类操作一律「先列清单、再删」，并在响应里回删除数量
 
-import { json, apiErr, nowISO } from '../packages/core/util.js'
+import { json, apiErr, nowISO, safeErrorCategory } from '../packages/core/util.js'
 import { normalizeAvatar, normalizeAvatarUrl } from '../packages/core/profile.js'
 import { verifyAdminSession, issueAdminSession, verifyToken } from '../packages/core/auth.js'
 import { getUserIdentity } from '../packages/core/identity.js'
@@ -153,7 +153,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       return json({ ok: true, id, nick: u.nick || '', unboundDevices: unbound, occupancyCleared: occChanged })
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -182,7 +182,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       await auditAdmin(c, { type: 'admin', action: '后台登录', target: '会话 12 小时' })
       return json({ ok: true, session, expAt: Date.now() + sessionTtlMs, ttlMs: sessionTtlMs })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -201,7 +201,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         ttlMs: payload ? Math.max(0, payload.exp - Date.now()) : null,
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -256,7 +256,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         types: mod.AUDIT_TYPES,
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -298,7 +298,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         },
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -337,7 +337,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       await auditAdmin(c, { type: 'sync', action: '发送登录验证码', target: phone.slice(0, 3) + '****' + phone.slice(-4) })
       return json({ ok: true, waitSec: 60 })
     } catch (e) {
-      return apiErr('bad_gateway', String((e && e.message) || e), 502)
+      return apiErr('bad_gateway', '服务暂时不可用，请稍后重试', 502)
     }
   })
 
@@ -378,7 +378,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
 
       return json({ ok: true, ...(await accountList(env, store)) })
     } catch (e) {
-      return apiErr('bad_gateway', String((e && e.message) || e), 502)
+      return apiErr('bad_gateway', '服务暂时不可用，请稍后重试', 502)
     }
   })
 
@@ -428,7 +428,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
             alive: false,
             status: 0,
             ms: Date.now() - t0,
-            hint: String((e && e.message) || e).slice(0, 60),
+            hint: safeErrorCategory(e),
           }
         }
       }
@@ -448,7 +448,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       })
       return json({ ok: true, ...summary })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -529,7 +529,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       })
       return json({ ok: true, imported: valid.length, skipped, ...(await accountList(env, store)) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -539,7 +539,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       if (bad) return bad
       return json(await accountList(env, store))
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -585,7 +585,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
 
       return json({ ok: true, ...(await accountList(env, store)) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -610,7 +610,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       }
       return json({ ok: true, ...(await accountList(env, store)) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -633,7 +633,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         hint: '把这个地址加到任意定时服务（cron-job.org / UptimeRobot 等），提醒就不再依赖“有人打开页面”。',
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -660,7 +660,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       await auditAdmin(c, { action: '清理过期日志', detail: { keepDays, removed: r.removed } })
       return json({ ok: true, keepDays, ...r, applied: true })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -695,7 +695,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
       return json({ total: items.length, items: items.slice(0, limit), buildings })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -710,7 +710,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       if (!u) return apiErr('not_found', '用户不存在', 404)
       return json({ user: publicUserForAdmin(u, { fullPhone: c.req.query('phone') === '1', buildings: (await getSiteConfig(store)).buildings }) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -755,7 +755,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       return json({ user: publicUserForAdmin(u, { buildings }) })
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -793,7 +793,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       return json({ ok: true, removedMessages })
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -809,7 +809,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       // 管理端看完整昵称（前台是打码的）
       return json({ total: arr.length, items: arr.slice().reverse() })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -828,7 +828,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       await store.put(`messages:${bid}`, kept)
       return json({ ok: true, total: kept.length })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -843,7 +843,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       await store.put(`messages:${bid}`, [])
       return json({ ok: true, removed: n })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -917,7 +917,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         rows,
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -944,7 +944,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       })
       return json({ ok: true })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -963,7 +963,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       await store.put(`queue:${bid}`, kept)
       return json({ ok: true, removed })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1011,7 +1011,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       }
       return json(report)
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1051,7 +1051,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       }
       return json({ ...out, account: account || null, pool, sync })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1069,7 +1069,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       if (withGroup) await store.del('ding:groupConv')
       return json({ ok: true, groupCleared: withGroup })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1132,7 +1132,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         hint: '自动群播报已关闭；群通道仅用于管理员主动测试或回复查询。',
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1201,7 +1201,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       }
       return json({ ok: true, ...out })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1221,7 +1221,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       items.sort((a, b) => String(b.at).localeCompare(String(a.at)))
       return json({ total: items.length, items: items.slice(0, limit) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1238,7 +1238,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       if (!data) return apiErr('not_found', '照片不存在或已清理', 404)
       return json({ dataUrl: data })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1272,7 +1272,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         messages: Array.isArray(msgList) ? msgList.length : 0,
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1304,7 +1304,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       const r = await auditMod.pruneAuditPhotos(store, { days, max: 0 })
       return json({ ok: true, days, candidates: r.expired, removed: r.removed, applied: true })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 

@@ -3,7 +3,7 @@ async function boundedFetch(url,options={}) { return fetch(url,{...options,signa
 // ESM / 纯 JS / 零依赖，仅用全局 fetch、crypto、atob/btoa。
 // 严格实现契约 docs/CONTRACTS.md §2.6。
 
-import { warn, safeJson } from './util.js'
+import { warn, safeJson, safeErrorCategory } from './util.js'
 import { hhmm } from './notice.js'
 
 // ---------- 内部工具 ----------
@@ -179,7 +179,7 @@ export async function verifyAndDecryptCallback({ headers, body, aesKey, token })
     const plain = JSON.parse(msg)
     return { ok: true, plain }
   } catch (e) {
-    return { ok: false, err: e?.message || 'decrypt_failed' }
+    return { ok: false, err: 'decrypt_failed' }
   }
 }
 
@@ -393,7 +393,7 @@ export function createDingTalk(env = {}) {
       if (!r.ok) {
         const body = await r.text().catch(() => '')
         warn('DingTalk batchSend failed:', r.status)
-        return { ok: false, err: `http_${r.status}:${String(body).slice(0, 160)}` }
+        return { ok: false, err: `http_${r.status}` }
       }
       return { ok: true }
     }
@@ -427,7 +427,7 @@ export function createDingTalk(env = {}) {
       }),
     })
     const j = await r.json().catch(() => ({}))
-    if (j.errcode !== 0) return { ok: false, err: j.errmsg || 'send_failed' }
+    if (j.errcode !== 0) return { ok: false, err: 'send_failed' }
     return { ok: true }
   }
 
@@ -449,7 +449,7 @@ export function createDingTalk(env = {}) {
     })
     if (!r.ok) {
       const j = await r.json().catch(() => ({}))
-      return { ok: false, err: j.message || `http_${r.status}` }
+      return { ok: false, err: `http_${r.status}` }
     }
     const j = await r.json().catch(() => ({}))
     return { ok: true, taskId: j.id || j.taskId || undefined }
@@ -480,7 +480,7 @@ export function createDingTalk(env = {}) {
       body: JSON.stringify(payload),
     })
     const j = await r.json().catch(() => ({}))
-    if (j.errcode !== 0 && j.status !== 0) return { ok: false, err: j.errmsg || 'markdown_failed' }
+    if (j.errcode !== 0 && j.status !== 0) return { ok: false, err: 'markdown_failed' }
     return { ok: true }
   }
 
@@ -512,7 +512,7 @@ export function createDingTalk(env = {}) {
     if (!r.ok) {
       // 把钉钉的报错原文带出来，否则只有 http_400 完全没法排查
       const body = await r.text().catch(() => '')
-      return { ok: false, err: `http_${r.status}:${String(body).slice(0, 160)}` }
+      return { ok: false, err: `http_${r.status}` }
     }
     return { ok: true }
   }
@@ -550,10 +550,10 @@ export function createDingTalk(env = {}) {
         }),
       })
       const j = await r.json().catch(() => ({}))
-      if (!r.ok) return { ok: false, err: j.message || `http_${r.status}` }
+      if (!r.ok) return { ok: false, err: `http_${r.status}` }
       return { ok: true, processQueryKey: j.processQueryKey || '' }
     } catch (e) {
-      return { ok: false, err: String((e && e.message) || e) }
+      return { ok: false, err: safeErrorCategory(e) }
     }
   }
 
@@ -579,7 +579,7 @@ export function createDingTalk(env = {}) {
       body: JSON.stringify(payload),
     })
     const j = await r.json().catch(() => ({}))
-    if (j.errcode !== 0 && j.status !== 0) return { ok: false, err: j.errmsg || 'broadcast_failed' }
+    if (j.errcode !== 0 && j.status !== 0) return { ok: false, err: 'broadcast_failed' }
     return { ok: true }
   }
 
@@ -597,7 +597,7 @@ export function createDingTalk(env = {}) {
       body: JSON.stringify({ userid: userId, language: 'zh_CN' }),
     })
     const j = await r.json().catch(() => ({}))
-    if (j.errcode !== 0) return { ok: false, err: j.errmsg || `errcode_${j.errcode}` }
+    if (j.errcode !== 0) return { ok: false, err: 'upstream_error' }
     const res = j.result || {}
     return {
       ok: true,
@@ -626,10 +626,10 @@ export function createDingTalk(env = {}) {
         }),
       })
       const j = await r.json().catch(() => ({}))
-      if (!j.accessToken) return { ok: false, err: j.message || `http_${r.status}` }
+      if (!j.accessToken) return { ok: false, err: `http_${r.status}` }
       return { ok: true, accessToken: j.accessToken, corpId: j.corpId || '' }
     } catch (e) {
-      return { ok: false, err: String((e && e.message) || e) }
+      return { ok: false, err: safeErrorCategory(e) }
     }
   }
 
@@ -640,7 +640,7 @@ export function createDingTalk(env = {}) {
         headers: { 'x-acs-dingtalk-access-token': userAccessToken },
       })
       const j = await r.json().catch(() => ({}))
-      if (!r.ok) return { ok: false, err: j.message || `http_${r.status}` }
+      if (!r.ok) return { ok: false, err: `http_${r.status}` }
       return {
         ok: true,
         unionId: j.unionId || '',
@@ -650,7 +650,7 @@ export function createDingTalk(env = {}) {
         mobile: j.mobile || '',
       }
     } catch (e) {
-      return { ok: false, err: String((e && e.message) || e) }
+      return { ok: false, err: safeErrorCategory(e) }
     }
   }
 
@@ -669,10 +669,10 @@ export function createDingTalk(env = {}) {
         }
       )
       const j = await r.json().catch(() => ({}))
-      if (j.errcode !== 0) return { ok: false, err: j.errmsg || `errcode_${j.errcode}` }
+      if (j.errcode !== 0) return { ok: false, err: 'upstream_error' }
       return { ok: true, userId: (j.result && j.result.userid) || '' }
     } catch (e) {
-      return { ok: false, err: String((e && e.message) || e) }
+      return { ok: false, err: safeErrorCategory(e) }
     }
   }
 
@@ -691,10 +691,10 @@ export function createDingTalk(env = {}) {
         }
       )
       const j = await r.json().catch(() => ({}))
-      if (j.errcode !== 0) return { ok: false, err: j.errmsg || `errcode_${j.errcode}` }
+      if (j.errcode !== 0) return { ok: false, err: 'upstream_error' }
       return { ok: true, userId: (j.result && j.result.userid) || '' }
     } catch (e) {
-      return { ok: false, err: String((e && e.message) || e) }
+      return { ok: false, err: safeErrorCategory(e) }
     }
   }
 
