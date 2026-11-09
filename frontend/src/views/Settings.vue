@@ -2,36 +2,15 @@
   <div class="page settings">
     <van-nav-bar title="设置" />
 
-    <!-- 身份信息：钉钉登录即账号，不再有「绑定」概念 -->
-    <van-cell-group inset title="我的账号">
-      <van-cell title="住宿楼" :value="dorm.name || '选择住宿楼'" label="选一次后自动记住，可随时切换" is-link @click="dorm.showPicker = true" />
-      <van-cell
-        title="钉钉账号"
-        :value="user?.dingNick || (user?.dingUserId ? '已登录' : '—')"
-        :label="user?.dingUserId ? '取衣提醒会发到这个钉钉' : '未获取到钉钉身份'"
-      />
-      <van-cell title="手机号" :value="user?.mobile || '—'" />
-      <van-cell>
-        <template #title>
-          <button class="logout-btn" type="button" :disabled="loggingOut" @click="doLogout">
-            {{ loggingOut ? '退出中…' : '退出登录' }}
-          </button>
-        </template>
-      </van-cell>
-    </van-cell-group>
-
-    <van-cell-group inset title="朋友与助手"><van-cell title="朋友、私聊与代取" is-link to="/social" /><van-cell title="洗衣助手与 Skills" is-link to="/assistant" /></van-cell-group>
-    <FavoriteSettings />
-    <!-- 资料编辑：昵称 + 头像（对外展示时昵称默认打码，如「张**」） -->
-    <van-cell-group inset title="我的资料（对外默认打码）">
+    <van-cell-group inset title="资料与账号" class="account-group">
       <div class="profile">
         <div class="profile-head">
           <Avatar :name="nick" :src="avatarUrl" :size="56" />
           <div class="profile-head-meta">
             <div class="profile-name">{{ nick || '还没起名' }}</div>
             <div class="profile-actions">
-              <button class="dice-btn" type="button" @click="rollNick">🎲 换昵称</button>
-              <button class="dice-btn" type="button" @click="pickUpload">📷 上传</button>
+              <button class="dice-btn" type="button" @click="rollNick">换昵称</button>
+              <button class="dice-btn" type="button" @click="pickUpload">上传头像</button>
               <button class="dice-btn" type="button" :disabled="dingAvatarLoading" @click="useDingAvatar">
                 {{ dingAvatarLoading ? '获取中…' : '用钉钉头像' }}
               </button>
@@ -48,6 +27,20 @@
         </div>
         <div class="profile-tip">留言板/排队里别人看到的是 {{ maskedPreview }}</div>
       </div>
+      <van-cell title="住宿楼" :value="dorm.name || '选择住宿楼'" :label="!user?.dormBuilding ? '首次选择后自动记住，之后可自行修改一次' : dorm.changesRemaining > 0 ? `还可自行修改 ${dorm.changesRemaining} 次` : '自行修改次数已用完，需要调整请联系管理员'" :is-link="!user?.dormBuilding || dorm.changesRemaining > 0" @click="(!user?.dormBuilding || dorm.changesRemaining > 0) && (dorm.showPicker = true)" />
+      <van-cell
+        title="钉钉账号"
+        :value="user?.dingNick || (user?.dingUserId ? '已登录' : '—')"
+        :label="user?.dingUserId ? '取衣提醒会发到这个钉钉' : '未获取到钉钉身份'"
+      />
+      <van-cell title="手机号" :value="user?.mobile || '—'" />
+      <van-cell>
+        <template #title>
+          <button class="logout-btn" type="button" :disabled="loggingOut" @click="doLogout">
+            {{ loggingOut ? '退出中…' : '退出登录' }}
+          </button>
+        </template>
+      </van-cell>
     </van-cell-group>
 
     <!-- 通知 -->
@@ -62,7 +55,7 @@
       <van-cell title="iPhone 怎么开通知" class="ios-guide-cell">
         <template #label>
           <ol class="ios-guide">
-            <li>用 <b>Safari</b> 打开本站（微信/QQ 内置浏览器不行）</li>
+            <li>用 <b>Safari</b> 打开本站（钉钉、微信或 QQ 内置浏览器不支持此方式）</li>
             <li>点底部「分享」→「<b>添加到主屏幕</b>」</li>
             <li>从<b>主屏幕图标</b>打开（不是 Safari 标签页）</li>
             <li>回来点上面的「开启通知」，弹窗选<b>允许</b></li>
@@ -104,6 +97,17 @@
           推送：{{ testResult.push?.ok ? '已送达' : testResult.push?.err || '失败' }}
         </div>
       </div>
+    </van-cell-group>
+
+    <FavoriteSettings />
+
+    <van-cell-group inset title="朋友与代取" class="collaboration-group">
+      <van-cell title="朋友与代取" label="添加好友、私聊和请求代取衣物" is-link to="/social" class="settings-destination settings-social">
+        <template #icon><van-icon name="friends-o" class="destination-icon" /></template>
+      </van-cell>
+      <van-cell title="洗衣助手" label="问机器状态，管理自己的洗衣偏好" is-link to="/assistant" class="settings-destination settings-assistant">
+        <template #icon><van-icon name="chat-o" class="destination-icon" /></template>
+      </van-cell>
     </van-cell-group>
 
     <van-cell-group v-if="adminVisible" inset title="管理"><van-cell title="管理员后台" is-link @click="goAdmin" /></van-cell-group>
@@ -472,7 +476,8 @@ onMounted(async () => {
 
 <style scoped>
 .profile {
-  padding: 12px 4px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
 }
 .profile-head {
   display: flex;
@@ -508,7 +513,8 @@ onMounted(async () => {
 .dice-btn {
   align-self: flex-start;
   font-size: 12px;
-  padding: 4px 10px;
+  min-height: 36px;
+  padding: 6px 10px;
   border-radius: 999px;
   border: 1px solid rgba(148, 163, 184, 0.35);
   background: rgba(148, 163, 184, 0.12);
@@ -543,6 +549,7 @@ onMounted(async () => {
 }
 .nick-input {
   flex: 1;
+  min-width: 0;
   background: rgba(148, 163, 184, 0.1);
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 8px;
@@ -551,6 +558,14 @@ onMounted(async () => {
   padding: 8px 10px;
   outline: none;
 }
+.nick-input:focus-visible { border-color: #7dd3fc; box-shadow: 0 0 0 2px #7dd3fc22; }
+.settings :deep(.van-cell-group__title) { padding-top: 24px; font-weight: 600; letter-spacing: .02em; }
+.settings :deep(.van-cell__value) { min-width: 0; overflow-wrap: anywhere; }
+.settings-destination { min-height: 72px; align-items: center; }
+.destination-icon { display: grid; place-items: center; width: 38px; height: 38px; margin-right: 12px; border: 1px solid; border-radius: 10px; font-size: 21px; }
+.settings-social .destination-icon { color: #a5e5c9; border-color: #335f52; background: #15342d; }
+.settings-assistant .destination-icon { color: #a4dcf5; border-color: #365c75; background: #142f45; }
+.dice-btn:focus-visible, .logout-btn:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 2px; }
 .profile-tip {
   margin-top: 8px;
   font-size: 11px;

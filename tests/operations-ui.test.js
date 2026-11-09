@@ -15,6 +15,19 @@ function evaluate(source, bindings, returned) {
   return new Function(...Object.keys(bindings), script + '\nreturn ' + returned)(...Object.values(bindings))
 }
 const base = { ref, computed, watch, onMounted() {}, onUnmounted() {}, showToast() {}, showConfirmDialog: async () => {} }
+// Transport has its own tests. Keep this view harness free of sockets, timers
+// and background refreshes so request ordering remains under each test's control.
+const messageBase = {
+  ...base, nextTick,
+  document: { visibilityState: 'visible', querySelector: () => null, getElementById: () => null },
+  createChannelTransport: ({ onState }) => ({
+    start() { onState('polling') }, stop() { onState('stopped') }, visibilityChanged() {},
+  }),
+  prepareCommunityFile: async () => assert.fail('text-only fixture must not prepare media'),
+  uploadCommunityMedia: async () => assert.fail('text-only fixture must not upload media'),
+}
+const loggedInUser = (id = 'a') => reactive({ user: { id }, get isLoggedIn() { return Boolean(this.user?.id) } })
+const channelDirectory = (dorm) => ({ channels: [{ code: 'public', name: '公共频道' }, ...dorm.buildings], currentBuilding: 'guiyuan' })
 const config = (endHour = 22) => ({ broadcast: { enabled: true, startHour: 8, endHour, hours: [] } })
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 
@@ -102,14 +115,15 @@ test('留言切换频道后旧列表不能覆盖当前，失败发送保留草�
   const pending = []
   const dorm = reactive({ code: 'guiyuan', name: '桂园', buildings: [{ code: 'guiyuan', name: '桂园' }, { code: 'liuyuan', name: '柳园' }] })
   const route = reactive({ query: { channel: 'guiyuan' } })
-  const user = reactive({ user: { id: 'a' } })
-  const panel = evaluate(sources.messages, { ...base, useRoute: () => route, useRouter: () => ({ replace() {}, push() {} }), useDormStore: () => dorm, useUserStore: () => user,
+  const user = loggedInUser()
+  const panel = evaluate(sources.messages, { ...messageBase, useRoute: () => route, useRouter: () => ({ replace() {}, push() {} }), useDormStore: () => dorm, useUserStore: () => user,
     loadBoard: async () => ({ board: { floors: [] } }),
     api: (path, opts) => {
       if (opts?.method === 'POST') return Promise.reject(new Error('offline'))
-      if (path === '/api/messages/channels') return Promise.resolve({ channels: dorm.buildings, currentBuilding: 'guiyuan' })
+      if (path === '/api/messages/channels') return Promise.resolve(channelDirectory(dorm))
       const task = deferred(); pending.push({ ...task, path }); return task.promise
-    } }, '({ load, messages, text, send, sendError })')
+    } }, '({ load, loadChannels, messages, text, send, sendError })')
+  await panel.loadChannels()
   assert.match(pending[0].path, /channel=guiyuan/)
   route.query = { channel: 'liuyuan' }
   await nextTick()
@@ -132,13 +146,13 @@ test('留言切换频道后旧列表不能覆盖当前，失败发送保留草�
 test('频道草稿按频道和账号隔离，公共频道发言不携带机器字段', async () => {
   const dorm = reactive({ code: 'guiyuan', buildings: [{ code: 'guiyuan', name: '桂园' }, { code: 'liuyuan', name: '柳园' }] })
   const route = reactive({ query: { channel: 'guiyuan' } })
-  const user = reactive({ user: { id: 'a' } })
+  const user = loggedInUser()
   const sent = []
-  const panel = evaluate(sources.messages, { ...base, useRoute: () => route, useRouter: () => ({ replace() {}, push() {} }), useDormStore: () => dorm, useUserStore: () => user,
+  const panel = evaluate(sources.messages, { ...messageBase, useRoute: () => route, useRouter: () => ({ replace() {}, push() {} }), useDormStore: () => dorm, useUserStore: () => user,
     loadBoard: async () => ({ board: { floors: [] } }),
     api: async (path, opts) => {
       if (opts?.method === 'POST') { sent.push(opts.body); return { ok: true } }
-      if (path === '/api/messages/channels') return { channels: dorm.buildings, currentBuilding: 'guiyuan' }
+      if (path === '/api/messages/channels') return channelDirectory(dorm)
       return { messages: [], pagination: {} }
     } }, '({ text, reply, send, machineId })')
   panel.text.value = '桂园草稿'
@@ -161,4 +175,39 @@ test('频道草稿按频道和账号隔离，公共频道发言不携带机器�
   assert.equal(sent.at(-1).machineId, undefined)
   assert.equal(sent.at(-1).replyTo, 'public-reply')
   assert.equal(panel.text.value, '')
+})
+
+test('留言分页去重并防止重复加载，切换频道后迟到的旧页不能追加到新频道', async () => {
+  const pending = []
+  const dorm = reactive({ code: 'guiyuan', buildings: [{ code: 'guiyuan', name: '桂园' }, { code: 'liuyuan', name: '柳园' }] })
+  const route = reactive({ query: { channel: 'guiyuan' } })
+  const user = loggedInUser()
+  const panel = evaluate(sources.messages, { ...messageBase, useRoute: () => route, useRouter: () => ({ replace() {}, push() {} }), useDormStore: () => dorm, useUserStore: () => user,
+    loadBoard: async () => ({ board: { floors: [] } }),
+    api: (path) => {
+      if (path === '/api/messages/channels') return Promise.resolve(channelDirectory(dorm))
+      const task = deferred(); pending.push({ ...task, path }); return task.promise
+    } }, '({ load, loadChannels, messages, page, hasMore })')
+  await panel.loadChannels()
+  pending[0].resolve({ messages: [{ id: 'first' }, { id: 'second' }], pagination: { hasMore: true } })
+  await nextTick(); await nextTick()
+  const secondPage = panel.load(true)
+  await panel.load(true)
+  assert.equal(pending.length, 2, '同一页在加载中不能重复请求')
+  assert.match(pending[1].path, /page=2/)
+  pending[1].resolve({ messages: [{ id: 'second' }, { id: 'third' }], pagination: { hasMore: true } })
+  await secondPage
+  assert.deepEqual(panel.messages.value.map((message) => message.id), ['first', 'second', 'third'])
+  assert.equal(panel.page.value, 2)
+  const oldPage = panel.load(true)
+  route.query = { channel: 'liuyuan' }
+  await nextTick()
+  assert.match(pending.at(-1).path, /channel=liuyuan&page=1/)
+  pending.at(-1).resolve({ messages: [{ id: 'new-channel' }], pagination: { hasMore: false } })
+  await nextTick(); await nextTick()
+  pending[2].resolve({ messages: [{ id: 'old-page-three' }], pagination: { hasMore: true } })
+  await oldPage
+  assert.deepEqual(panel.messages.value.map((message) => message.id), ['new-channel'])
+  assert.equal(panel.page.value, 1)
+  assert.equal(panel.hasMore.value, false)
 })

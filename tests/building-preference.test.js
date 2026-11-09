@@ -25,7 +25,7 @@ async function fixture(seed = true) {
 test('老用户未绑定住宿楼时返回null；保存后后续读取保留且不改变昵称和身份', async () => {
   const { call, store } = await fixture()
   assert.equal((await call('GET', '/api/auth/me')).data.user.dormBuilding, null)
-  for (const dormBuilding of ['guiyuan', 'liuyuan', 'meiyuan', 'zhuyuan']) {
+  for (const dormBuilding of ['guiyuan', 'liuyuan']) {
     const result = await call('POST', '/api/user/profile', { dormBuilding })
     assert.equal(result.status, 200)
     assert.equal(result.data.user.dormBuilding, dormBuilding)
@@ -61,4 +61,22 @@ test('未登录不能绑定住宿楼，真实用户记录缺失时不写入临�
   assert.equal((await call('POST', '/api/user/profile', { dormBuilding: 'guiyuan' }, false)).status, 401)
   assert.equal((await call('POST', '/api/user/profile', { dormBuilding: 'guiyuan' })).status, 409)
   assert.equal(await store.get('user:u1'), null)
+})
+
+
+test('首次绑定不消耗次数，可自行改一次，同楼保存不计次，第二次拒绝且不得伪造计数', async()=>{
+ const {call,store}=await fixture()
+ assert.equal((await call('POST','/api/user/profile',{dormBuilding:'guiyuan'})).data.user.dormChangesRemaining,1)
+ assert.equal((await call('POST','/api/user/profile',{dormBuilding:'liuyuan',dormChangeCount:-99})).data.user.dormChangesRemaining,0)
+ assert.equal((await call('POST','/api/user/profile',{dormBuilding:'liuyuan'})).status,200)
+ const rejected=await call('POST','/api/user/profile',{dormBuilding:'meiyuan',nick:'不能写'})
+ assert.equal(rejected.status,409);assert.equal(rejected.data.error.code,'dorm_change_limit')
+ assert.equal((await store.get('user:u1')).dormBuilding,'liuyuan');assert.equal((await store.get('user:u1')).nick,'原昵称')
+})
+
+test('同时修改住宿楼只允许一次成功，错误包含可追溯编号', async()=>{
+ const {call,store}=await fixture();await call('POST','/api/user/profile',{dormBuilding:'guiyuan'})
+ const results=await Promise.all(['liuyuan','meiyuan'].map(dormBuilding=>call('POST','/api/user/profile',{dormBuilding})))
+ assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);assert.equal((await store.get('user:u1')).dormChangeCount,1)
+ const failure=results.find(r=>r.status===409);assert.match(failure.data.error.eventId,/^evt_/);assert.equal(failure.data.error.status,409)
 })

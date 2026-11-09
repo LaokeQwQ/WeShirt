@@ -1,6 +1,8 @@
 // 运营规则仅依赖标准 Web API。不同页面读取健康投影时不会增加确认次数。
+import { applyRegisteredAvailability } from './availability.js'
+import { currentDormCatalog, enabledMachineBoard } from './buildings.js'
 const MINUTE = 60000
-// 同步周期为五分钟，允许两分钟调度抖动，避免每轮末尾无故显示过期。
+// 容忍短暂抓取失败和调度抖动；超过窗口统一显示过期。
 const FRESH_MS = 7 * MINUTE
 const locks = new WeakMap()
 export const DEFAULT_OPERATIONS_CONFIG = Object.freeze({ broadcast: { enabled: true, startHour: 8, endHour: 22, hours: [] } })
@@ -166,6 +168,7 @@ export async function runOperations({ store, board, env = {}, now = Date.now(), 
       const suspectedUncollected = Boolean(task && Date.parse(task.endAt) <= now - 5 * MINUTE && !['occupied', 'abnormal', 'faulty'].includes(machine.state) && !machine.health?.stale)
       return { ...machine, suspectedUncollected }
     })
+    projected = applyRegisteredAvailability(projected, { occupancy, tasksByUser, now })
     const alerts = []
     for (const m of machines(projected)) {
       if (m.health?.confirmedFault && !previous.machines?.[String(m.id)]?.confirmedFault) {
@@ -178,7 +181,8 @@ export async function runOperations({ store, board, env = {}, now = Date.now(), 
     if (hourKey && freshSnapshot(board, now) !== null) {
       const key = `operations:broadcast:${bid}`
       const last = (await store.get(key, {})) || {}
-      const hash = meaningfulBoardHash(projected, last.successHash)
+      const catalog = await currentDormCatalog(store, env.SITE_BUILDINGS)
+      const hash = meaningfulBoardHash(enabledMachineBoard(projected, catalog), last.successHash)
       if (last.checkedHour === hourKey && (last.success || last.unchanged)) broadcastResult.reason = 'already_checked'
       else if (hash === '[]' || last.successHash === hash) {
         await store.put(key, { ...last, checkedHour: hourKey, unchanged: true, success: false })
@@ -189,11 +193,20 @@ export async function runOperations({ store, board, env = {}, now = Date.now(), 
         const attempt = { ...last, checkedHour: hourKey, unchanged: false, success: false, retryAfter: now + MINUTE, attemptAt: now }
         await store.put(key, attempt)
         try {
-          const broadcastBoard = projectBoard({ ...projected, floors: projected.floors.map((floor) => ({ ...floor, machines: floor.machines.filter((m) => m.state !== 'unknown' && !m.health?.suspectedFault) })) }, (m) => m)
-          const sent = await broadcast({ board: broadcastBoard, hourKey, config })
-          if (!sent?.ok) throw new Error(sent?.error || sent?.err || '群播报发送失败')
-          await store.put(key, { ...attempt, success: true, successHash: hash, successAt: new Date(now).toISOString(), retryAfter: 0 })
-          broadcastResult = { sent: true, hourKey }
+          // Site configuration can change while an earlier notification awaits
+          // I/O. Recheck just before handing the public summary to its sender.
+          const current = enabledMachineBoard(projected, await currentDormCatalog(store, env.SITE_BUILDINGS))
+          const currentHash = meaningfulBoardHash(current, last.successHash)
+          if (currentHash === '[]' || last.successHash === currentHash) {
+            await store.put(key, { ...attempt, unchanged: true, retryAfter: 0 })
+            broadcastResult.reason = 'unchanged'
+          } else {
+            const broadcastBoard = projectBoard({ ...current, floors: current.floors.map((floor) => ({ ...floor, machines: floor.machines.filter((m) => m.state !== 'unknown' && !m.health?.suspectedFault) })) }, (m) => m)
+            const sent = await broadcast({ board: broadcastBoard, hourKey, config })
+            if (!sent?.ok) throw new Error(sent?.error || sent?.err || '群播报发送失败')
+            await store.put(key, { ...attempt, success: true, successHash: currentHash, successAt: new Date(now).toISOString(), retryAfter: 0 })
+            broadcastResult = { sent: true, hourKey }
+          }
         } catch (e) {
           broadcastResult = { sent: false, reason: 'failed', error: String(e?.message || e).slice(0, 160) }
           await store.put(key, { ...attempt, error: broadcastResult.error })

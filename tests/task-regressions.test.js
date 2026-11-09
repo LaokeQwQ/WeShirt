@@ -31,7 +31,7 @@ async function fixture(machine = { id: 'd1', name: '柳园西', state: 'idle' },
 
 test('后台 D1 绑定的无烘干名称机器可登记 10～180 分钟整数，类型从服务端返回', async () => {
   const { call, store } = await fixture()
-  for (const minutes of [10, 30, 60, 90, 120, 180]) {
+  for (const minutes of [10, 30, 40, 60, 90, 120, 180]) {
     const result = await call('POST', '/api/tasks', { machineId: 'd1', minutes })
     assert.equal(result.status, 200, JSON.stringify(result.data))
     assert.equal(result.data.task.kind, 'dryer')
@@ -50,8 +50,11 @@ test('后台 D1 绑定的无烘干名称机器可登记 10～180 分钟整数，
 
 test('普通洗衣机仍执行洗衣时长校验，客户端不能伪造 kind', async () => {
   const { call } = await fixture({ id: 'w1', name: '洗衣机', state: 'idle' }, { 1: 'w1' })
-  assert.equal((await call('POST', '/api/tasks', { machineId: 'w1', minutes: 60, kind: 'dryer' })).status, 400)
+  const custom=await call('POST', '/api/tasks', { machineId: 'w1', minutes: 60, kind: 'dryer' }); assert.equal(custom.status,200); assert.equal(custom.data.task.kind,'washer'); assert.equal((await call('POST','/api/tasks',{machineId:'w1',minutes:181})).status,400)
   assert.equal((await call('POST', '/api/tasks', { machineId: 'w1', minutes: 42 })).status, 200)
+  for(const minutes of [true, [6], {value:6}, null, '6e1']) {
+    assert.equal((await call('POST','/api/tasks',{machineId:'w1',minutes})).status,400)
+  }
 })
 
 test('没有后台绑定的老烘干机仍按名称兼容', async () => {
@@ -76,21 +79,21 @@ test('外部回写按配置的上游状态码归一化', async () => {
   assert.equal(machines[2].health.suspectedFault,true)
 })
 
-test('过期估时不会在下一次同步重启，D机位默认估时60分钟', async () => {
+test('缺少上游结束时间保持未知，旧固定估时被清除，真实结束时间保留', async () => {
   const store = createMemoryStore()
   await store.put('mapping:b1', { mapping: { D1: 'd1' } })
-  const raws = [{ id: 'd1', name: '柳园西', state: 2, floorCode: '4', finishTime: null }]
+  await store.put('est:b1:d1',{endAt:Date.now()+3600000,mins:60})
+  const raws = [{ id: 'd1', name: '设备', state: 2, floorCode: '4', finishTime: null }]
   await runSync(ENV, store, { raws })
-  const estimate = await store.get('est:b1:d1')
-  assert.equal(estimate.mins, 60)
-  estimate.endAt = Date.now() - 60000
-  await store.put('est:b1:d1', estimate)
-  await runSync(ENV, store, { raws })
-  const machine = (await store.get('machines:b1')).board.floors[0].machines[0]
-  assert.equal(new Date(machine.finishAt).getTime(), estimate.endAt)
-  assert.ok(machine.leftMin <= 0)
-  await runSync(ENV, store, { raws: [{ ...raws[0], state: 1 }] })
-  assert.equal(await store.get('est:b1:d1'), null)
+  let machine=(await store.get('machines:b1')).board.floors[0].machines[0]
+  assert.equal(machine.finishAt,null)
+  assert.equal(machine.leftMin,null)
+  assert.equal(await store.get('est:b1:d1'),null)
+  const finishTime=new Date(Date.now()+6*60000).toISOString()
+  await runSync(ENV,store,{raws:[{...raws[0],finishTime}]})
+  machine=(await store.get('machines:b1')).board.floors[0].machines[0]
+  assert.equal(machine.finishAt,finishTime)
+  assert.equal(machine.leftMin,6)
 })
 
 for (const method of ['take', 'delete']) {
@@ -272,6 +275,7 @@ test('主动催衣只私信占用者，不群发或群@', async (t) => {
 
 test('队列按每台机器的先来先到返回 1、2、3 位', async () => {
   const { store, call } = await fixture()
+  const cached=await store.get('machines:b1');cached.board.floors[0].machines.push({id:'other',name:'桂园其他机',state:'idle'});await store.put('machines:b1',cached)
   await store.put('queue:b1', [
     { id: 'q1', machineId: 'd1', userId: 'a' },
     { id: 'q2', machineId: 'other', userId: 'b' },
@@ -285,10 +289,58 @@ test('队列按每台机器的先来先到返回 1、2、3 位', async () => {
 
 test('留言仅查询当前作者，不扫描整个用户库', async () => {
   const { store, call } = await fixture()
-  await store.put('messages:b1', [{ id: 'm1', userId: 'u1', nick: '旧昵称', text: 'hi' }])
+  await store.put('messages:b1', [{ id: 'm1', userId: 'u1', nick: '旧昵称', text: 'hi', channel: 'public' }])
   const list = store.list.bind(store)
   store.list = async (prefix) => { assert.notEqual(prefix, 'user:'); return list(prefix) }
   const result = await call('GET', '/api/messages')
   assert.equal(result.status, 200)
   assert.equal(result.data.messages[0].nick, '测**')
+})
+
+
+test('上游02分类优先旧数字机位，无烘干别名也能登记40分钟', async () => {
+  const {call}=await fixture({id:'d1',name:'普通别名',categoryCode:'02',state:'idle'},{7:'d1'})
+  const result=await call('POST','/api/tasks',{machineId:'d1',minutes:40,kind:'washer'})
+  assert.equal(result.status,200)
+  assert.equal(result.data.task.kind,'dryer')
+  assert.equal(result.data.task.minutes,40)
+})
+
+test('明确六分钟桶自洁和上游六分钟计时均不会套用标准洗', async () => {
+  const finishAt=new Date(Date.now()+360000).toISOString()
+  const {call}=await fixture({id:'w1',name:'洗衣机',categoryCode:'00',state:'occupied',finishAt,leftMin:6},{1:'w1'})
+  const selected=await call('POST','/api/tasks',{machineId:'w1',minutes:6,program:'self_clean'})
+  assert.equal(selected.status,200)
+  assert.equal(selected.data.task.program,'self_clean')
+  assert.equal(selected.data.task.leftMin,6)
+  assert.equal(selected.data.task.selfCleaned,false)
+  const follow=await call('POST','/api/tasks',{machineId:'w1',mode:'machine',minutes:30})
+  assert.equal(follow.status,200)
+  assert.equal(follow.data.task.endAt,finishAt)
+  assert.equal(follow.data.task.program,undefined)
+  assert.equal((await call('POST','/api/tasks',{machineId:'w1',minutes:30,program:'self_clean'})).status,400)
+})
+
+test('恢复上报不覆盖真实运行状态和真实结束时间，上游仍故障时保留待复核', async () => {
+  const finishAt=new Date(Date.now()+1200000).toISOString()
+  const {call,store}=await fixture({id:'d1',name:'机器',state:'occupied',upstreamState:'occupied',finishAt,leftMin:20})
+  await store.put('operations:health:b1',{machines:{d1:{confirmedFault:true,recovering:true}}})
+  await store.put('faults:b1',{d1:{state:'recovered',recoveredAt:new Date().toISOString()}})
+  let machine=(await call('GET','/api/machines')).data.board.floors[0].machines[0]
+  assert.equal(machine.state,'occupied');assert.equal(machine.finishAt,finishAt)
+  const entry=await store.get('machines:b1');entry.board.floors[0].machines[0].upstreamState='faulty';entry.board.floors[0].machines[0].state='faulty';await store.put('machines:b1',entry)
+  machine=(await call('GET','/api/machines')).data.board.floors[0].machines[0]
+  assert.equal(machine.state,'unknown');assert.equal(machine.health.suspectedFault,true)
+})
+
+test('刚登记尚未更新的空闲机器显示登记占用，取衣后恢复上游状态', async () => {
+  const {call}=await fixture()
+  const task=(await call('POST','/api/tasks',{machineId:'d1',minutes:40})).data.task
+  let machine=(await call('GET','/api/machines')).data.board.floors[0].machines[0]
+  assert.equal(machine.state,'occupied');assert.equal(machine.availabilitySource,'user_report')
+  assert.match(machine.availabilityLabel,/登记/)
+  assert.equal('userId' in machine,false)
+  await call('POST','/api/tasks/'+task.id+'/take')
+  machine=(await call('GET','/api/machines')).data.board.floors[0].machines[0]
+  assert.equal(machine.state,'idle')
 })

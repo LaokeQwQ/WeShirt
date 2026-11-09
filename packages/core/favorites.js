@@ -1,5 +1,6 @@
 import { DORM_BUILDINGS, normalizeDormBuilding, dormBuildingName, filterDormFloors } from './buildings.js'
 import { withOperationLock } from './operations.js'
+import { resolveMachineKind } from './machine-kind.js'
 
 export class FavoriteError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status }
@@ -37,7 +38,7 @@ export function scopedFavoriteMachines(result, user, catalog = DORM_BUILDINGS) {
   const mapping = result?.mapping || board.slotMapping || {}
   return filterDormFloors({ ...board, slotMapping: mapping }, dorm, catalog).flatMap((floor) => (floor.machines || []).map((machine) => {
     const slot = Object.entries(mapping).find(([, id]) => String(id) === String(machine.id))?.[0]
-    const dryer = slot ? /(?:^|-)D\d+$/i.test(slot) : machine.kind === 'dryer' || /烘干|dry/i.test(machine.name || '')
+    const dryer = resolveMachineKind(machine,mapping)==='dryer'
     const position = slot?.split('-').at(-1)?.replace(/^D/i, '')
     const source = machine.displayName || machine.machineLabel || (position ? `${position}号${dryer ? '烘干机' : '洗衣机'}` : machine.name) || ''
     const clean = String(source).split(String(machine.id)).join('').replace(/[\u0000-\u001f]/g, '').trim()
