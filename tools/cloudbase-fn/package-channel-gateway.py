@@ -1,9 +1,11 @@
-"""Preserve the Linux executable bootstrap when packaging from Windows.
+"""Build a local audit ZIP and a directory-based MCP creation request.
 
 Usage: python tools/cloudbase-fn/package-channel-gateway.py CREATE_REQUEST.json OUTPUT_DIRECTORY
 Only produces local reviewable artifacts; never calls cloud services.
+
+The current MCP createFunction handler does not forward zipFile to Manager SDK.
+The ZIP is an audit artifact, not the input used by the generated request.
 """
-import base64
 import json
 from pathlib import Path
 import stat
@@ -37,10 +39,12 @@ def main():
     with zipfile.ZipFile(archive) as target:
         assert target.testzip() is None
         assert (target.getinfo("scf_bootstrap").external_attr >> 16) & 0o777 == 0o755
-    args.pop("functionRootPath")
-    args["zipFile"] = base64.b64encode(archive.read_bytes()).decode("ascii")
-    (output_dir / "create-function-packaged.json").write_text(json.dumps(request), encoding="utf-8")
-    print("Prepared executable ZIP and deployment request; no cloud changes made.")
+    # Preserve the absolute parent directory. A ZIP-only create request fails in
+    # the current MCP handler, and adding zipFile would not upload this archive.
+    args.pop("zipFile", None)
+    (output_dir / "create-function-with-root.json").write_text(json.dumps(request), encoding="utf-8")
+    print("Prepared audit ZIP and directory-based request; no cloud changes made.")
+    print("MCP repackages functionRootPath; verify the deployed archive and health endpoint.")
 
 
 if __name__ == "__main__":
