@@ -1,40 +1,45 @@
 # WeShirt
 
-[中文](README.md) · **English**
+<p align="center">
+  <img src="docs/assets/hero.en.svg" alt="WeShirt: your laundry room, a little easier to plan around." width="100%" />
+</p>
 
-A mobile web dashboard for dorm laundry rooms, with personal reminders and pickup coordination. Check available machines before carrying your laundry downstairs.
+<p align="center">
+  <a href="README.md">中文</a> · <b>English</b> · <a href="docs/DEPLOYMENT.en.md">Deployment</a> · <a href="https://github.com/LaokeQwQ/WeShirt/issues">Report an issue</a>
+</p>
 
-The recommended deployment is a **fully cloud-hosted SaaS setup on Tencent EdgeOne Pages and Tencent CloudBase**. EdgeOne Pages serves the frontend, Edge APIs and persistent KV storage. CloudBase periodically invokes the protected sync endpoint. This avoids maintaining your own server and reduces reliance on a single machine.
+Check the machines before carrying your laundry downstairs. WeShirt is a web app for dorm laundry rooms, with machine availability, laundry progress, queues and pickup reminders.
 
-WeShirt reads publicly available Haile Life machine status. It does not start machines, process payments or remotely control equipment. Availability and delivery still depend on the cloud platforms, network and upstream services.
+Use it in your phone's browser. Choose your dorm once; it will be remembered the next time you visit.
 
-## Features
+<img src="docs/assets/divider.svg" alt="" width="100%" />
 
-- **Dorm preference and dashboard:** remember the first selection, sync it after login, and browse machines by dorm in 3D or list views.
-- **Wash and dry tasks:** countdowns, advance reminders, pickup confirmation and public notes/disinfectant/self-cleaning records; drying supports 10–180 minutes, with a 60-minute default.
-- **Favorites and usual laundry times:** weekday and time-window reminders for idle favorite machines, at least 30 minutes apart, up to three successful reminders per window; registering a task stops that occurrence.
-- **Queues and messages:** position, estimated availability, cancellation, reminders for the machine's queue head near three minutes before completion and at the end stage, public and dorm channels, replies, identity badges and moderation.
-- **Friends and pickup help:** QR invitations, mutual acceptance, contacting the current occupant and pickup requests.
-- **Personal notifications:** DingTalk and browser Web Push; faults require repeated confirmation, and suspected uncollected laundry is a separate state.
-- **Site administration:** branding, school and dorm settings, member permissions, scoped volunteer inspections, Markdown announcements, hourly group summaries, alerts and performance statistics.
-- **Optional AI assistant:** restricted machine queries, user-controlled memory and prompt templates, with credentials stored only on the server.
+## Machines, queues and pickup
 
-Group summaries are checked hourly from 08:00 through 22:00 Beijing time by default and skipped when meaningful states have not changed. Estimates and queues help coordinate use; confirm conditions on site.
+| When | What you can do |
+| --- | --- |
+| Before washing | Find idle machines, switch between list and 3D views, and save favorites |
+| Waiting for a machine | Check your queue position and estimated availability, or use the dorm message board |
+| During a cycle | Register a wash or dry task, follow the countdown and get a pickup reminder |
+| Helping a friend | Arrange pickup with friends and confirm when the laundry has been collected |
 
-## Quick start
+Admins can maintain dorms, machine locations, announcements and notifications, and assign dorm inspections to volunteers. See [configuration](docs/CONFIGURATION.en.md) for the details.
 
-### Fully cloud-hosted deployment
+Machine status comes from Haile Life. Estimates help with planning; check the machine in person before use. WeShirt does not start machines or handle payments.
 
-1. Import the repository into Tencent EdgeOne Pages and select `master` as the production branch. Build with `npm ci && npm run build` and publish `dist`.
-2. Set server-side `AUTH_SECRET` (at least 16 characters) and `ADMIN_TOKEN` (at least 8 characters), then create and bind persistent KV storage.
-3. Deploy the APIs and frontend, then configure the data source, DingTalk and site settings in the admin panel.
-4. Deploy the [sync trigger](tools/cloudbase-fn/weshirt-sync-ping/README.en.md) on Tencent CloudBase. Set its endpoint and key through environment variables and schedule checks at least once per minute where supported.
+## Run it in the cloud
 
-See [Deployment](docs/DEPLOYMENT.en.md) for the complete setup, storage responsibilities, local development and optional private Node hosting.
+The recommended **Tencent CloudBase + Tencent EdgeOne Pages** setup gives your laundry room a fully cloud-hosted SaaS site, with no server of your own to maintain.
 
-### Local preview
+<img src="docs/assets/cloud.en.svg" alt="CloudBase triggers sync; EdgeOne Pages hosts the frontend, APIs and persistent KV; browsers access the site." width="100%" />
 
-Requires Node.js 22 and npm:
+EdgeOne Pages hosts the frontend, Edge APIs and persistent KV. CloudBase periodically calls the sync endpoint so machine checks continue when nobody has the page open. This setup does not use a CloudBase database.
+
+Use `master` for production, `npm ci && npm run build` as the build command, and `dist` as the output directory. Follow the [deployment guide](docs/DEPLOYMENT.en.md) for KV, login and scheduled sync.
+
+## Try it locally
+
+You need **Node.js 22.18+** and npm.
 
 ```bash
 git clone https://github.com/LaokeQwQ/WeShirt.git
@@ -43,28 +48,39 @@ npm ci
 cp .env.example .env
 ```
 
-**Before starting, edit `.env` and set separate random values for `AUTH_SECRET` (at least 16 characters) and `ADMIN_TOKEN` (at least 8 characters):**
+Edit `.env` and set two separate random values:
+
+```dotenv
+AUTH_SECRET=your-random-value-at-least-16-characters
+ADMIN_TOKEN=another-random-value-at-least-8-characters
+```
+
+Then start the app:
 
 ```bash
 npm run dev
 ```
 
-Open `http://localhost:5173`; the admin route is `/#/admin`. In PowerShell, use `Copy-Item .env.example .env`. Mock machines work without an upstream data source. Real DingTalk login and notifications require configuration. Empty secrets still allow the public mock dashboard to start, but login and administration reject requests.
+Open [localhost:5173](http://localhost:5173) to explore the mock machines. The admin route is `/#/admin`.
+
+In PowerShell, copy the configuration with `Copy-Item .env.example .env`. Real machine data, DingTalk login and notifications need additional configuration. Local mock mode does not operate real machines.
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
-| [Configuration](docs/CONFIGURATION.en.md) | Environment variables, site settings, notifications, AI and status rules |
-| [Deployment](docs/DEPLOYMENT.en.md) | EdgeOne Pages + CloudBase, KV, Node and operational checks |
-| [Development and releases](docs/DEVELOPMENT.en.md) | Local work, tests, CI and `dev` → `master` |
-| [Privacy and usage](docs/PRIVACY.en.md) | Data scope, telemetry, source publication and functional limits |
-| [Sync and networking](docs/EGRESS.en.md) | Protected triggers, scheduling and upstream troubleshooting |
+| [Configuration](docs/CONFIGURATION.en.md) | Data sources, dorms, login, notifications and site settings |
+| [Deployment](docs/DEPLOYMENT.en.md) | EdgeOne Pages, CloudBase, KV and optional Node hosting |
+| [Development](docs/DEVELOPMENT.en.md) | Local work, verification and `dev` → `master` releases |
+| [Privacy and usage](docs/PRIVACY.en.md) | Public information, stored data and user preferences |
+| [Sync and networking](docs/EGRESS.en.md) | Scheduled sync and upstream troubleshooting |
 
-Each detailed document links to its Chinese counterpart.
+Each document also has a Chinese version.
+
+<img src="docs/assets/divider.svg" alt="" width="100%" />
 
 ## Acknowledgments
 
-Thanks to [PA733 / Laundry-Status-Monitor](https://github.com/PA733/Laundry-Status-Monitor) for the groundwork and ideas around machine monitoring and notifications. The README organization takes inspiration from [xm2284 / jsnu-laundry-radar](https://github.com/xm2284/jsnu-laundry-radar).
+Thanks to [PA733 / Laundry-Status-Monitor](https://github.com/PA733/Laundry-Status-Monitor) for the groundwork and ideas around machine monitoring and notifications.
 
 The project uses the [MIT license](LICENSE). Third-party dependencies retain their own licenses.

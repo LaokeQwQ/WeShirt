@@ -19,7 +19,9 @@ Select **`master` as the EdgeOne Pages production branch**. Use `dev` only for p
 
 ### 1. Build and API
 
-Import the repository into EdgeOne Pages. Use `npm ci && npm run build` and output directory `dist`. Keep `functions/api/[[default]].js` as the sole `/api/*` function entry. Node.js 22 is recommended for builds.
+Import the repository into EdgeOne Pages. Use `npm ci && npm run build` and output directory `dist`. Keep `functions/api/[[default]].js` as the sole `/api/*` function entry. Build with Node.js 22.18+ (22 LTS) or 24.11+; the older 22.11 runtime does not meet the current dependency requirements.
+
+Existing Upload projects can continue using CLI uploads. Check out the promoted `master`, build in a separate directory and record the release commit. Keep production `.env` files outside the public source checkout. Uploading only `dist` does not include the API functions.
 
 Inject server variables through the platform's supported function configuration. At minimum, set `AUTH_SECRET` and `ADMIN_TOKEN` as described in [Configuration](CONFIGURATION.en.md). Leave `VITE_API_BASE` empty for same-origin production. Use a stable custom HTTPS domain and update DingTalk callbacks.
 

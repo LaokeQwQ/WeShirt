@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .edgeone/
+.cloudbase-build/
 .edgeone.bak-*/
 WeShirt.zip
 data/

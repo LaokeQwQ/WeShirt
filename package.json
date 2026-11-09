@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^22.18.0 || >=24.11.0"
+  },
   "description": "WeShirt - 宿舍洗衣房状态看板与取衣提醒（H5 + EdgeOne/Node 双形态）",
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
