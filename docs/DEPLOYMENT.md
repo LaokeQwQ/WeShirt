@@ -17,7 +17,9 @@
 
 ### 1. 构建与 API
 
-将仓库导入 EdgeOne Pages，**生产分支选择 `master`**，`dev` 仅用于预览；不要将开发分支自动发布到生产。设置构建命令 `npm ci && npm run build`，输出目录 `dist`。保留 `functions/api/[[default]].js` 为 `/api/*` 的唯一函数入口。选择项目支持的 Node 构建环境，建议 Node.js 22。
+将仓库导入 EdgeOne Pages，**生产分支选择 `master`**，`dev` 仅用于预览；不要将开发分支自动发布到生产。设置构建命令 `npm ci && npm run build`，输出目录 `dist`。保留 `functions/api/[[default]].js` 为 `/api/*` 的唯一函数入口。构建使用 Node.js 22.18+（22 LTS）或 24.11+；旧版 22.11 无法满足当前依赖。
+
+已有 Upload 类型项目可继续使用 CLI 上传，但必须先检出已晋升的 `master`，从独立目录构建，并记录发布 commit。不要在公开源码工作区拉取或写入生产 `.env`，也不要把只含静态页面的 `dist` 当成完整 API 部署。
 
 通过部署平台支持的函数环境配置注入服务端变量，至少填写 `AUTH_SECRET` 与 `ADMIN_TOKEN`，长度要求见 [配置](CONFIGURATION.md)。生产同域访问时 `VITE_API_BASE` 留空。使用自定义 HTTPS 域名，并同步配置钉钉回调。
 

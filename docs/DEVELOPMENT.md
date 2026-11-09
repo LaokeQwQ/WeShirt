@@ -4,7 +4,7 @@
 
 ## 本地开发
 
-使用 Node.js 22、npm 和锁文件安装依赖。复制 `.env.example` 后先填 `AUTH_SECRET`（至少 16 字符）与 `ADMIN_TOKEN`（至少 8 字符），再启动。缺少凭据时公开模拟看板仍可读，登录与后台拒绝请求。
+使用 Node.js 22.18+（22 LTS）或 24.11+、npm 和锁文件安装依赖。复制 `.env.example` 后先填 `AUTH_SECRET`（至少 16 字符）与 `ADMIN_TOKEN`（至少 8 字符），再启动。缺少凭据时公开模拟看板仍可读，登录与后台拒绝请求。
 
 ```bash
 npm ci
@@ -44,7 +44,7 @@ Edge 兼容性构建命令见 [部署](DEPLOYMENT.md)。Node 与 Edge 共用 `pa
 4. 检查通过并人工审核后合并，生产从 `master` 构建部署。仓库工作流不自动推送主干或部署生产。
 5. 发布后核对健康、存储、同步和通道结果，保留上个构建与数据备份。
 
-GitHub Actions 执行 Node 22 安装、测试、前端构建和 Edge 兼容检查，并提供 JavaScript/TypeScript CodeQL 工作流。Dependabot 每周检查 npm 与 Actions，更新 PR 目标为 `dev`。
+GitHub Actions 使用最新 Node 22 LTS（至少 22.18）安装、测试、前端构建和 Edge 兼容检查，并提供 JavaScript/TypeScript CodeQL 工作流。Dependabot 每周检查 npm 与 Actions，更新 PR 目标为 `dev`。
 
 在 GitHub 分支保护或 Ruleset 中将 `Tests and build` 与 `Promotion policy` 等检查设为 `master` 必需项并禁止直接推送。晋升检查仅通过 `pull_request_target` 读取可信 PR 元数据，不检出 PR 源码、不读取密钥。CodeQL 高级工作流应避免与默认设置重复启用。
 

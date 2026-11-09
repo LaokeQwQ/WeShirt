@@ -4,7 +4,7 @@
 
 ## Local development
 
-Use Node.js 22, npm and the lockfile. Copy `.env.example` and set `AUTH_SECRET` (at least 16 characters) and `ADMIN_TOKEN` (at least 8 characters) before starting. Without secrets the public mock board remains readable, while login and admin requests are rejected.
+Use Node.js 22.18+ (22 LTS) or 24.11+, npm and the lockfile. Copy `.env.example` and set `AUTH_SECRET` (at least 16 characters) and `ADMIN_TOKEN` (at least 8 characters) before starting. Without secrets the public mock board remains readable, while login and admin requests are rejected.
 
 ```bash
 npm ci
@@ -44,7 +44,7 @@ See [Deployment](DEPLOYMENT.en.md) for the Edge bundle check. Node and Edge shar
 4. Merge after checks and human review, then build production from `master`. Repository workflows do not push to the main branch or deploy production automatically.
 5. Check health, storage, sync and delivery outcomes after release. Retain the preceding build and a backup.
 
-GitHub Actions installs with Node 22, runs tests, builds the frontend and checks the Edge bundle. A JavaScript/TypeScript CodeQL workflow is included. Dependabot checks npm and Actions weekly and targets `dev`.
+GitHub Actions uses the latest Node 22 LTS (at least 22.18), runs tests, builds the frontend and checks the Edge bundle. A JavaScript/TypeScript CodeQL workflow is included. Dependabot checks npm and Actions weekly and targets `dev`.
 
 Configure branch protection or Rulesets to require checks such as `Tests and build` and `Promotion policy` on `master` and block direct pushes. The promotion policy reads trusted PR metadata through `pull_request_target`, without checking out PR source or reading secrets. Avoid duplicate CodeQL default and advanced configurations.
 
