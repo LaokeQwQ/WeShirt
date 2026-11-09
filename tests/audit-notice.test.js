@@ -250,7 +250,7 @@ test('烘干机按自定义时长登记（修复被洗衣机白名单拒掉的 b
   assert.equal(list[0].minutes, 60)
 })
 
-test('洗衣机仍然只认 30/42/50/70', async () => {
+test('洗衣或自洁时长须为1–180分钟整数', async () => {
   const { call } = await makeApp(async (s) => {
     await seedUser(s)
     await s.put('machines:b1', {
@@ -258,7 +258,7 @@ test('洗衣机仍然只认 30/42/50/70', async () => {
     })
   })
   const tok = await issueToken('u_1', SECRET)
-  for (const bad of [60, 45, 0, -10, NaN]) {
+  for (const bad of [0, -10, NaN, 181, 6.5]) {
     const r = await call('POST', '/api/tasks', {
       body: { machineId: 'm1', minutes: bad },
       headers: { authorization: 'Bearer ' + tok },

@@ -2,6 +2,7 @@
 // 契约：docs/CONTRACTS.md §2.4
 // 纯 JS / ESM / 仅用 node 内置与全局 fetch
 import { safeErrorCategory } from './util.js'
+import { normalizeMachineCategory, resolveMachineKind } from './machine-kind.js'
 
 // ---- 默认 state 映射：原始整数 → 展示状态 ----
 export const DEFAULT_STATE_MAP = { idle: [1], occupied: [2], faulty: [3] }
@@ -70,6 +71,7 @@ export function normalizeMachines(raws, stateMap = DEFAULT_STATE_MAP) {
     const id = raw.id ?? raw.deviceId
     const name = raw.name ?? ''
     const floorCode = raw.floorCode ?? ''
+    const categoryCode = normalizeMachineCategory(raw.categoryCode)
     let state
     if (typeof raw.state === 'string' && VALID_STATES.includes(raw.state)) {
       state = raw.state
@@ -84,6 +86,8 @@ export function normalizeMachines(raws, stateMap = DEFAULT_STATE_MAP) {
       id,
       name,
       floorCode,
+      ...(categoryCode ? { categoryCode } : {}),
+      kind: resolveMachineKind(raw),
       state,
       finishAt,
       // 上游原始状态码，原样带出来：面板上直接显示，
@@ -616,6 +620,7 @@ export function createHaierClient(env = {}, { fetch: fetchImpl = globalThis.fetc
                 id: String(it.deviceId ?? it.id ?? ''),
                 name: it.name ?? '',
                 floorCode: String(it.floorCode ?? floorCode),
+                categoryCode: normalizeMachineCategory(categoryCode) || normalizeMachineCategory(it.categoryCode),
                 state: it.state,
                 finishTime: it.finishTime ?? null,
               })

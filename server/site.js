@@ -33,7 +33,8 @@ function validateBuildings(value) {
     const name = text(item.name, '楼栋名称', 30, true)
     if (codes.has(item.code) || names.has(name)) throw new Error('楼栋代号和名称不能重复')
     codes.add(item.code); names.add(name)
-    return { code: item.code, name }
+    if (own(item, 'enabled') && typeof item.enabled !== 'boolean') throw new Error('楼栋启用状态须为布尔值')
+    return { code: item.code, name, ...(item.enabled === false ? { enabled: false } : {}) }
   })
 }
 function normalizeSite(input = {}) {
@@ -52,7 +53,7 @@ export async function getSiteConfig(store) {
   const saved = await store.get(SITE_KEY, {})
   try { return normalizeSite(isObject(saved) ? saved : {}) } catch { return normalizeSite() }
 }
-function publicSite(site) { return { name: site.name, iconUrl: site.iconUrl, schoolLabel: site.schoolLabel, buildings: site.buildings } }
+function publicSite(site) { return { name: site.name, iconUrl: site.iconUrl, schoolLabel: site.schoolLabel, buildings: site.buildings.filter(building=>building.enabled!==false) } }
 
 export async function checkSiteAdmin(c, store, secret) {
   const key = String(secret || '').trim()

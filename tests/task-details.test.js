@@ -50,7 +50,11 @@ test('task details belong to the owner and are publicly shown only on the curren
   assert.equal(occupancy.washer1.userId, 'u1')
   assert.equal(occupancy.washer1.note, undefined)
   assert.equal(occupancy.washer1.useDisinfectant, undefined)
-  for (const path of ['/api/machines?dorm=guiyuan', '/api/occupancy', '/api/messages?dorm=guiyuan']) {
+  assert.equal((await call('/api/messages?dorm=guiyuan', { user: null })).status, 403, '住宿楼频道不向访客公开')
+  const ownChannel = await call('/api/messages?dorm=guiyuan')
+  assert.equal(ownChannel.status, 200)
+  assert.equal(JSON.stringify(ownChannel.data).includes(note), false, '登记详情不复制到留言')
+  for (const path of ['/api/machines?dorm=guiyuan', '/api/occupancy']) {
     const publicResponse = await call(path, { user: null })
     assert.equal(publicResponse.status, 200, path)
     assert.equal(JSON.stringify(publicResponse.data).includes(note), path === '/api/occupancy', path)

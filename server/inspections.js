@@ -176,7 +176,7 @@ export function registerInspectionRoutes(app, { store, env = {}, authenticate, g
     const board = supplied?.board || supplied
     const slotMap = supplied?.mapping?.mapping || supplied?.mapping || mapping?.mapping || board?.slotMapping || {}
     const machines = (board?.floors || []).flatMap((floor) => floor.machines || []).map((m) => ({ id: String(m.id), name: String(m.displayName || m.name || m.id), kind: m.kind === 'dryer' ? 'dryer' : 'washer', state: m.state || 'unknown', dormBuilding: resolveMachineDorm(m, slotMap, site.buildings) }))
-    return { machines, buildings: site.buildings.filter((b) => b.code !== 'public') }
+    return { machines, buildings: site.buildings.filter((b) => b.code !== 'public' && b.enabled !== false) }
   }
   // History stores metadata only. Cleanup is bounded to fifty photo deletes per request;
   // unfinished deletes remain in a durable queue for a subsequent read or write.
@@ -212,7 +212,8 @@ export function registerInspectionRoutes(app, { store, env = {}, authenticate, g
     const dorm = c.req.query('dorm') || ''
     if (dorm && !normalizeDormBuilding(dorm, buildings)) return apiErr('bad_param', '住宿楼无效')
     if (dorm && !canInspect(actor.identity, dorm)) return apiErr('forbidden', '未获该楼巡检权限', 403)
-    const scoped = (code) => (!dorm || code === dorm) && canInspect(actor.identity, code)
+    const allowedCodes=new Set(allowed.map(building=>building.code))
+    const scoped = (code) => allowedCodes.has(code) && (!dorm || code === dorm) && canInspect(actor.identity, code)
     const rows = await withOperationLock(store, historyKey, () => cleanHistory())
     c.header('Cache-Control', 'no-store')
     return json({ identity: actor.identity, buildings: allowed, machines: machines.filter((m) => scoped(m.dormBuilding)), inspections: rows.filter((entry) => scoped(entry.dormBuilding)).slice().reverse().map(publicInspection) })

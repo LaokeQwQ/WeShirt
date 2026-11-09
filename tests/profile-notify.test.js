@@ -165,7 +165,7 @@ test('票据被篡改 / 过期 / 换密钥都验不过', async () => {
   const { issueTicket, verifyTicket } = await import('../packages/core/auth.js')
   const t = await issueTicket({ u: 'u_1', exp: Date.now() + 60000 }, SECRET)
 
-  const tampered = t.slice(0, -2) + 'ff'
+  const tampered = t.slice(0, -1) + (t.endsWith('f') ? 'e' : 'f')
   assert.equal(await verifyTicket(tampered, SECRET), null)
   assert.equal(await verifyTicket(t, 'x'.repeat(32)), null)
 

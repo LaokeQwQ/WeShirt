@@ -4,11 +4,12 @@ import { normalizeDormBuilding, resolveMachineDorm } from '../packages/core/buil
 import { DEFAULT_OPERATIONS_CONFIG, normalizeOperationsConfig, buildQueueSchedule, applyMachineHealth, withOperationLock } from '../packages/core/operations.js'
 import { getSiteConfig } from './site.js'
 import { registerCommunityRoutes } from './community.js'
+import { resolveMachineKind } from '../packages/core/machine-kind.js'
 
 const maskNick = (value) => String(value || '同学').slice(0, 1) + '**'
 const validId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value)
 
-export function registerOperationsRoutes(app, { store, env = {}, authenticate, checkAdmin, checkSuperAdmin, now = () => Date.now() }) {
+export function registerOperationsRoutes(app, { store, env = {}, authenticate, checkAdmin, checkSuperAdmin, notify, now = () => Date.now() }) {
   const bid = env.BUILDING_ID || 'b1'
   const resolveUser = async (c) => {
     const value = await authenticate?.(c)
@@ -31,10 +32,9 @@ export function registerOperationsRoutes(app, { store, env = {}, authenticate, c
     const board = entry?.board ? applyMachineHealth(entry.board, health, now()) : null
     const machines = (board?.floors || []).flatMap((f) => f.machines || []).map((m) => {
       const slots = Object.entries(slotMap).filter(([, id]) => id != null && String(id) === String(m.id)).map(([slot]) => slot)
-      const kind = slots.some((s) => /^D/i.test(s)) ? 'dryer' : slots.some((s) => /^\d+$/.test(s)) ? 'washer'
-        : ['washer', 'dryer'].includes(m.kind) ? m.kind : String(m.name || '').includes('烘干') ? 'dryer' : 'washer'
+      const kind = resolveMachineKind(m, slotMap)
       return { ...m, id: String(m.id), kind, dormBuilding: resolveMachineDorm(m, slotMap, site.buildings) }
-    })
+    }).filter(machine=>!site.buildings.some(building=>building.enabled===false&&building.code===machine.dormBuilding))
     return { board, machines, slotMap, buildings: site.buildings }
   }
   const dormFilter = async (value) => !value || Boolean(normalizeDormBuilding(value, (await getSiteConfig(store)).buildings))
@@ -44,7 +44,7 @@ export function registerOperationsRoutes(app, { store, env = {}, authenticate, c
     const { machines } = await context()
     const list = (await store.get(`queue:${bid}`, [])) || []
     const byId = new Map(machines.map((m) => [m.id, m]))
-    return buildQueueSchedule(list, machines, now()).filter((q) => (!filter.machineId || String(q.machineId) === filter.machineId) && (!filter.dorm || byId.get(String(q.machineId))?.dormBuilding === filter.dorm)).map((q) => queuePublic(q, user))
+    return buildQueueSchedule(list.filter(q=>byId.has(String(q.machineId))), machines, now()).filter((q) => (!filter.machineId || String(q.machineId) === filter.machineId) && (!filter.dorm || byId.get(String(q.machineId))?.dormBuilding === filter.dorm)).map((q) => queuePublic(q, user))
   }
 
   app.get('/api/queue', async (c) => {
@@ -92,7 +92,7 @@ export function registerOperationsRoutes(app, { store, env = {}, authenticate, c
     })
   })
 
-  registerCommunityRoutes(app, { store, env, authenticate, checkSuperAdmin, now })
+  registerCommunityRoutes(app, { store, env, authenticate, checkSuperAdmin, notify, now })
 
   app.get('/api/admin/operations', async (c) => {
     if (!await checkAdmin?.(c)) return apiErr('unauthorized', '需要管理员登录', 401)

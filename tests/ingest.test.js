@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { createApp } from '../server/app.js'
 import { createMemoryStore } from '../packages/core/store.js'
 import { deriveSyncKey } from '../packages/core/auth.js'
+import { bjDate } from '../packages/core/auditlog.js'
 
 const SECRET = 's'.repeat(32)
 const ADMIN = 'test-admin-token'
@@ -115,7 +116,7 @@ test('回写会写审计，方便事后对账', async () => {
   const { store, call } = await makeApp()
   const k = await deriveSyncKey(SECRET)
   await call('POST', `/api/cron/ingest?k=${k}`, { body: { raws: RAW, source: 'cloudbase' } })
-  const day = new Date().toISOString().slice(0, 10)
+  const day = bjDate()
   const logs = await store.get(`auditlog:${day}`, [])
   const hit = (logs || []).find((e) => e.action === '外部抓取回写')
   assert.ok(hit, '应该有外部抓取回写记录')

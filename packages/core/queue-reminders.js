@@ -1,5 +1,6 @@
 import { withOperationLock } from './operations.js'
 import { buildMachineLabel, hhmm } from './notice.js'
+import { currentDormCatalog, isMachineDormEnabled } from './buildings.js'
 
 const MINUTE = 60000
 const MAX_ATTEMPTS = 4
@@ -38,8 +39,29 @@ function nextCycle(machine, previous, state, snapshotAt, now) {
   const running = ['occupied', 'abnormal'].includes(state)
   const finishAt = stamp(machine.finishAt)
   const startAt = stamp(machine.startAt || machine.runStartAt)
+  const reported = state === 'idle' && machine.availabilitySource === 'user_report' && machine.registrationPending === true
+    && Number.isFinite(finishAt) && finishAt <= now + 4 * 60 * MINUTE && finishAt >= now - 30 * MINUTE
+  if (reported) {
+    const newReport = !previous || previous.state === 'idle'
+      || previous.source === 'user_report' && previous.finishAt <= now && finishAt > now && finishAt !== previous.finishAt
+    const cycle = newReport ? { id: 'cycle_' + crypto.randomUUID(), observedAt: snapshotAt, phases: {} } : previous
+    return { ...cycle, source: 'user_report', state: 'occupied', finishAt, estimated: true, confirmed: false,
+      endedAt: finishAt <= now ? finishAt : null, snapshotAt }
+  }
+  // 登记投影到期后会从看板移除；保留原登记周期，只提示计时到点，不把 raw idle 当完成确认。
+  if (previous?.source === 'user_report' && state === 'idle') {
+    return { ...previous, state: 'occupied', confirmed: false, estimated: true,
+      endedAt: previous.finishAt <= now ? previous.finishAt : null, snapshotAt }
+  }
+  // 硬件重新明确运行后，旧登记时间不再参与提醒。缺少新的硬件结束时间就等待更新。
+  if (previous?.source === 'user_report' && running) {
+    const actualFinish = machine.availabilitySource !== 'user_report' && finishAt <= now + 24 * 60 * MINUTE ? finishAt : NaN
+    return { ...previous, source: 'upstream', state, confirmed: false, endedAt: null, snapshotAt,
+      finishAt: Number.isFinite(actualFinish) ? actualFinish : null,
+      estimated: Number.isFinite(actualFinish) && machine.estimated === true }
+  }
   if (!running && state !== 'idle') return previous
-  if (!running) return previous ? { ...previous, state: 'idle', endedAt: previous.endedAt || snapshotAt, confirmed: true, snapshotAt } : null
+  if (!running) return previous ? { ...previous, state: 'idle', finishAt: previous.finishAt || snapshotAt, endedAt: previous.endedAt || snapshotAt, confirmed: true, snapshotAt } : null
   if (!Number.isFinite(finishAt) || finishAt > now + 24 * 60 * MINUTE) return previous && previous.state !== 'idle' ? { ...previous, state, snapshotAt } : null
   const newRun = !previous || previous.state === 'idle' || Number.isFinite(startAt) && previous.startAt && previous.startAt !== startAt
   if (newRun) {
@@ -58,18 +80,23 @@ function buildNotice(machine, cycle, phase, now) {
     return /^[a-f0-9]{16,}$/i.test(name) || /^\d{8,}$/.test(name) ? '' : name
   }
   const label = buildMachineLabel({ machineLabel: cleanLabel(machine.displayName || machine.machineLabel), machineName: cleanLabel(machine.name), slot: machine.slot, kind })
-  const confirmed = phase === 'end' && cycle.confirmed === true
+  const reported = cycle.source === 'user_report'
+  const confirmed = phase === 'end' && cycle.confirmed === true && !reported
   const minutes = Math.max(1, Math.ceil((cycle.finishAt - now) / MINUTE))
-  const title = phase === 'lead' ? '快轮到你了' : confirmed ? '你等的机器已结束' : '预约机器预计计时结束'
-  const message = phase === 'lead'
+  const title = reported ? phase === 'lead' ? '登记计时即将结束' : '登记计时已到'
+    : phase === 'lead' ? '快轮到你了' : confirmed ? '你等的机器已结束' : '预约机器预计计时结束'
+  const message = reported ? phase === 'lead'
+    ? `登记计时约 ${minutes} 分钟后结束，请准备。设备实际状态和桶内衣物请到场确认。`
+    : '用户登记计时已到，请现场确认设备状态和上一位的衣物；确认可用后再使用。'
+    : phase === 'lead'
     ? `预计 ${minutes} 分钟后结束，请准备。到场后请先确认上一位的衣物已取走。`
     : confirmed ? `已结束${kind === 'dryer' ? '烘干' : '洗衣'}，请现场确认衣物并使用。`
       : '预计计时结束，请现场确认机器状态和衣物情况。'
-  const end = Number.isFinite(cycle.finishAt) ? `预计结束 ${hhmm(iso(cycle.finishAt))}${cycle.estimated ? '（估时）' : ''}` : ''
+  const end = Number.isFinite(cycle.finishAt) ? `${reported ? '登记' : ''}预计结束 ${hhmm(iso(cycle.finishAt))}${cycle.estimated ? '（估时）' : ''}` : ''
   const action = '在等衣查看预约；排队提醒不会自动占用机器。'
   const text = ['【等衣】' + title, label, message, end, action].filter(Boolean).join('\n')
   const escape = (value) => value.replace(/[\\`*_{}\[\]<>#|]/g, '\\$&')
-  return { title, text, markdown: ['### ' + title, '**' + escape(label) + '**', message, end, action].filter(Boolean).join('\n\n'), machineName: label, kind, confirmed, estimated: cycle.estimated === true, finishAt: iso(cycle.finishAt), url: '/#/task' }
+  return { title, text, markdown: ['### ' + title, '**' + escape(label) + '**', message, end, action].filter(Boolean).join('\n\n'), machineName: label, kind, confirmed, estimated: cycle.estimated === true, availabilitySource: reported ? 'user_report' : 'upstream', finishAt: iso(cycle.finishAt), url: '/#/task' }
 }
 
 export async function readQueueNotices(store, userId) {
@@ -77,10 +104,10 @@ export async function readQueueNotices(store, userId) {
   const recent = (Array.isArray(list) ? list : []).slice(-30).reverse()
   const queues = new Map()
   for (const bid of new Set(recent.map((entry) => entry.buildingId || 'b1'))) queues.set(bid, heads(await store.get('queue:' + bid, [])))
-  return recent.map(({ id, phase, machineId, machineName, kind, title, text, at, readAt, confirmed, estimated, finishAt, url, dm, buildingId, reservationId: qid, obsoleteAt }) => {
+  return recent.map(({ id, phase, machineId, machineName, kind, title, text, at, readAt, confirmed, estimated, availabilitySource, finishAt, url, dm, buildingId, reservationId: qid, obsoleteAt }) => {
     const head = queues.get(buildingId || 'b1').get(machineId)
     const active = Boolean(head && head.userId === userId && reservationId(head) === qid && !obsoleteAt)
-    return { id, phase, machineId, machineName, kind, title, text, at, readAt: readAt || null, confirmed, estimated, finishAt, url, active, delivery: { sent: Boolean(dm?.sentAt), pending: active && !dm?.sentAt && !dm?.suppressed && (dm?.attempts || 0) < MAX_ATTEMPTS } }
+    return { id, phase, machineId, machineName, kind, title, text, at, readAt: readAt || null, confirmed, estimated, availabilitySource, finishAt, url, active, delivery: { sent: Boolean(dm?.sentAt), pending: active && !dm?.sentAt && !dm?.suppressed && (dm?.attempts || 0) < MAX_ATTEMPTS } }
   })
 }
 
@@ -108,12 +135,15 @@ export async function processQueueReminders({ store, board, env = {}, now = Date
     const activeIds = new Set(active.map(reservationId))
     const saved = await store.get('queue-reminder-state:' + bid, { machines: {} })
     const cycles = Object.assign(Object.create(null), saved?.machines || {})
+    const catalog = await currentDormCatalog(store, env.SITE_BUILDINGS)
+    const machineList = (board.floors || []).flatMap((floor) => floor.machines || [])
+    const machineById = new Map(machineList.map((machine) => [String(machine.id), machine]))
     const present = new Set()
     const jobs = []
-    for (const machine of (board.floors || []).flatMap((floor) => floor.machines || [])) {
+    for (const machine of machineList) {
       const id = String(machine.id)
       present.add(id)
-      if (machine.health?.stale || machine.health?.confirmedFault) continue
+      if (!isMachineDormEnabled(machine, catalog, board.slotMapping) || machine.health?.stale || machine.health?.confirmedFault) continue
       const state = rawState(machine, env)
       if (!['occupied', 'abnormal', 'idle'].includes(state)) continue
       const previous = Object.hasOwn(cycles, id) ? cycles[id] : null
@@ -124,16 +154,17 @@ export async function processQueueReminders({ store, board, env = {}, now = Date
       for (const qid of Object.keys(cycle.phases)) if (!activeIds.has(qid)) delete cycle.phases[qid]
       cycles[id] = cycle
       const entry = queue.get(id)
-      if (!entry || !cycle.finishAt || state !== 'idle' && !['occupied', 'abnormal'].includes(state)) continue
+      if (!entry || state !== 'idle' && !['occupied', 'abnormal'].includes(state)) continue
       const joinedAt = stamp(entry.at || entry.createdAt)
       if (cycle.endedAt && Number.isFinite(joinedAt) && joinedAt > cycle.endedAt) continue
       const user = await store.get('user:' + entry.userId, null)
-      if (!user?.id || user.notifyOn === false) continue
+      if (!user?.id || user.disabled || user.blocked || user.notifyOn === false) continue
       const qid = reservationId(entry)
       cycle.phases = Object.assign(Object.create(null), cycle.phases || {})
       const phases = cycle.phases[qid] || {}
-      const left = cycle.finishAt - now
-      const eligible = cycle.confirmed && state === 'idle' ? 'end'
+      const left = Number.isFinite(cycle.finishAt) ? cycle.finishAt - now : NaN
+      const eligible = cycle.source === 'user_report' ? left > 0 && left <= 3 * MINUTE ? 'lead' : left <= 0 ? 'end' : null
+        : cycle.confirmed && state === 'idle' ? 'end'
         : ['occupied', 'abnormal'].includes(state) && left > 0 && left <= 3 * MINUTE ? 'lead'
           : ['occupied', 'abnormal'].includes(state) && left <= 0 && cycle.estimated ? 'end' : null
       let list = await store.get('queue-notices:' + entry.userId, [])
@@ -184,10 +215,12 @@ export async function processQueueReminders({ store, board, env = {}, now = Date
           const current = heads(await store.get('queue:' + bid, []))
           const head = current.get(item.machineId)
           const user = await store.get('user:' + userId, null)
-          if (!head || head.userId !== userId || reservationId(head) !== qid || !user?.id || user.notifyOn === false) return
+          if (!head || head.userId !== userId || reservationId(head) !== qid || !user?.id || user.disabled || user.blocked || user.notifyOn === false) return
+          const machine = machineById.get(item.machineId)
+          if (!machine || !isMachineDormEnabled(machine, await currentDormCatalog(store, env.SITE_BUILDINGS), board.slotMapping)) return
           allowed = true
           // 请求在排队锁内发起，完成等待在锁外，取消预约不会等待网络。
-          try { sending = Promise.resolve(notify(userId, { title: item.title, text: item.text, markdown: item.markdown, url: item.url, type: 'queue', machineId: item.machineId, machineName: item.machineName, kind: item.kind, confirmed: item.confirmed, estimated: item.estimated, finishAt: item.finishAt, phase: item.phase, noticeId: item.id })) }
+          try { sending = Promise.resolve(notify(userId, { title: item.title, text: item.text, markdown: item.markdown, url: item.url, type: 'queue', machineId: item.machineId, machineName: item.machineName, kind: item.kind, confirmed: item.confirmed, estimated: item.estimated, availabilitySource: item.availabilitySource, finishAt: item.finishAt, phase: item.phase, noticeId: item.id })) }
           catch { sending = Promise.resolve({ ok: false }) }
         })
         if (!allowed) continue

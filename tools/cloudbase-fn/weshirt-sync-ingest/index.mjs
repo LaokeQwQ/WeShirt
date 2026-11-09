@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { createHaierClient } from '../../../packages/core/haier.js'
+import { normalizeMachineCategory } from '../../../packages/core/machine-kind.js'
 
 export const TIMEOUT_MS = 30000
 const MAX_UPSTREAM_BYTES = 1024 * 1024
@@ -144,7 +145,8 @@ export function ingestRows(machines) {
       if (!Number.isFinite(time)) throw fail('snapshot_invalid')
       finishTime = new Date(time).toISOString()
     }
-    return { id, name: String(machine.name ?? '').slice(0, 64), floorCode: String(machine.floorCode ?? '').slice(0, 8), state, finishTime }
+    const categoryCode = normalizeMachineCategory(machine.categoryCode)
+    return { id, name: String(machine.name ?? '').slice(0, 64), floorCode: String(machine.floorCode ?? '').slice(0, 8), state, finishTime, ...(categoryCode ? { categoryCode } : {}) }
   })
 }
 

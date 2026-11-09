@@ -91,7 +91,7 @@ test('留言超长被明确拒绝且不写入', async () => {
   const { store, call } = await makeApp({}, seedUser)
   const tok = await issueToken('u_1', SECRET)
   const response = await call('POST', '/api/messages', {
-    body: { text: '字'.repeat(500) },
+    body: { text: '字'.repeat(500), channel: 'public' },
     headers: { authorization: 'Bearer ' + tok },
   })
   const list = await store.get('messages:b1', [])
@@ -103,9 +103,9 @@ test('留言 5 秒内只能发一条（防刷屏挤掉别人的）', async () =>
   const { call } = await makeApp({}, seedUser)
   const tok = await issueToken('u_1', SECRET)
   const h = { authorization: 'Bearer ' + tok }
-  const a = await call('POST', '/api/messages', { body: { text: '第一条' }, headers: h })
+  const a = await call('POST', '/api/messages', { body: { text: '第一条', channel: 'public' }, headers: h })
   assert.equal(a.status, 200)
-  const b = await call('POST', '/api/messages', { body: { text: '第二条' }, headers: h })
+  const b = await call('POST', '/api/messages', { body: { text: '第二条', channel: 'public' }, headers: h })
   assert.equal(b.status, 429)
 })
 
@@ -113,7 +113,7 @@ test('留言列表不暴露 userId', async () => {
   const { call } = await makeApp({}, async (s) => {
     await seedUser(s)
     await s.put('messages:b1', [
-      { id: 'm1', userId: 'u_1', nick: 'x', avatar: 'av1', text: 'hi', at: '2026-10-26T00:00:00Z' },
+      { id: 'm1', userId: 'u_1', nick: 'x', avatar: 'av1', text: 'hi', channel: 'public', at: '2026-10-26T00:00:00Z' },
     ])
   })
   const r = await call('GET', '/api/messages')
@@ -156,6 +156,7 @@ test('看板为空时不拦登记（首次启动/上游挂了别把人挡在门�
 test('带 token 拉排队列表时能认出哪条是我的', async () => {
   const { call } = await makeApp({}, async (s) => {
     await seedUser(s)
+    await s.put('machines:b1',{board:{floors:[{code:'1',machines:[{id:'m1',name:'桂园测试机',state:'idle'}]}]}})
     await s.put('queue:b1', [
       { id: 'q1', userId: 'u_1', machineId: 'm1', nick: '我', avatar: 'av1', at: 'x' },
       { id: 'q2', userId: 'u_2', machineId: 'm1', nick: '别人', avatar: 'av1', at: 'x' },
@@ -171,6 +172,7 @@ test('带 token 拉排队列表时能认出哪条是我的', async () => {
 
 test('匿名拉排队列表也能读，只是 mine 全 false', async () => {
   const { call } = await makeApp({}, async (s) => {
+    await s.put('machines:b1',{board:{floors:[{code:'1',machines:[{id:'m1',name:'桂园测试机',state:'idle'}]}]}})
     await s.put('queue:b1', [{ id: 'q1', userId: 'u_1', machineId: 'm1', nick: 'x', avatar: 'av1', at: 'x' }])
   })
   const r = await call('GET', '/api/queue?building=b1')

@@ -143,7 +143,7 @@ export const useUserStore = defineStore('user', {
       const requestToken = this.token
       const data = await api('/api/user/profile', { method: 'POST', body: { dormBuilding } })
       if (this.user?.id !== userId || this.token !== requestToken) return null
-      this.applyUser(mergeChangedFields(this.user, data.user, ['dormBuilding']))
+      this.applyUser(mergeChangedFields(this.user, data.user, ['dormBuilding','dormChangesRemaining']))
       return this.user
     },
     async setProfile({ nick, avatar, avatarUrl }) {

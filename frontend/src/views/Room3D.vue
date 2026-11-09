@@ -85,11 +85,12 @@
           <div class="mp-meta">
             <div class="mp-name">{{ selected.rawName || selected.name }}</div>
             <div class="mp-state" :style="{ color: cssColor(selected.state) }">
-              {{ stateText(selected.state) }}
+              {{ selected.availabilityLabel || stateText(selected.state) }}
               <template v-if="selected.state === 'occupied' && selected.leftMin != null">
-                · 剩余 {{ selected.leftMin }} 分钟
+                · {{ selected.leftMin > 0 ? (selected.estimated ? '估算剩余 ' : '剩余 ') + selected.leftMin + ' 分钟' : '结束时间待确认' }}
               </template>
             </div>
+            <div v-if="!selected.registrationPending && ['occupied','abnormal'].includes(selected.state)" class="mp-hint-dim">运行中，程序未提供</div>
             <!-- 对不上设备时说清楚原因：多半是后台机位绑了别的楼栋/已下线的机器 -->
             <div v-if="selected.state === 'unknown'" class="mp-dev">
               没对上设备（后台给这个机位绑的机器不在看板里）
@@ -160,7 +161,11 @@
           <div class="mp-proof-tip">提交会记录你的账号 ID 与两张照片，并通知管理员，仅用于纠纷追溯。</div>
         </div>
 
-        <!-- 登记备注只保存到本人任务；公开留言使用下方本机留言入口。 -->
+        <div class="mp-modes">
+          <button v-if="machineLeftMin" type="button" :class="{on:registrationMode==='machine'}" :disabled="submitting" @click="registrationMode='machine'">按机器剩余 {{ machineLeftMin }} 分钟提醒</button>
+          <button type="button" :class="{on:registrationMode==='duration'}" :disabled="submitting" @click="registrationMode='duration'">自己选{{ selected.kind === 'dryer' ? '时长' : '程序' }}</button>
+        </div>
+        <p v-if="selected.estimated" class="mp-hint-dim">剩余时间为系统估算，请自己确认程序；估算到点不表示机器已结束。</p>
         <!-- 烘干机专用面板：烘干时间（带加减） + 登记烘干 -->
         <!-- 故障/未知也允许登记：面板状态可能滞后，前端还有二次确认，
              强行拦住反而把人挡在门外。登记后按「使用中」算。 -->
@@ -171,7 +176,7 @@
             <div class="mp-dry-warn-sub">可能跳闸，注意确认</div>
           </div>
           <div class="mp-dry">
-            <div class="mp-dry-row">
+            <div v-if="registrationMode === 'duration'" class="mp-dry-row">
               <span class="mp-dry-label">烘干时间</span>
               <button type="button" class="mp-step" @click="stepDry(-10)">−</button>
               <input
@@ -196,7 +201,7 @@
               :disabled="!selected.machineId"
               @click="quickStartDryer"
             >
-              登记烘干（{{ dryMinutes }} 分钟）
+              登记烘干（{{ registrationMode === 'machine' ? '按机器余时' : dryMinutes + ' 分钟' }}）
             </van-button>
           </div>
           <div class="mp-queue">
@@ -218,18 +223,19 @@
         </template>
 
         <template v-if="selected.state !== 'faulty' && selected.kind !== 'dryer'">
-          <!-- 时长自己选：不再按机器剩余时间自动填 -->
-          <div class="mp-durations">
-            <span
+          <div v-if="registrationMode === 'duration'" class="mp-durations">
+            <button
               v-for="d in DURATIONS"
               :key="d.minutes"
+              type="button"
               class="mp-dur"
-              :class="{ on: chosenMinutes === d.minutes }"
-              @click="chosenMinutes = d.minutes"
-              >{{ d.label }}</span
+              :class="{ on: chosenMinutes === d.minutes && programLabel === d.label }"
+              :disabled="submitting"
+              @click="selectWashProgram(d)"
+              >{{ d.label }}</button
             >
           </div>
-          <div v-if="machineLeftMin" class="mp-hint-dim">这台机器面板显示剩余约 {{ machineLeftMin }} 分钟，仅供参考</div>
+          <label v-if="registrationMode === 'duration'" class="mp-custom-duration">自定义分钟 <input v-model.number="chosenMinutes" type="number" min="1" max="180" step="1" inputmode="numeric" :disabled="submitting" @input="clearWashProgram" />（1–180 整数）</label>
           <TaskDetailsForm v-model:note="noteText" v-model:use-disinfectant="useDisinfectant" v-model:self-cleaned="selfCleaned" :disabled="submitting" />
           <van-button
             block
@@ -239,7 +245,7 @@
               :disabled="!selected.machineId"
             @click="quickStart"
           >
-            登记洗衣（{{ previewEndText }} 提醒）
+            登记洗衣（{{ registrationMode === 'machine' ? '按机器余时' : chosenMinutes + ' 分钟' }}，{{ previewEndText }} 提醒）
           </van-button>
           <div class="mp-queue">
             <van-button
@@ -330,6 +336,9 @@ import { useUserStore } from '../stores/user'
 import { track } from '../telemetry'
 import { normalizeQualityPreference, chooseInitialQuality, renderInterval, labelSignature, createPointerGesture } from '../room/strategy'
 import { mergeStaticEnvironment, disposeObjectResources } from '../room/resources'
+import { createCompatibleRenderer, signalRoomFailure } from '../room/compatibility'
+import { WASHER_PROGRAMS, machineRemainingMinutes, machineActionName, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } from '../taskRegistration'
+import '../userActionConfirm.css'
 
 const userStore = useUserStore()
 const dorm = useDormStore()
@@ -345,6 +354,7 @@ const clockNow = ref(Date.now())
 let lastBoardUpdated = 0
 let disposed = false
 let contextFailed = false
+let conservativeRenderer = false
 let readyAt = 0
 const startedAt = performance.now()
 let performanceWindow = { at: 0, frames: 0 }
@@ -363,26 +373,22 @@ const FACILITY_RULES = {
   dryer: ['衣物先脱水，再放进烘干机', '到时及时取出，避免回潮', '滤网有毛絮就清掉', '烘干中途开门，先等滚筒停稳']
 }
 const submitting = ref(false)
-// 登记洗衣：时长四选（与后端白名单一致）+ 公开备注
-const DURATIONS = [
-  { label: '标准洗 30分钟', minutes: 30 },
-  { label: '加强洗 42分钟', minutes: 42 },
-  { label: '加强40°C 50分钟', minutes: 50 },
-  { label: '加强60°C 70分钟', minutes: 70 }
-]
+const DURATIONS = WASHER_PROGRAMS
 const chosenMinutes = ref(30)
-// 登记方式只有一个：用户自己选时长。
-// （以前默认「按机器剩余」自动填，机器剩余判断不出来时会填错，用户以为登记成功了，
-//   到点却收不到提醒 —— 已按用户要求去掉自动填）
-const machineLeftMin = computed(() => {
-  clockNow.value
-  const v = selected.value?.leftMin
-  return Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : null
-})
+const registrationMode = ref('duration')
+const program = ref('')
+const programLabel = ref('标准洗 30分钟')
+const confirmAction = createUserActionConfirmation(showConfirmDialog)
+const machineLeftMin = computed(() => machineRemainingMinutes(selected.value, clockNow.value))
+function selectWashProgram(value) { chosenMinutes.value = value.minutes; program.value = value.minutes === 6 ? 'self_clean' : ''; programLabel.value = value.label }
+function clearWashProgram() { program.value = ''; programLabel.value = '' }
+function registrationState(kind) {
+  return { ...registrationSnapshot(selected.value, { mode: registrationMode.value, minutes: kind === 'dryer' ? dryMinutes.value : chosenMinutes.value, program: program.value, programLabel: programLabel.value, note: noteText.value, useDisinfectant: useDisinfectant.value, selfCleaned: selfCleaned.value }), userId: userStore.user?.id || '', dorm: dorm.code, disposed }
+}
 
 // 每个任务的预计提醒时间（展示用，和真正下发的口径一致）
 const previewEndText = computed(() => {
-  const t = clockNow.value + chosenMinutes.value * 60000
+  const t = registrationMode.value === 'machine' ? Date.parse(selected.value?.finishAt || '') || clockNow.value + machineLeftMin.value * 60000 : clockNow.value + chosenMinutes.value * 60000
   return new Date(t).toLocaleTimeString('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
@@ -390,8 +396,12 @@ const previewEndText = computed(() => {
   })
 })
 
-// 换机器不再需要重置登记方式：时长一直由用户自己选
-function resetRegisterMode() { noteText.value = ''; useDisinfectant.value = false; selfCleaned.value = false }
+function resetRegisterMode() {
+  registrationMode.value = machineRemainingMinutes(selected.value) > 0 ? 'machine' : 'duration'
+  chosenMinutes.value = 30; program.value = ''; programLabel.value = '标准洗 30分钟'
+  dryMinutes.value = 60
+  noteText.value = ''; useDisinfectant.value = false; selfCleaned.value = false
+}
 
 // 烘干机专用：10~180 整数分钟；快捷按钮步进 10。
 const dryMinutes = ref(60)
@@ -483,18 +493,17 @@ async function onProofPick(e, kind) {
 }
 
 async function submitProof() {
-  if (!proofConfirm.value || !proofOcc.value || !proofAround.value) return
+  if (proofSending.value || !proofConfirm.value || !proofOcc.value || !proofAround.value) return
   proofSending.value = true
   try {
-    const r = await api('/api/urge/reveal', {
-      method: 'POST',
-      body: {
-        machineId: proofFor.value,
-        confirmEmpty: true,
-        photoOccupied: proofOcc.value,
-        photoAround: proofAround.value,
-      },
+    const result = await confirmAction({
+      read: () => ({ machineId: proofFor.value, selectedMachineId: selected.value?.machineId, name: machineActionName(selected.value), confirmEmpty: proofConfirm.value, photoOccupied: proofOcc.value, photoAround: proofAround.value, userId: userStore.user?.id || '', disposed }),
+      describe: (snapshot) => ({ title: '确认提交现场凭证', message: `${snapshot.name}\n已确认周围无空桶；已选择衣物占用照和机器周围照，共2张。\n提交后会留档并通知管理员，仅用于此次占用处理。` }),
+      execute: (snapshot) => api('/api/urge/reveal', { method: 'POST', body: { machineId: snapshot.machineId, confirmEmpty: snapshot.confirmEmpty, photoOccupied: snapshot.photoOccupied, photoAround: snapshot.photoAround } }),
+      onChanged: () => showToast('机位或凭证内容已变化，请重新确认'),
     })
+    if (result.status !== 'submitted') return
+    const r = result.value
     await showConfirmDialog({
       title: '已留档',
       message:
@@ -553,22 +562,24 @@ function stuckMinFor(id) {
 onUnmounted(() => clearInterval(stuckTimer))
 
 async function quickStartDryer() {
+  return submitRegistration('dryer')
+}
+
+async function submitRegistration(kind) {
   if (submitting.value) return
-  clampDry()
+  if (kind === 'dryer' && registrationMode.value === 'duration') clampDry()
   if (!selected.value?.machineId) { showToast('机位尚未绑定，请联系管理员'); return }
   submitting.value = true
   try {
-    await api('/api/tasks', {
-      method: 'POST',
-      body: {
-        machineId: selected.value.machineId,
-        minutes: dryMinutes.value,
-        note: noteText.value.trim() || undefined,
-        useDisinfectant: false,
-        selfCleaned: false,
-      },
+    registrationBody(registrationState(kind))
+    const result = await confirmAction({
+      read: () => registrationState(kind),
+      describe: registrationDescription,
+      execute: (snapshot) => api('/api/tasks', { method: 'POST', body: registrationBody(snapshot) }),
+      onChanged: () => showToast('机器或填写内容已变化，请检查后重新确认'),
     })
-    showToast('已登记烘干，到点提醒你')
+    if (result.status !== 'submitted') return
+    showToast({ message: '已登记，提醒计时已保存', className: 'user-action-feedback' })
     noteText.value = ''
     useDisinfectant.value = false; selfCleaned.value = false
     await syncData()
@@ -598,10 +609,17 @@ const selectedOccupier = computed(() => {
 
 // 提醒取衣：每台 5 分钟可点一次；累计第 3 次会返回对方手机号
 async function urgeOccupier() {
-  if (!selected.value?.machineId) return
+  if (!selected.value?.machineId || urgeSending.value) return
   urgeSending.value = true
   try {
-    const r = await api('/api/urge', { method: 'POST', body: { machineId: selected.value.machineId } })
+    const result = await confirmAction({
+      read: () => ({ machineId: selected.value?.machineId || '', name: machineActionName(selected.value), state: selected.value?.state, userId: userStore.user?.id || '', disposed }),
+      describe: (snapshot) => ({ title: '确认提醒取衣', message: `${snapshot.name}\n请先现场确认机器已结束且衣物仍在。确认后将向登记人发送一次取衣提醒。` }),
+      execute: (snapshot) => api('/api/urge', { method: 'POST', body: { machineId: snapshot.machineId } }),
+      onChanged: () => showToast('所选机器已变化，请重新确认'),
+    })
+    if (result.status !== 'submitted') return
+    const r = result.value
     if (r?.needProof) {
       proofFor.value = selected.value.machineId
       showToast('已提醒 3 次，查看手机号需要上传凭证')
@@ -619,21 +637,16 @@ async function urgeOccupier() {
 // 故障机：二次确认后才视为已恢复，并重新允许上报（登记洗衣）
 async function recoverFault() {
   if (!selected.value?.machineId || recovering.value) return
-  try {
-    await showConfirmDialog({
-      title: '确认已恢复正常？',
-      message: '确认后这台不再按故障处理，可以重新登记上报。'
-    })
-  } catch {
-    return
-  }
   recovering.value = true
   try {
-    await api('/api/faults/recover', {
-      method: 'POST',
-      body: { machineId: selected.value.machineId }
+    const result = await confirmAction({
+      read: () => ({ machineId: selected.value?.machineId || '', name: machineActionName(selected.value), state: selected.value?.state, userId: userStore.user?.id || '', disposed }),
+      describe: (snapshot) => ({ title: '确认上报已恢复', message: `${snapshot.name}\n请确认已在现场检查并恢复正常。此次仅记录恢复报告，机器是否空闲仍须核对远端和现场状态。` }),
+      execute: (snapshot) => api('/api/faults/recover', { method: 'POST', body: { machineId: snapshot.machineId } }),
+      onChanged: () => showToast('所选机器已变化，请重新确认'),
     })
-    showToast('已恢复，可以重新上报')
+    if (result.status !== 'submitted') return
+    showToast({ message: '恢复报告已提交，请核对机器状态', className: 'user-action-feedback' })
     await syncData()
   } catch (e) {
     showToast(e?.message || '恢复失败')
@@ -1139,6 +1152,8 @@ function buildMachine(slot) {
   body.position.y = bodyH / 2
   body.castShadow = true
   body.receiveShadow = true
+  body.userData.machineNo = slot.no
+  clickTargets.push(body)
   group.add(body)
 
   // 顶盖
@@ -2543,16 +2558,20 @@ function initThree() {
   // 只有我截图（无头浏览器需读像素）时才需要，所以用 ?shot=1 单独打开。
   const needShot = /[?&]shot=1/.test(location.href)
 
-  const tier = initialQuality()
-  qualityTier = tier
+  let tier = initialQuality()
 
-  renderer = new THREE.WebGLRenderer({
+  const created = createCompatibleRenderer(THREE.WebGLRenderer, {
     // 高 DPR 下 4x MSAA 几乎看不出来，却实打实多一次全屏 resolve
     antialias: tier !== 'low',
     alpha: false,
     preserveDrawingBuffer: needShot,
     powerPreference: 'high-performance',
+    quality: tier,
   })
+  renderer = created.renderer
+  tier = created.quality
+  conservativeRenderer = created.conservative
+  qualityTier = tier
   renderer.setSize(w, h)
   renderer.outputColorSpace = THREE.SRGBColorSpace
   // 静态场景：阴影只算一次（动态元素均不投影）
@@ -2729,6 +2748,7 @@ const QUALITY = {
 let qualityTier = 'mid'
 
 function initialQuality() {
+  if (conservativeRenderer && qualityPreference.value === 'auto') return 'low'
   return chooseInitialQuality({
     preference: qualityPreference.value,
     deviceMemory: Number(navigator.deviceMemory) || 0,
@@ -2759,11 +2779,17 @@ function onControlsEnd() { interacting = false; lastInteractionAt = performance.
 
 function onContextLost(event) {
   event.preventDefault()
+  failScene('context_lost')
+}
+
+function failScene(reason) {
   contextFailed = true
   cancelAnimationFrame(rafId)
   rafId = 0
-  showToast('3D画面暂不可用，已切换2D看板')
-  fallbackToList()
+  stopPoll()
+  loading.value = false
+  error.value = '当前环境暂时无法显示3D，可重试或使用2D看板'
+  signalRoomFailure(stageRef.value, reason)
 }
 
 function onContextRestored() {
@@ -2810,7 +2836,7 @@ let qBad = 0
 let qGood = 0
 
 function tuneQuality(renderCost) {
-  if (qualityPreference.value !== 'auto' || reducedMotion) return
+  if (qualityPreference.value !== 'auto' || reducedMotion || conservativeRenderer) return
   const now = performance.now()
   if (!qWin.t) {
     qWin.t = now
@@ -2985,7 +3011,7 @@ function animate(ts) {
   let renderCost = 0
   if (renderer && scene && camera) {
     const r0 = performance.now()
-    renderer.render(scene, camera)
+    try { renderer.render(scene, camera) } catch { failScene('render_failed'); return }
     renderCost = performance.now() - r0
   }
   if (renderCost && (busy || animated)) tuneQuality(renderCost)
@@ -3108,8 +3134,8 @@ function focusMachine(m) {
   }
 }
 
-// 面板左右切换：右排近→远（D1,1,2,3），再左排远→近（6,5,4,D2），循环
-const NAV_ORDER = ['D1', 1, 2, 3, 6, 5, 4, 'D2']
+// 右排近→远，再沿左排远→近回到门口；包含所有九个实际机位。
+const NAV_ORDER = ['D1', 1, 2, 3, 4, 5, 6, 7, 'D2']
 function switchMachine(dir) {
   if (!selected.value) return
   const idx = NAV_ORDER.indexOf(selected.value.no)
@@ -3292,6 +3318,9 @@ async function performSyncData(force) {
           leftMin: hit.leftMin,
           finishAt: hit.finishAt,
           estimated: hit.estimated,
+          availabilityLabel: hit.availabilityLabel || '',
+          registrationPending: hit.registrationPending === true,
+          availabilitySource: hit.availabilitySource || '',
           rawState: hit.rawState,
           kind: hit.kind || m.kind,
           name: hit.name || wantedId,
@@ -3348,27 +3377,7 @@ async function performSyncData(force) {
 
 // 登记洗衣保存公开备注与消毒液选项，开洗自动退出自己的排队。
 async function quickStart() {
-  if (submitting.value) return
-  if (!selected.value?.machineId) { showToast('机位尚未绑定，请联系管理员'); return }
-  submitting.value = true
-  try {
-    const body = {
-      machineId: selected.value.machineId,
-      note: noteText.value.trim() || undefined,
-      useDisinfectant: useDisinfectant.value,
-      selfCleaned: selfCleaned.value,
-      minutes: chosenMinutes.value
-    }
-    await api('/api/tasks', { method: 'POST', body })
-    showToast(`已登记，${previewEndText.value} 提醒你`)
-    noteText.value = ''
-    useDisinfectant.value = false; selfCleaned.value = false
-    await syncData()
-  } catch (e) {
-    showToast(e?.message || '登记失败')
-  } finally {
-    submitting.value = false
-  }
+  return submitRegistration('washer')
 }
 
 // 本机留言板：只看挂在当前选中机器上的留言（最新 5 条）
@@ -3437,18 +3446,20 @@ async function bootstrap() {
   error.value = ''
   try {
     await nextTick()
+    if (contextFailed) { releaseThree(); contextFailed = false }
     if (!renderer) {
       try { initThree() } catch {
         releaseThree()
-        showToast('当前设备暂不支持3D，已切换2D看板')
-        fallbackToList()
+        failScene('initialization_failed')
         return
       }
     }
+    if (contextFailed) return
     await syncData(true)
     if (disposed) return
     loading.value = false
     if (!readyAt) readyAt = performance.now()
+    startPoll()
   } catch (e) {
     loading.value = false
     error.value = e?.message || '加载失败'
@@ -3895,6 +3906,8 @@ onUnmounted(() => {
 }
 
 .mp-dur {
+  background: #152438;
+  min-height: 34px;
   font-size: 11px;
   padding: 6px 4px;
   border-radius: 999px;
@@ -3904,6 +3917,7 @@ onUnmounted(() => {
   text-align: center;
   white-space: nowrap;
 }
+.mp-dur:disabled,.mp-modes button:disabled{opacity:.55;cursor:default}
 
 .mp-dur.on {
   border-color: #3b82f6;
@@ -4078,11 +4092,14 @@ onUnmounted(() => {
 /* 首次使用的资料设置浮层（居中卡片，不打断看房） */
 .sheet-enter-active,
 .sheet-leave-active {
-  transition: opacity 0.2s ease;
+  transition: opacity .2s cubic-bezier(.16,1,.3,1), transform .24s cubic-bezier(.16,1,.3,1);
 }
 
 .sheet-enter-from,
 .sheet-leave-to {
   opacity: 0;
+  transform: translateY(8px);
 }
+@media(prefers-reduced-motion:reduce){.sheet-enter-active,.sheet-leave-active{transition:none}.sheet-enter-from,.sheet-leave-to{transform:none}}
+.mp-modes{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.mp-modes button{padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text-dim);font-size:12px}.mp-modes button.on{border-color:#60a5fa;color:#93c5fd}.mp-custom-duration{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--text-dim);margin:10px 0}.mp-custom-duration input{width:72px;padding:6px;border:1px solid var(--border);border-radius:6px;color:var(--text);background:var(--bg);font:inherit;color-scheme:dark}
 </style>

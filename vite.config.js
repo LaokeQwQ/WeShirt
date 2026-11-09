@@ -10,6 +10,8 @@ export default defineConfig({
     host: true,
   },
   build: {
+    // Embedded browsers can support WebGL2 while lagging behind Vite's default syntax target.
+    target: ['chrome90', 'safari15', 'edge90'],
     outDir: '../dist',
     emptyOutDir: true,
     // 首屏只加载 index + vant，three.js 留在 Room3D 的懒加载块里。
