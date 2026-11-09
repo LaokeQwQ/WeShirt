@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="188" viewBox="0 0 1200 188" role="img" aria-labelledby="title desc">
-  <title id="title">WeShirt 全云端部署</title><desc id="desc">CloudBase 定时触发同步，EdgeOne Pages 承载页面、API 与 KV，浏览器查看洗衣房。</desc>
+  <title id="title">WeShirt 全云端部署</title><desc id="desc">CloudBase 定时同步，也可提供抓取出口；EdgeOne Pages 承载页面、API 与 KV，浏览器查看洗衣房。</desc>
   <g font-family="Arial, 'Microsoft YaHei', sans-serif" fill="#0b1220">
     <rect x="1" y="1" width="345" height="168" rx="18" fill="#f7faf8" stroke="#c8e2d5" stroke-width="2"/>
     <path d="M27 30h27m-27 8h18" stroke="#7d9f8c" stroke-width="3" stroke-linecap="round"/>
     <text x="27" y="82" font-size="26" font-weight="700">Tencent CloudBase</text>
-    <text x="27" y="116" font-size="18" fill="#496457">定时触发同步</text>
+    <text x="27" y="116" font-size="18" fill="#496457">定时同步 · 可选抓取出口</text>
     <rect x="426" y="1" width="345" height="168" rx="18" fill="#e7f5ed" stroke="#a5c7b5" stroke-width="2"/>
     <path d="m452 37 9-9 9 9m-9-9v16" fill="none" stroke="#26734b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
     <text x="452" y="82" font-size="26" font-weight="700">EdgeOne Pages</text>
