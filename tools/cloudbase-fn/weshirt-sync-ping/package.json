@@ -1,0 +1,9 @@
+{
+  "name": "weshirt-sync-ping",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Protected POST trigger for the WeShirt shared sync flow",
+  "type": "commonjs",
+  "main": "index.js",
+  "engines": { "node": ">=18" }
+}
