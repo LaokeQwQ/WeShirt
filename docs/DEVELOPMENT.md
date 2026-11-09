@@ -67,6 +67,10 @@ GitHub Actions 使用最新 Node 22 LTS（至少 22.18）安装、测试、前�
 
 晋升合并后，将 `master` 合并回 `dev` 再继续开发，以满足下一次严格的分支更新检查；不要强推或绕过生产保护。
 
+GitHub 公共仓库还需要在 Settings → Actions → Policies 为 `.github/workflows/promotion.yml` 单独允许 `pull_request_target` 事件，否则默认事件策略会阻止晋升检查启动。策略应使用精确文件路径，不扩大到其他工作流；该检查只读可信 base 的 PR 元数据，不检出或运行 PR 代码、不读取密钥。参考 [GitHub 事件策略](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)。保留分支的必需状态检查。
+
+频道权限、媒体保留与实时连接见 [频道聊天](COMMUNITY.md)；程序时长、登记计时与设备状态的区别见 [状态语义](STATE-SEMANTICS.md)。
+
 ## 请求可靠性约定
 
 新增写接口必须维护权限校验、范围验证、幂等规则和审计。`server/request-safety.js` 负责错误事件与可选幂等回复，`server/audit-middleware.js` 记录业务请求，`server/permissions.js` 执行个人授权。审计先于请求安全与权限注册，读取最终状态和同一事件 ID。业务正文、照片和凭据不得进入日志。
