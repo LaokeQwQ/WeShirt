@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+    branches: [master, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build
+      - name: Check Edge bundle compatibility
+        if: ${{ hashFiles('functions/**/*.js') != '' }}
+        run: npx --no-install esbuild 'functions/api/[[default]].js' --bundle --format=esm --platform=browser --target=es2022 --outfile=/tmp/weshirt-edge-check.mjs
