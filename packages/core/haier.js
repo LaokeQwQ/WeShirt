@@ -1,6 +1,7 @@
 // WeShirt 海乐设备抓取（Agent Scraper 负责）
 // 契约：docs/CONTRACTS.md §2.4
 // 纯 JS / ESM / 仅用 node 内置与全局 fetch
+import { safeErrorCategory } from './util.js'
 
 // ---- 默认 state 映射：原始整数 → 展示状态 ----
 export const DEFAULT_STATE_MAP = { idle: [1], occupied: [2], faulty: [3] }
@@ -275,7 +276,7 @@ export async function diagnoseHaier(env = {}) {
         /* 非 JSON */
       }
     } catch (e) {
-      rec.error = String((e && e.message) || e)
+      rec.error = safeErrorCategory(e)
     }
     rec.ms = Date.now() - t0
     out.steps.push(rec)

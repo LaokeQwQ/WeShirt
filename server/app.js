@@ -8,6 +8,7 @@ import { cors } from 'hono/cors'
 import {
   json,
   apiErr,
+  safeErrorCategory,
   nowISO,
   minutesBetween,
   randomCode,
@@ -287,7 +288,7 @@ export async function detectDryerStuck(env, store, machinesNow) {
             }
           }
         } catch (e) {
-          warn('烘干机跳闸通知失败:', e && e.message)
+          warn('烘干机跳闸通知失败:', safeErrorCategory(e))
         }
       }
 
@@ -534,7 +535,7 @@ async function alertAdmin(env, store, kind, text) {
       return true
     }
   } catch (e) {
-    warn('管理员告警发送失败:', e && e.message)
+    warn('管理员告警发送失败:', safeErrorCategory(e))
   }
   return false
 }
@@ -776,7 +777,7 @@ async function runSyncOnce(env, store, opts = {}) {
     try {
       out.idleNotices = await notifyIdleOccupants(env, store, out.events)
     } catch (e) {
-      warn('洗完私信失败:', e && e.message)
+      warn('洗完私信失败:', safeErrorCategory(e))
       out.idleNotices = 0
     }
 
@@ -900,11 +901,11 @@ async function runSyncOnce(env, store, opts = {}) {
     try {
       out.dryerAlerts = await detectDryerStuck(env, store, nextMachines)
     } catch (e) {
-      warn('烘干机跳闸检测异常:', e && e.message)
+      warn('烘干机跳闸检测异常:', safeErrorCategory(e))
       out.dryerAlerts = 0
     }
   } catch (e) {
-    out.error = String((e && e.message) || e)
+    out.error = safeErrorCategory(e)
 
     // 账号池：如果是鉴权/限流类失败，把这次用的账号冷却 10 分钟，
     // 下次自动换下一个。WAF 是按 IP 封的，轮账号救不了，但「按账号限流」能救；
@@ -957,7 +958,7 @@ async function runSyncOnce(env, store, opts = {}) {
   try {
     out.selfCheck = await runSelfCheck(env, store)
   } catch (e) {
-    warn('自检失败:', e && e.message)
+    warn('自检失败:', safeErrorCategory(e))
   }
   return out
 }
@@ -1184,7 +1185,7 @@ export function createApp({ store, env }) {
         const j = await r.json().catch(() => ({}))
         out.oapi = { status: r.status, ok: j.errcode === 0, errcode: j.errcode, errmsg: j.errmsg || '' }
       } catch (e) {
-        out.oapi = { ok: false, err: String((e && e.message) || e) }
+        out.oapi = { ok: false, err: safeErrorCategory(e) }
       }
       // 2) 新版 oauth2/accessToken（api.dingtalk.com 系接口用）
       let newToken = ''
@@ -1206,7 +1207,7 @@ export function createApp({ store, env }) {
           message: j.message || '',
         }
       } catch (e) {
-        out.newApi = { ok: false, err: String((e && e.message) || e) }
+        out.newApi = { ok: false, err: safeErrorCategory(e) }
       }
 
       // 3) 机器人探测：故意用一个不存在的 userId。
@@ -1244,7 +1245,7 @@ export function createApp({ store, env }) {
                   : '机器人不可用',
           }
         } catch (e) {
-          out.robot = { ok: false, err: String((e && e.message) || e) }
+          out.robot = { ok: false, err: safeErrorCategory(e) }
         }
       }
     }
@@ -1373,7 +1374,7 @@ export function createApp({ store, env }) {
 
       return json(report)
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1404,7 +1405,7 @@ export function createApp({ store, env }) {
       const token = await issueToken(user.id, secret)
       return json({ token, user: publicUser(user) })
     } catch (e) {
-      return apiErr('auth_failed', String((e && e.message) || e), 500)
+      return apiErr('auth_failed', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1417,7 +1418,7 @@ export function createApp({ store, env }) {
       if (device) await store.del(`userByDevice:${device}`)
       return json({ ok: true })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1469,7 +1470,7 @@ export function createApp({ store, env }) {
       const token = await issueToken(user.id, secret)
       return json({ token, user: publicUser(user), merged })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1495,7 +1496,7 @@ export function createApp({ store, env }) {
       if (user.transient) return apiErr('account_out_of_sync', '账号资料正在同步，请稍后重试，当前昵称将保留', 409)
       return json({ user: publicUser(user) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1557,7 +1558,7 @@ export function createApp({ store, env }) {
         { 'Cache-Control': 'public, max-age=5, stale-while-revalidate=25' }
       )
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1602,7 +1603,7 @@ export function createApp({ store, env }) {
       )
       return json({ tasks })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1642,7 +1643,7 @@ export function createApp({ store, env }) {
       })
       return json({ ok: true, task })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1804,7 +1805,7 @@ export function createApp({ store, env }) {
         },
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1830,7 +1831,7 @@ export function createApp({ store, env }) {
       }
       return json({ ok: true })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1859,7 +1860,7 @@ export function createApp({ store, env }) {
       await store.put('subs', arr)
       return json({ ok: true })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1875,7 +1876,7 @@ export function createApp({ store, env }) {
       await store.put('subs', arr)
       return json({ ok: true })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1905,7 +1906,7 @@ export function createApp({ store, env }) {
       }
       return json({ sent, failed })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1926,7 +1927,7 @@ export function createApp({ store, env }) {
       await store.put(key, map)
       return json({ ok: true, recoveredAt })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1942,7 +1943,7 @@ export function createApp({ store, env }) {
       await store.put(`marks:${machineId}`, { userId, note: note || '', expAt })
       return json({ ok: true, expiresAt: expAt })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -1990,7 +1991,7 @@ export function createApp({ store, env }) {
       })
       return json({ occupancy: out })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2055,7 +2056,7 @@ export function createApp({ store, env }) {
             dmSent = Boolean(r && r.ok)
           }
         } catch (e) {
-          warn('urge 钉钉发送失败:', e && e.message)
+          warn('urge 钉钉发送失败:', safeErrorCategory(e))
         }
       }
 
@@ -2081,7 +2082,7 @@ export function createApp({ store, env }) {
             : '对方未接收私信提醒，需要时可继续申请凭证流程',
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2128,13 +2129,13 @@ export function createApp({ store, env }) {
             dmSent = Boolean(r && r.ok)
           }
         } catch (e) {
-          warn('dryer stuck 通知失败:', e && e.message)
+          warn('dryer stuck 通知失败:', safeErrorCategory(e))
         }
       }
       await store.put(key, Date.now())
       return json({ ok: true, dmSent })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2200,7 +2201,7 @@ export function createApp({ store, env }) {
           await auditMod.pruneAuditPhotos(store, { days: 30, max: 5 })
         }
       } catch (e) {
-        warn('凭证照片懒清理失败:', e && e.message)
+        warn('凭证照片懒清理失败:', safeErrorCategory(e))
       }
 
       // 通知：只发当事人和管理员，**不发群**。
@@ -2247,7 +2248,7 @@ export function createApp({ store, env }) {
           }
         }
       } catch (e) {
-        warn('管理员通知失败:', e && e.message)
+        warn('管理员通知失败:', safeErrorCategory(e))
       }
 
       return json({
@@ -2259,7 +2260,7 @@ export function createApp({ store, env }) {
         hint: target?.mobile ? '已留档，可联系对方' : '对方未留手机号，只能留言',
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2324,7 +2325,7 @@ export function createApp({ store, env }) {
       await store.put(`user:${userId}`, user)
       return json({ user: publicUser(user) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2372,7 +2373,7 @@ export function createApp({ store, env }) {
       await store.put(`user:${userId}`, user)
       return json({ url: user.avatarUrl, user: publicUser(user) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2388,7 +2389,7 @@ export function createApp({ store, env }) {
         avatar: field === 'nick' ? normalizeAvatar(cur && cur.avatar) : randomAvatar(),
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2410,7 +2411,7 @@ export function createApp({ store, env }) {
       await store.put(`user:${userId}`, user)
       return json({ user: publicUser(user) })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2472,7 +2473,7 @@ export function createApp({ store, env }) {
           }
         }
       } catch (e) {
-        out.push.err = String((e && e.message) || e).slice(0, 80)
+        out.push.err = safeErrorCategory(e)
       }
 
       // 钉钉私聊
@@ -2490,7 +2491,7 @@ export function createApp({ store, env }) {
           }
         }
       } catch (e) {
-        out.dm.err = String((e && e.message) || e).slice(0, 80)
+        out.dm.err = safeErrorCategory(e)
       }
 
       await audit(store, {
@@ -2511,7 +2512,7 @@ export function createApp({ store, env }) {
           : '两条通道都没发出去，看下面的原因',
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2522,7 +2523,7 @@ export function createApp({ store, env }) {
       const list = await store.get(`notices:${buildingId}`, [])
       return json({ notices: Array.isArray(list) ? list : [] })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2536,7 +2537,7 @@ export function createApp({ store, env }) {
       await store.put(`bindcode:${code}`, { userId, expAt })
       return json({ code, expiresAt: expAt })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2578,7 +2579,7 @@ export function createApp({ store, env }) {
         `&state=${encodeURIComponent(state)}`
       return json({ url })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -2781,7 +2782,7 @@ export function createApp({ store, env }) {
 
       return c.redirect(`${origin}/#/login?k=${encodeURIComponent(claim)}`)
     } catch (e) {
-      warn('钉钉登录回调异常:', e && e.message)
+      warn('钉钉登录回调异常:', safeErrorCategory(e))
       reportError(env, store, 'dingtalk-oauth', e).catch(() => {})
       return back('error')
     }
@@ -2874,7 +2875,7 @@ export function createApp({ store, env }) {
           })
           return json(payload)
         } catch (e) {
-          warn('钉钉加密回包失败:', e && e.message)
+          warn('钉钉加密回包失败:', safeErrorCategory(e))
           return json({ errcode: 0 })
         }
       }
@@ -3078,7 +3079,7 @@ export function createApp({ store, env }) {
                   reply = (data && data.error && data.error.message) || '认领没成功，去网页试试。'
                 }
               } catch (e) {
-                reply = '认领失败：' + String((e && e.message) || e).slice(0, 40)
+                reply = '认领失败：' + safeErrorCategory(e)
               }
             }
           }
@@ -3194,8 +3195,8 @@ export function createApp({ store, env }) {
             trace.webhookErr = String((rr && rr.err) || 'failed')
           }
         } catch (e) {
-          trace.webhookErr = 'throw:' + String((e && e.message) || e)
-          warn('replyWebhook 失败:', e && e.message)
+          trace.webhookErr = 'throw:' + safeErrorCategory(e)
+          warn('replyWebhook 失败:', safeErrorCategory(e))
         }
       } else {
         trace.webhookErr = plain.sessionWebhook ? 'no_reply_fn' : 'no_webhook'
@@ -3210,7 +3211,7 @@ export function createApp({ store, env }) {
             warn('sendSingle 兜底失败:', trace.dmErr)
           }
         } catch (e) {
-          trace.dmErr = String((e && e.message) || e)
+          trace.dmErr = safeErrorCategory(e)
           warn('sendSingle 兜底异常:', trace.dmErr)
         }
       } else if (!trace.replied) {
@@ -3225,13 +3226,14 @@ export function createApp({ store, env }) {
         await store.put('ding:lastCallback', {
           at: nowISO(),
           kind: 'handler_error',
-          err: String((e && e.message) || e),
-          stack: String((e && e.stack) || '').slice(0, 200),
+          err: safeErrorCategory(e),
+          eventId: c.get('eventId'),
+          status: 500,
         })
       } catch {
         /* 连 trace 都写不了就只能靠日志了 */
       }
-      warn('dingtalk callback error:', e && e.message)
+      warn('dingtalk callback error:', safeErrorCategory(e))
       return json({ errcode: 0 }) // 失败也放行
     }
   })
@@ -3260,7 +3262,7 @@ export function createApp({ store, env }) {
       const r = await runSelfCheck(env, store)
       return json({ ok: true, ...r, alertTo: env.ADMIN_DING_USERID ? '已配置' : '未配置 ADMIN_DING_USERID' })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -3346,7 +3348,7 @@ export function createApp({ store, env }) {
         },
       })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -3360,7 +3362,7 @@ export function createApp({ store, env }) {
       const mapping = saved && saved.mapping && typeof saved.mapping === 'object' ? saved.mapping : {}
       return json({ mapping, updatedAt: (saved && saved.updatedAt) || null })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -3402,7 +3404,7 @@ export function createApp({ store, env }) {
       await store.put(`mapping:${buildingId}`, { mapping, updatedAt })
       return json({ ok: true, mapping, updatedAt })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -3421,7 +3423,7 @@ export function createApp({ store, env }) {
       await store.put(key, value)
       return json({ ok: true })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -3462,7 +3464,7 @@ export function createApp({ store, env }) {
       const r = await runSync(env, store)
       return json(r)
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 
@@ -3518,7 +3520,7 @@ export function createApp({ store, env }) {
 
       return json({ ok: !r.error, ...r })
     } catch (e) {
-      return apiErr('internal', String((e && e.message) || e), 500)
+      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
 

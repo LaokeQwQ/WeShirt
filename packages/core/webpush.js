@@ -2,6 +2,8 @@
 // Agent Push — Web Push 加密推送 (RFC 8291 / RFC 8292)
 // 纯 Web Crypto (crypto.subtle)，绝不依赖 node:crypto 专属 API。
 
+import { safeErrorCategory } from './util.js';
+
 const TD = new TextEncoder();
 const TU = new TextDecoder();
 
@@ -246,7 +248,7 @@ export function createWebPush(env) {
       if (status >= 200 && status < 300) return { ok: true, status };
       return { ok: false, status, gone: status === 404 || status === 410 };
     } catch (e) {
-      return { ok: false, err: e && e.message ? e.message : String(e) };
+      return { ok: false, err: safeErrorCategory(e) };
     }
   }
 

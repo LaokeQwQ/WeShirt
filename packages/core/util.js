@@ -8,7 +8,19 @@ export function json(data, status = 200, headers = {}) {
 }
 
 export function apiErr(code, message, status = 400) {
-  return json({ error: { code, message } }, status)
+  return json({ error: { code, message: status >= 500 ? '服务暂时不可用，请稍后重试' : message } }, status)
+}
+
+// Derive fixed categories only; exception text may contain URLs or credentials.
+export function safeErrorCategory(error) {
+  let text = '', name = ''
+  try { text = String(error?.message || error || ''); name = error?.name || '' } catch { return 'request_failed' }
+  for (const status of [400, 401, 403, 404, 405, 408, 409, 429, 500, 502, 503, 504]) {
+    if (text.includes('HAIER HTTP ' + status)) return 'HAIER HTTP ' + status
+  }
+  if (name === 'TimeoutError' || name === 'AbortError') return 'request_timeout'
+  if (/incomplete|partial/i.test(text)) return 'upstream_incomplete'
+  return 'request_failed'
 }
 
 export function nowISO() {

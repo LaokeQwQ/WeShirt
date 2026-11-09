@@ -51,13 +51,14 @@ test('send refuses mismatched VAPID public key and returns fetch failures withou
   const keys = await generateVapidKeys();
   const sub = await subscription();
   let count = 0;
-  t.mock.method(globalThis, 'fetch', async () => { count++; throw new Error('redirect blocked'); });
+  t.mock.method(globalThis, 'fetch', async () => { count++; throw new Error('redirect blocked with synthetic-private-value'); });
   const broken = createWebPush({ VAPID_PRIVATE_JWK: JSON.stringify(keys.privateJwk), VAPID_PUBLIC_KEY: (await generateVapidKeys()).publicKey });
   assert.equal((await broken.send(sub, {})).err, 'vapid_key_incomplete');
   assert.equal(count, 0);
   const push = createWebPush({ VAPID_PRIVATE_JWK: JSON.stringify(keys.privateJwk) });
   const result = await push.send(sub, { body: '通知' });
   assert.equal(result.ok, false);
-  assert.equal(result.err, 'redirect blocked');
+  assert.equal(result.err, 'request_failed');
+  assert.equal(JSON.stringify(result).includes('synthetic-private-value'), false);
   assert.equal(result.gone, undefined);
 });
