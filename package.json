@@ -1,0 +1,34 @@
+{
+  "name": "weshirt",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WeShirt - 宿舍洗衣房状态看板与取衣提醒（H5 + EdgeOne/Node 双形态）",
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:web": "vite",
+    "dev:server": "node --env-file-if-exists=.env --watch server/index.js",
+    "build": "vite build",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "test": "node --test tests/*.test.js",
+    "test:admin": "node --test tests/admin.test.js tests/admin-security.test.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.6",
+    "dompurify": "^3.4.17",
+    "hono": "^4.13.17",
+    "jsqr": "^1.4.0",
+    "marked": "^18.1.3",
+    "pinia": "^2.2.0",
+    "qrcode": "^1.5.4",
+    "three": "^0.186.1",
+    "vant": "^4.9.0",
+    "vue": "^3.5.0",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.0",
+    "concurrently": "^9.1.0",
+    "vite": "^6.0.0"
+  }
+}

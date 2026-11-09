@@ -1,0 +1,12 @@
+<template><section class="card building-groups"><h3>楼栋巡检群</h3><p>异常巡检只通知对应楼栋的指定钉钉群。留空停用该楼通知，正常巡检不广播。</p><p v-if="error" class="error">{{ error }}</p><form v-if="buildings.length" @submit.prevent="save"><label>楼栋<select v-model="building" :disabled="saving"><option v-for="b in buildings" :key="b.code" :value="b.code">{{ b.name }}</option></select></label><label>钉钉群会话 ID<input v-model="conversationId" maxlength="256" :disabled="saving" placeholder="填入机器人可发消息的群会话 ID" autocomplete="off" /></label><van-button size="small" type="primary" native-type="submit" :loading="saving">保存本楼通知群</van-button></form><van-button v-else-if="!loading" size="small" @click="load">读取配置</van-button></section></template>
+<script setup>
+import { ref,watch,onMounted } from 'vue'
+import { api } from '../api'
+import { showToast } from 'vant'
+const buildings=ref([]),groups=ref([]),building=ref(''),conversationId=ref(''),loading=ref(false),saving=ref(false),error=ref('')
+watch(building,()=>{conversationId.value=groups.value.find(g=>g.buildingCode===building.value)?.conversationId||''})
+async function load(){if(loading.value||saving.value)return;loading.value=true;try{const result=await api('/api/admin/building-groups');buildings.value=result.buildings||[];groups.value=result.groups||[];if(!buildings.value.some(b=>b.code===building.value))building.value=buildings.value[0]?.code||'';conversationId.value=groups.value.find(g=>g.buildingCode===building.value)?.conversationId||'';error.value=''}catch(e){error.value=e.message}finally{loading.value=false}}
+async function save(){if(saving.value)return;saving.value=true;error.value='';try{const result=await api('/api/admin/building-groups',{method:'PATCH',body:{buildingCode:building.value,conversationId:conversationId.value.trim()}});groups.value=result.groups||[];showToast('本楼通知群已保存')}catch(e){error.value=e.message}finally{saving.value=false}}
+onMounted(load)
+</script>
+<style scoped>.building-groups{margin:12px;padding:16px}.building-groups h3{font-size:16px;margin:0}.building-groups p{font-size:12px;line-height:1.7;color:var(--text-dim)}.building-groups form{display:grid;gap:12px}.building-groups label{display:grid;gap:6px;font-size:13px}.building-groups input,.building-groups select{width:100%;padding:9px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font:inherit}.building-groups p.error{color:#fca5a5}</style>
