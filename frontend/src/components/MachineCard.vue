@@ -19,8 +19,8 @@ const dorm = useDormStore()
 const open = ref(false)
 const occupantId = ref('')
 const care = ref(null)
-const status = computed(() => props.machine.suspectedUncollected ? { cls:'occupied',text:'疑似未取' } : ({idle:{cls:'idle',text:'空闲'},occupied:{cls:'occupied',text:'运行中'},abnormal:{cls:'occupied',text:'状态待复核'},faulty:{cls:'faulty',text:'故障已确认'},unknown:{cls:'unknown',text:'状态未知'}}[props.machine.state] || {cls:'unknown',text:'状态未知'}))
-const detail = computed(() => { const m = props.machine; if (m.suspectedUncollected) return '请确认桶内衣物'; if (m.state === 'idle') return '可前往现场使用'; if (m.state === 'faulty') return '暂不可使用'; if (m.state === 'occupied') return m.leftMin > 0 ? `${m.estimated ? '估计' : '预计'}剩余 ${m.leftMin} 分钟` : '结束时间待确认'; return '请以现场状态为准' })
+const status = computed(() => props.machine.availabilityLabel ? { cls:'occupied',text:props.machine.availabilityLabel } : props.machine.suspectedUncollected ? { cls:'occupied',text:'疑似未取' } : ({idle:{cls:'idle',text:'空闲'},occupied:{cls:'occupied',text:'运行中'},abnormal:{cls:'occupied',text:'状态待复核'},faulty:{cls:'faulty',text:'故障已确认'},unknown:{cls:'unknown',text:'状态未知'}}[props.machine.state] || {cls:'unknown',text:'状态未知'}))
+const detail = computed(() => { const m = props.machine; if (m.registrationPending) return '登记推测占用，请现场确认机器是否启动'; if (m.suspectedUncollected) return '请确认桶内衣物'; if (m.state === 'idle') return '可前往现场使用'; if (m.state === 'faulty') return '暂不可使用'; if (m.state === 'occupied') return '程序未提供 · ' + (m.leftMin > 0 ? `${m.estimated ? '估算' : '预计'}剩余 ${m.leftMin} 分钟` : '结束时间待确认'); return '请以现场状态为准' })
 watch(open, async (value) => { occupantId.value = ''; care.value = null; if (!value) return; try { const d = await api('/api/occupancy?machineId=' + encodeURIComponent(props.machine.id), {auth:'optional',silent:true}); if (open.value) { const occupant = d.occupancy?.[props.machine.id]; occupantId.value = occupant?.userId || ''; care.value = occupant?.care || null } } catch {} })
 function register() { open.value = false; router.push({path:'/task',query:{machine:props.machine.id}}) }
 </script>

@@ -12,6 +12,7 @@
     </button>
     <AnnouncementSplash />
     <QueueNotices />
+    <ChannelMentions />
     <InspectionShortcut />
     <router-view v-if="route.meta.full || dorm.code" />
     <div v-else class="dorm-wait">{{ userStore.ready ? '选择住宿楼，查看身边的机器' : '正在恢复你的偏好…' }}</div>
@@ -19,12 +20,14 @@
     <van-popup :show="showDormPicker" position="bottom" round :close-on-click-overlay="Boolean(dorm.code)" @update:show="dorm.showPicker = $event">
       <section class="dorm-picker" aria-label="选择住宿楼">
         <h2>{{ dorm.code ? '切换住宿楼' : '你住在哪栋楼？' }}</h2>
-        <p>选一次就会记住，之后可在设置里修改。</p>
+        <p>首次选择后会记住。可自行修改一次，之后需联系管理员。</p>
+        <p v-if="userStore.isLoggedIn && userStore.user?.dormBuilding">剩余自行修改次数：{{ dorm.changesRemaining }}</p>
         <div class="dorm-options">
-          <button v-for="building in dorm.buildings" :key="building.code" type="button" :class="{ chosen: dorm.code === building.code }" :disabled="dorm.saving" @click="selectDorm(building.code)">
+          <button v-for="building in dorm.buildings" :key="building.code" type="button" :class="{ chosen: dorm.code === building.code }" :disabled="dorm.saving || userStore.isLoggedIn && userStore.user?.dormBuilding && dorm.changesRemaining <= 0 && building.code !== userStore.user.dormBuilding" @click="selectDorm(building.code)">
             {{ building.name }}<span v-if="dorm.code === building.code"> ✓</span>
           </button>
         </div>
+        <p v-if="!dorm.buildings.length">暂无启用的住宿楼，请联系管理员。</p>
         <p v-if="dorm.saving">正在保存…</p>
       </section>
     </van-popup>
@@ -46,6 +49,7 @@ import { showConfirmDialog, showToast } from 'vant'
 import { api } from './api'
 import AnnouncementSplash from './components/AnnouncementSplash.vue'
 import QueueNotices from './components/QueueNotices.vue'
+import ChannelMentions from './components/ChannelMentions.vue'
 import InspectionShortcut from './components/InspectionShortcut.vue'
 import { useUserStore } from './stores/user'
 import { useDormStore } from './stores/dorm'
@@ -58,7 +62,7 @@ const showDormPicker = computed(() => route.name !== 'login' && !route.path.star
 
 async function selectDorm(code) {
   try { await dorm.select(code) }
-  catch { showToast('已保存在本机，账号同步暂未成功，下次打开会重试') }
+  catch(e) { showToast(e?.message || '住宿楼保存失败，请重试') }
 }
 
 watch(() => [userStore.ready, userStore.user?.id, userStore.user?.dormBuilding, userStore.isLoggedIn], () => dorm.reconcile(), { immediate: true })

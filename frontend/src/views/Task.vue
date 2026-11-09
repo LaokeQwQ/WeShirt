@@ -4,18 +4,20 @@
       <template #right><button class="dorm-switch" @click="dorm.showPicker = true">{{ dorm.name || '选择住宿楼' }} ▾</button></template>
     </van-nav-bar>
 
-    <div class="task-links"><van-button size="small" plain to="/social">朋友与代取</van-button><van-button size="small" plain to="/assistant">洗衣助手</van-button></div>
+    <div class="task-links"><van-button class="friend-link" size="small" plain to="/social">朋友与代取</van-button><van-button class="assistant-link" size="small" plain to="/assistant">洗衣助手</van-button></div>
     <!-- 登记表单 -->
     <div class="form card">
       <div class="field-label">选择机器</div>
       <van-cell :title="selectedName || (machines.length ? '选台机器' : '暂无可选机器')" is-link @click="openMachinePicker" />
       <div v-if="machineError" class="form-tip">机器数据加载失败，<button @click="loadMachines(true)">重试</button></div>
+      <p v-if="selectedMachine?.availabilityLabel" class="form-tip">{{ selectedMachine.availabilityLabel }}</p>
+      <p v-else-if="['occupied','abnormal'].includes(selectedMachine?.state)" class="form-tip">运行中，程序未提供；登记提醒不会改变机器远端状态。</p>
 
       <!-- 默认跟着机器剩余时间；机器空闲时才需要自己选时长 -->
       <template v-if="mode === 'machine'">
         <div class="field-label">提醒时间</div>
         <div class="mode-row">
-          <span class="mode on">按机器剩余 {{ machineLeft }} 分钟</span>
+          <span class="mode on">按机器剩余 {{ machineLeft }} 分钟提醒</span>
           <span class="mode" @click="mode = 'duration'">自己选</span>
         </div>
       </template>
@@ -28,16 +30,19 @@
         <div v-else class="quick">
           <van-button
             v-for="q in DURATIONS"
-            :key="q"
+            :key="q.minutes"
             size="small"
-            :type="minutes === q ? 'primary' : 'default'"
-            @click="minutes = q"
-          >{{ q }}</van-button>
+            :type="minutes === q.minutes && programLabel === q.label ? 'primary' : 'default'"
+            :disabled="submitting"
+            @click="selectProgram(q)"
+          >{{ q.label }}</van-button>
         </div>
+        <label v-if="!isDryer" class="custom-duration">自定义分钟 <input v-model.number="minutes" type="number" min="1" max="180" step="1" inputmode="numeric" :disabled="submitting" @input="clearProgram" />（1–180 整数）</label>
         <div v-if="machineLeft" class="mode-row">
           <span class="mode" @click="mode = 'machine'">改成按机器剩余 {{ machineLeft }} 分钟</span>
         </div>
       </template>
+      <p v-if="selectedMachine?.estimated" class="form-tip">剩余时间为系统估算，请自己确认程序；估算到点不表示机器已结束。</p>
 
       <TaskDetailsForm v-model:note="note" v-model:use-disinfectant="useDisinfectant" v-model:self-cleaned="selfCleaned" :show-disinfectant="!isDryer" :disabled="submitting" />
       <van-button type="primary" block :loading="submitting" :disabled="!selectedMachine" @click="submit">{{ isDryer ? '登记烘干' : '登记洗衣' }}</van-button>
@@ -51,6 +56,7 @@
         <div class="ti-main">
           <div class="ti-name">{{ t.machineName || t.machineId }}</div>
           <div class="ti-time" :class="stateClass(t)">{{ stateTextOf(t) }}</div>
+          <p v-if="t.mode || t.program" class="task-details">{{ reminderSource(t) }}</p>
           <p v-if="t.note" class="task-note">备注：{{ t.note }}</p>
           <div v-if="t.kind !== 'dryer'" class="task-details">消毒液：{{ t.useDisinfectant ? '使用' : '未使用' }} · 自清洁：{{ t.selfCleaned ? '已记录' : '未记录' }}</div>
         </div>
@@ -62,7 +68,7 @@
             :loading="takingId === t.id"
             @click="take(t)"
           >我已取衣</van-button>
-          <van-button v-if="!t.done" size="small" plain @click="router.push({path:'/social',query:{task:t.id}})">请TA代取</van-button>
+          <van-button v-if="!t.done" class="pickup-button" size="small" plain @click="router.push({path:'/social',query:{task:t.id}})">请TA代取</van-button>
           <van-button size="small" type="danger" plain @click="remove(t)">删除</van-button>
         </div>
       </div>
@@ -91,6 +97,8 @@ import { useUserStore } from '../stores/user'
 import { useDormStore } from '../stores/dorm'
 import { loadBoard, filterDormFloors } from '../boardQuery'
 import TaskDetailsForm from '../components/TaskDetailsForm.vue'
+import { WASHER_PROGRAMS, machineRemainingMinutes, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } from '../taskRegistration'
+import '../userActionConfirm.css'
 
 const route = useRoute()
 const router = useRouter()
@@ -104,6 +112,8 @@ const machines = computed(() => filterDormFloors(board.value, dorm.code, dorm.bu
 const machineError = ref('')
 const selected = ref('')
 const minutes = ref(42)
+const program = ref('')
+const programLabel = ref('加强洗 42分钟')
 const note = ref('')
 const useDisinfectant = ref(false)
 const selfCleaned = ref(false)
@@ -120,22 +130,24 @@ let machinesPending = null
 let disposed = false
 
 // 洗衣机时长白名单（与后端一致）
-const DURATIONS = [30, 42, 50, 70]
+const DURATIONS = WASHER_PROGRAMS
+const confirmAction = createUserActionConfirmation(showConfirmDialog)
+function selectProgram(value) { minutes.value = value.minutes; program.value = value.minutes === 6 ? 'self_clean' : ''; programLabel.value = value.label }
+function clearProgram() { program.value = ''; programLabel.value = '' }
 
 const selectedMachine = computed(() => machines.value.find((m) => String(m.id) === String(selected.value)) || null)
 const selectedName = computed(() => selectedMachine.value?.displayName || selectedMachine.value?.name || '')
 const isDryer = computed(() => selectedMachine.value?.kind === 'dryer')
 const machineLeft = computed(() => {
-  const end = selectedMachine.value?.finishAt ? new Date(selectedMachine.value.finishAt).getTime() : NaN
-  if (Number.isFinite(end)) return Math.max(0, Math.ceil((end - now.value) / 60000))
-  const v = Number(selectedMachine.value?.leftMin)
-  return Number.isFinite(v) && v > 0 ? Math.round(v) : 0
+  return machineRemainingMinutes(selectedMachine.value, now.value)
 })
 
 // 选了机器就重置成「跟着机器」（有剩余时间才跟得上）
 function syncMode() {
   mode.value = machineLeft.value > 0 ? 'machine' : 'duration'
   minutes.value = isDryer.value ? 60 : 42
+  program.value = ''
+  programLabel.value = isDryer.value ? '' : '加强洗 42分钟'
 }
 watch(selected, syncMode)
 watch(machines, (list) => {
@@ -169,12 +181,18 @@ function stateTextOf(t) {
   const end = t.endAt ? new Date(t.endAt).getTime() : NaN
   if (t.takeState === 'pending' || (Number.isFinite(end) && end <= now.value)) {
     const over = Number.isFinite(end) ? Math.max(0, Math.floor((now.value - end) / 60000)) : Number(t.overdueMin) || 0
-    return over >= 5 ? `疑似未取 · 计时结束${agoText(over)}` : over > 0 ? `待确认 · 计时结束${agoText(over)}` : '待取'
+    return over > 0 ? `登记计时结束${agoText(over)} · 请确认机器和衣物` : '登记计时已到 · 请现场确认'
   }
-  if (Number.isFinite(end)) return `剩余 ${Math.max(1, Math.ceil((end - now.value) / 60000))} 分`
+  if (Number.isFinite(end)) return `登记计时剩余 ${Math.max(1, Math.ceil((end - now.value) / 60000))} 分`
   const left = Number(t.leftMin)
-  if (Number.isFinite(left) && left > 0) return `剩余 ${left} 分`
+  if (Number.isFinite(left) && left > 0) return `登记计时剩余 ${left} 分`
   return '结束时间待确认'
+}
+
+function reminderSource(task) {
+  if (task.mode === 'machine') return task.estimated ? '按估算时间提醒；请核对现场状态' : '按机器时间提醒 · 程序未提供'
+  if (task.program === 'self_clean') return '自行选择桶自洁 · 6分钟提醒'
+  return `自行设置${task.minutes ? ' ' + task.minutes + ' 分钟' : ''}提醒；不代表机器远端状态`
 }
 
 function canTake(t) {
@@ -210,8 +228,8 @@ async function submit() {
   }
   if (mode.value !== 'machine') {
     const n = Number(minutes.value)
-    if (isDryer.value ? !Number.isInteger(n) || n < 10 || n > 180 : !DURATIONS.includes(n)) {
-      showToast(isDryer.value ? '烘干时长请填 10–180 的整数' : '请选择洗衣时长')
+    if (!Number.isInteger(n) || n < (isDryer.value ? 10 : 1) || n > 180) {
+      showToast(isDryer.value ? '烘干时长请填 10–180 的整数' : '洗衣时长请填1–180的整数')
       return
     }
   }
@@ -223,11 +241,14 @@ async function submit() {
   submitting.value = true
   try {
     await userStore.ensureAuth()
-    const body = { machineId: selectedMachine.value.id, note: note.value.trim(), useDisinfectant: !isDryer.value && useDisinfectant.value, selfCleaned: !isDryer.value && selfCleaned.value }
-    if (mode.value === 'machine') body.mode = 'machine'
-    else body.minutes = minutes.value
-    await api('/api/tasks', { method: 'POST', body })
-    showToast('已登记')
+    const result = await confirmAction({
+      read: () => ({ ...registrationSnapshot(selectedMachine.value, { mode: mode.value, minutes: minutes.value, program: program.value, programLabel: programLabel.value, note: note.value, useDisinfectant: useDisinfectant.value, selfCleaned: selfCleaned.value }), userId: userStore.user?.id || '', dorm: dorm.code, disposed }),
+      describe: registrationDescription,
+      execute: (snapshot) => api('/api/tasks', { method: 'POST', body: registrationBody(snapshot) }),
+      onChanged: () => showToast('机器或填写内容已变化，请检查后重新确认'),
+    })
+    if (result.status !== 'submitted') return
+    showToast({ message: '已登记，提醒计时已保存', className: 'user-action-feedback' })
     note.value = ''
     useDisinfectant.value = false
     selfCleaned.value = false
@@ -245,7 +266,13 @@ async function take(t) {
   if (takingId.value) return
   takingId.value = t.id
   try {
-    await api(`/api/tasks/${t.id}/take`, { method: 'POST' })
+    const result = await confirmAction({
+      read: () => ({ id: t.id, name: t.machineName, done: t.done, userId: userStore.user?.id || '', disposed }),
+      describe: (snapshot) => ({ title: '确认已取衣', message: `${snapshot.name || '这台机器'}\n确认已取走自己的衣物后，将结束这条登记并释放登记占用。` }),
+      execute: (snapshot) => api(`/api/tasks/${snapshot.id}/take`, { method: 'POST' }),
+      onChanged: () => showToast('登记状态已变化，请刷新后重新确认'),
+    })
+    if (result.status !== 'submitted') return
     t.done = true
     t.takenAt = new Date().toISOString()
     showToast('已标记完成')
@@ -259,13 +286,14 @@ async function take(t) {
 // 删除任务（契约 DELETE /api/tasks/:id）
 async function remove(t) {
   try {
-    await showConfirmDialog({ title: '删除', message: '删掉这条登记记录？' })
-  } catch {
-    return
-  }
-  try {
     await userStore.ensureAuth()
-    await api('/api/tasks/' + t.id, { method: 'DELETE' })
+    const result = await confirmAction({
+      read: () => ({ id: t.id, name: t.machineName, userId: userStore.user?.id || '', disposed }),
+      describe: (snapshot) => ({ title: '删除登记', message: `${snapshot.name || '这台机器'}\n删除这条登记记录，并释放它对应的登记占用？机器远端状态不会随登记删除而变化。` }),
+      execute: (snapshot) => api('/api/tasks/' + snapshot.id, { method: 'DELETE' }),
+      onChanged: () => showToast('登记状态已变化，请重新确认'),
+    })
+    if (result.status !== 'submitted') return
     tasks.value = tasks.value.filter((x) => x.id !== t.id)
     showToast('已删除')
   } catch (e) {
@@ -344,10 +372,12 @@ onUnmounted(() => {
 <style scoped>
 .task-note{font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0;color:var(--text)}.task-details{font-size:11px;color:var(--text-dim);margin-top:5px}
 .task-links{display:flex;gap:10px;padding:12px 12px 0}.ti-ops{flex-wrap:wrap;max-width:185px}.tasks h2{font-size:18px}
+.task-links .friend-link,.ti-ops .pickup-button{color:#bbf7d0;background:#17352c;border-color:#3f7657}.task-links .assistant-link{color:#bae6fd;background:#123348;border-color:#3c718d}
 .dorm-switch { border: 0; background: transparent; color: var(--primary); cursor: pointer; }
 .form-tip { font-size: 12px; color: var(--text-dim); }
 .form-tip button { border: 0; background: transparent; color: var(--primary); cursor: pointer; }
 .dry-duration { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 12px 0; }
+.custom-duration{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--text-dim);margin:12px 0}.custom-duration input{width:78px;padding:7px;border:1px solid var(--border);border-radius:7px;color:var(--text);background:var(--bg);font:inherit;color-scheme:dark}
 .page { padding-bottom: 12px; }
 .form { margin: 12px; padding: 12px; }
 .field-label { font-size: 13px; color: var(--text-dim); margin: 12px 0 6px; }

@@ -67,6 +67,10 @@ Use fictional dorms, reserved example domains and synthetic credentials for fixe
 
 After promotion, merge `master` back into `dev` before continuing development so the next release meets strict branch freshness checks. Do not force-push or bypass production protection.
 
+Public GitHub repositories also need an Actions event policy that allows `pull_request_target` specifically for `.github/workflows/promotion.yml`. Target that exact path and retain required branch checks. The promotion job only reads trusted base workflow metadata: it does not check out or execute PR code or access secrets. See [GitHub event protections](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
+
+See [community chat](en/COMMUNITY.md) for channel access, media retention and realtime connections, and [state semantics](en/STATE-SEMANTICS.md) for the difference between program duration, registration timers and device state.
+
 ## Request reliability
 
 New mutations must preserve authorization, target scope, idempotency and audit coverage. `server/request-safety.js` handles error events and optional idempotent replies; `server/audit-middleware.js` records business requests; `server/permissions.js` enforces individual grants. Register audit before safety and authorization so it sees the final status and matching event ID. Never log bodies, photos or credentials.

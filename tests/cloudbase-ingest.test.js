@@ -55,7 +55,7 @@ test('complete real core pagination is ingested with raw state and ISO finish ti
   assert.equal(rows[0].floorCode, '1')
   assert.equal(rows[0].finishTime, '2026-11-09T08:20:00.000Z')
   assert.equal(parseBeijing(rows[0].finishTime), rows[0].finishTime)
-  assert.deepEqual(Object.keys(rows[0]), ['id', 'name', 'floorCode', 'state', 'finishTime'])
+  assert.deepEqual(Object.keys(rows[0]), ['id', 'name', 'floorCode', 'state', 'finishTime', 'categoryCode'])
   for (const call of mock.calls) {
     if (call.url.hostname === 'edge.example.test') {
       assert.equal(call.headers.get('authorization'), null)

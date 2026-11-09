@@ -90,7 +90,7 @@ export function createDirectBoardClient({
             body: JSON.stringify({ positionId: pid, floorCode, categoryCode, page, pageSize: PAGE_SIZE }),
           })
           if (!Array.isArray(data?.items)) throw new Error('上游设备分页异常')
-          raws.push(...data.items.map((raw) => ({ ...raw, floorCode: raw.floorCode ?? floorCode })))
+          raws.push(...data.items.map((raw) => ({ ...raw, categoryCode, floorCode: raw.floorCode ?? floorCode })))
           const total = Number(data.total) || 0
           if (!data.items.length && total > raws.length) throw new Error('上游设备分页不完整')
           if ((total > 0 && raws.length >= total) || (total <= 0 && data.items.length < PAGE_SIZE)) return raws

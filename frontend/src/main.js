@@ -1,3 +1,5 @@
+import './browserCompatibility'
+
 // 应用入口：挂载 Vue + Pinia + Router + Vant
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'

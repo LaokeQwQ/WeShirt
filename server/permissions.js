@@ -44,7 +44,7 @@ export function resourceFor(path,method='GET'){
   if(['/api/marks','/api/faults/recover','/api/urge','/api/urge/reveal','/api/dryer/stuck'].includes(path))return 'board'
   if(path.startsWith('/api/tasks'))return 'tasks'
   if(path.startsWith('/api/queue'))return 'queue'
-  if(/^\/api\/messages\/[^/]+\/pin$/.test(path))return 'adminMessages'
+  if(/^\/api\/messages\/[^/]+\/pin$/.test(path))return 'messages'
   if(path.startsWith('/api/messages'))return 'messages'
   if(path.startsWith('/api/moderation'))return 'adminMessages'
   if(path.startsWith('/api/inspections'))return 'inspections'
@@ -69,7 +69,8 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     }
     const site=await getSiteConfig(store),access=await getUserPermissions(store,user,site.buildings)
     c.set('userAccess',access)
-    const row=access.permissions[resource],mode=readMethod(c.req.method)||c.req.path==='/api/mcp'?'view':'operate'
+    const readNotice=c.req.method==='POST'&&/^\/api\/messages\/notices\/(?:[^/]+\/)?read$/.test(c.req.path)
+    const row=access.permissions[resource],mode=readMethod(c.req.method)||c.req.path==='/api/mcp'||readNotice?'view':'operate'
     if(!row?.[mode])return apiErr(user?'forbidden':'unauthorized','当前账号没有此功能的'+(mode==='view'?'查看':'操作')+'权限',user?403:401)
     const scope=row[mode+'Buildings']
     if(scope===null)return next()
@@ -87,7 +88,8 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     if(isAdminWrite&&!scopedAdminWriteAllowed(resource,c.req.method,c.req.path))return apiErr('forbidden','此批量操作需要全部楼栋权限，请选择具体楼栋目标',403)
     if(isAdminWrite&&c.req.query('building')&&c.req.query('building')!==bid)return apiErr('forbidden','该数据源不在授权操作范围内',403)
     let body={}
-    if(isWrite&&c.req.raw.body){
+    const binaryMediaUpload = c.req.method==='POST' && /^\/api\/messages\/(?:media|channels\/[^/]+\/avatar)$/.test(c.req.path)
+    if(isWrite&&c.req.raw.body&&!binaryMediaUpload){
       if(Number(c.req.header('content-length'))>1024*1024)return apiErr('too_large','请求内容过长',413)
       try {
         const reader=c.req.raw.clone().body.getReader(),chunks=[];let size=0
@@ -96,6 +98,7 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
       }catch{}
     }
     let targetCodes=[]
+    if(binaryMediaUpload)targetCodes.push(c.req.path==='/api/messages/media'?c.req.query('channel'):decodeURIComponent(c.req.path.split('/')[4]||''))
     if(!isAdminWrite){
       if(body?.dorm||body?.channel||body?.dormBuilding)targetCodes.push(body.dorm||body.channel||body.dormBuilding)
       if(body?.machineId)targetCodes.push(dormOf(body.machineId))
@@ -116,7 +119,7 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
       if(isAdminWrite&&Object.hasOwn(body||{},'dormBuilding'))targetCodes.push(body.dormBuilding)
     }
     if(resource==='adminMachines'&&/^\/api\/admin\/machine\//.test(c.req.path))targetCodes.push(dormOf(c.req.path.split('/')[4]))
-    if(['messages','adminMessages'].includes(resource)&&/^\/api\/(?:messages|admin\/message)\//.test(c.req.path)){
+    if(['messages','adminMessages'].includes(resource)&&/^\/api\/(?:messages|admin\/message)\//.test(c.req.path)&&!/^\/api\/messages\/(?:media|channels|notices|realtime)(?:\/|$)/.test(c.req.path)){
       const msgId=c.req.path.endsWith('/pin')?c.req.path.split('/').at(-2):suffix
       const messages=await store.get('messages:'+bid,[]),message=messages.find(m=>m.id===msgId)
       if(message||isAdminWrite)targetCodes.push(message&&(message.channel||message.dormBuilding||dormOf(message.machineId)))
@@ -152,7 +155,9 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     if(Array.isArray(data.mutes)){const scopedMutes=[];for(const mute of data.mutes){const u=await store.get('user:'+mute.userId,null);if(allowed(u?.dormBuilding))scopedMutes.push(mute)}data.mutes=scopedMutes}
     if(data.user&&!allowed(data.user.dormBuilding))return c.res=apiErr('forbidden','该用户不在授权查看范围内',403)
     if(resource==='adminDashboard'){delete data.haier;if(data.board)data.board.buildingName='授权楼栋'}
-    c.res=new Response(JSON.stringify(data),{status:c.res.status,headers:c.res.headers})
+    c.header('Cache-Control','private, no-store')
+    const headers=new Headers(c.res.headers);headers.delete('Content-Length')
+    c.res=new Response(JSON.stringify(data),{status:c.res.status,headers})
   })
 }
 

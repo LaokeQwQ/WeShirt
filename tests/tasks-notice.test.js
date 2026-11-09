@@ -129,7 +129,7 @@ test('留言板头像/昵称跟用户当前资料，不用发帖时的快照', a
     })
     await s.put('messages:b1', [
       // 发帖时是旧昵称 + 旧头像
-      { id: 'm1', userId: 'u_1', nick: '旧昵称', avatar: 'av1', text: 'hi', at: '2026-10-25T00:00:00Z' },
+      { id: 'm1', userId: 'u_1', nick: '旧昵称', avatar: 'av1', text: 'hi', channel: 'public', at: '2026-10-25T00:00:00Z' },
     ])
   })
   const r = await call('GET', '/api/messages')
@@ -143,7 +143,7 @@ test('留言板头像/昵称跟用户当前资料，不用发帖时的快照', a
 test('用户被删后留言退回快照，不报错', async () => {
   const { call } = await makeApp(async (s) => {
     await s.put('messages:b1', [
-      { id: 'm1', userId: 'u_gone', nick: '走掉的', avatar: 'av3', text: 'hi', at: '2026-10-25T00:00:00Z' },
+      { id: 'm1', userId: 'u_gone', nick: '走掉的', avatar: 'av3', text: 'hi', channel: 'public', at: '2026-10-25T00:00:00Z' },
     ])
   })
   const r = await call('GET', '/api/messages')
