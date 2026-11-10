@@ -2,11 +2,11 @@ export const QUALITY_LEVELS = ['low', 'mid', 'high']
 export function normalizeQualityPreference(value) {
   return QUALITY_LEVELS.includes(value) ? value : 'auto'
 }
-export function chooseInitialQuality({ preference, deviceMemory = 0, hardwareConcurrency = 0, devicePixelRatio = 1, reducedMotion = false } = {}) {
+export function chooseInitialQuality({ preference } = {}) {
   const selected = normalizeQualityPreference(preference)
   if (selected !== 'auto') return selected
-  if (reducedMotion || (deviceMemory > 0 && deviceMemory <= 4) || (hardwareConcurrency > 0 && hardwareConcurrency <= 4)) return 'low'
-  return devicePixelRatio >= 3 ? 'mid' : 'high'
+  // 静态清晰度与设备标签、减少动态偏好无关，性能下降由实际帧表现判断。
+  return 'high'
 }
 export function renderInterval({ busy = false, animated = false, reducedMotion = false, quality = 'mid' } = {}) {
   if (busy) return reducedMotion || quality === 'low' ? 33 : 16

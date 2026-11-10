@@ -48,6 +48,8 @@ Check `/api/health`, the public board and admin storage status. Confirm that syn
 
 Refresh after changing settings to confirm persistence. Monitor trigger failure categories, sync failures and channel outcomes. HTTP success from the trigger means the request completed; use admin sync diagnostics to assess business health. Retain the previous production build and a data backup.
 
+For DingTalk login diagnosis, request `/api/debug/dingtalk?credentialsOnly=1` with the admin header. This checks the deployed application credentials and outbound connectivity without sending messages or returning tokens. The original full diagnostic without this flag includes a robot probe. User authorization still requires a fresh real login to verify; older failures recorded only as `token` cannot identify the upstream cause.
+
 ## Caching and assets
 
 Retain the rules in `edgeone.json`: long-lived caching for hashed `/assets/*`, `no-cache` for `/`, `/index.html` and `/sw.js`, and no static caching for `/api/*`. The service worker reuses only same-origin hashed assets and icons, up to 60 items; it does not provide a fully offline application.
