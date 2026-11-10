@@ -8,6 +8,7 @@ import { getUserPermissions } from '../packages/core/permissions.js'
 import { issueTicket, verifyTicket } from '../packages/core/auth.js'
 import { enqueueCommunityNotices, ensureCommunityNoticeCapacity, readCommunityNotices, markCommunityNoticesRead, processCommunityNotices } from '../packages/core/community-notices.js'
 import { createCommunityMedia, publicMedia } from './community-media.js'
+import { readStreamBytes } from '../packages/core/stream-bytes.js'
 
 const MINUTE = 60000
 const MUTES_KEY = 'moderation:mutes'
@@ -36,9 +37,8 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
   }
   async function body(c) {
     if (Number(c.req.header('content-length')) > 8192) fail('too_large', '请求内容过长', 413)
-    const reader = c.req.raw.body?.getReader(), chunks = []; let size = 0
-    try { if (reader) for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength; if (size > 8192) { reader.cancel().catch(() => {}); fail('too_large', '请求内容过长', 413) }; chunks.push(part.value) } } finally { reader?.releaseLock() }
-    const bytes = new Uint8Array(size); let at = 0; for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.byteLength }
+    const bytes = await readStreamBytes(c.req.raw.body, 8192)
+    if (!bytes) fail('too_large', '请求内容过长', 413)
     const raw = new TextDecoder().decode(bytes)
     let value
     try { value = JSON.parse(raw) } catch { fail('bad_param', '请求须为 JSON 对象') }
@@ -242,7 +242,9 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
       requireChannel(requester, entry.channel, ctx)
       const list = array(await store.get(`messages:${bid}`, []))
       if (entry.messageId ? !list.some((message) => !message.deleted && message.id === entry.messageId && message.media?.id === entry.id && messageChannel(message, ctx) === entry.channel) : entry.ownerId !== requester.user.id) fail('forbidden', '无法访问此附件', 403)
-      return new Response(await mediaService.bytes(entry), { headers: { 'Content-Type': entry.mime, 'Content-Length': String(entry.size), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Content-Disposition': 'inline; filename="attachment.' + (entry.kind === 'video' ? 'mp4' : entry.mime.split('/')[1]) + '"' } })
+      const bytes = await mediaService.bytes(entry)
+      const payload = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      return new Response(payload, { headers: { 'Content-Type': entry.mime, 'Content-Length': String(entry.size), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Content-Disposition': 'inline; filename="attachment.' + (entry.kind === 'video' ? 'mp4' : entry.mime.split('/')[1]) + '"' } })
     } catch (error) { return apiErr(error.code || 'unavailable', error.status ? error.message : '附件暂不可用', error.status || 503) }
   })
   app.post('/api/messages/channels/:channel/avatar', wrap(async (c) => {

@@ -1,3 +1,5 @@
+import { readStreamBytes } from './stream-bytes.js'
+
 export const COMMUNITY_MEDIA_LIMIT = 4 * 1024 * 1024
 const invalid = (message = '视频格式不完整，请选择 30 秒内的 H.264 MP4 视频') => { throw Object.assign(new Error(message), { code: 'bad_media', status: 400 }) }
 
@@ -126,13 +128,8 @@ export function inspectMp4(bytes) {
 
 export async function readMediaBytes(request, max = COMMUNITY_MEDIA_LIMIT) {
   if (Number(request.headers.get('content-length')) > max) throw Object.assign(new Error('附件过大，图片最多 500KB，视频最多 4MB'), { code: 'too_large', status: 413 })
-  const reader = request.body?.getReader()
-  if (!reader) invalid('请选择附件')
-  const chunks = []; let size = 0
-  try {
-    for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength; if (size > max) { reader.cancel().catch(() => {}); throw Object.assign(new Error('附件超过 4MB，请压缩后发送'), { code: 'too_large', status: 413 }) } chunks.push(part.value) }
-  } finally { reader.releaseLock() }
-  const result = new Uint8Array(size); let at = 0
-  for (const chunk of chunks) { result.set(chunk, at); at += chunk.byteLength }
+  if (!request.body) invalid('请选择附件')
+  const result = await readStreamBytes(request.body, max)
+  if (!result) throw Object.assign(new Error('附件超过 4MB，请压缩后发送'), { code: 'too_large', status: 413 })
   return result
 }

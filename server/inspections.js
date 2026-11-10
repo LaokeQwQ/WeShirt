@@ -3,6 +3,7 @@ import { getUserIdentity, canInspect, canModerate } from '../packages/core/ident
 import { normalizeDormBuilding, resolveMachineDorm } from '../packages/core/buildings.js'
 import { withOperationLock } from '../packages/core/operations.js'
 import { getSiteConfig } from './site.js'
+import { readStreamBytes } from '../packages/core/stream-bytes.js'
 
 const GROUPS_KEY = 'operations:buildingGroups'
 const MAX_BODY = 700 * 1024
@@ -19,20 +20,9 @@ async function readBody(c) {
   const advertised = Number(c.req.header('content-length'))
   if (advertised > MAX_BODY) return { error: apiErr('too_large', '巡检内容超过 700KB', 413) }
   try {
-    const reader = c.req.raw.body?.getReader()
-    if (!reader) return { error: apiErr('bad_param', '需要 JSON 内容') }
-    const chunks = []
-    let size = 0
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      size += value.byteLength
-      if (size > MAX_BODY) { await reader.cancel().catch(() => {}); return { error: apiErr('too_large', '巡检内容超过 700KB', 413) } }
-      chunks.push(value)
-    }
-    const bytes = new Uint8Array(size)
-    let offset = 0
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+    if (!c.req.raw.body) return { error: apiErr('bad_param', '需要 JSON 内容') }
+    const bytes = await readStreamBytes(c.req.raw.body, MAX_BODY)
+    if (!bytes) return { error: apiErr('too_large', '巡检内容超过 700KB', 413) }
     const body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error()
     return { body }
