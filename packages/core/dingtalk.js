@@ -1,5 +1,9 @@
 // Edge runtimes need not implement AbortSignal.timeout. Keep one cancellable
 // deadline through response-body consumption and release it on every outcome.
+const responseDiagnostics = new WeakMap()
+export function dingTalkResponseDiagnostics(response) {
+  return responseDiagnostics.get(response) || { contentType:'missing',contentEncoding:'other',bodyBytes:0,bodyChunkType:'empty' }
+}
 export async function boundedDingTalkFetch(url, options = {}) {
   const controller = new AbortController()
   const external = options.signal
@@ -11,24 +15,42 @@ export async function boundedDingTalkFetch(url, options = {}) {
   try {
     const response = await fetch(url, { ...options, signal: controller.signal })
     const reader = response.body?.getReader(), chunks = []
-    let size = 0
+    let size = 0,bodyChunkType='empty'
     if (reader) while (true) {
       const part = await reader.read()
       if (part.done) break
-      size += part.value.byteLength
+      const chunkType=typeof part.value==='string'?'string':part.value instanceof ArrayBuffer?'arraybuffer':part.value instanceof Uint8Array?'uint8array':ArrayBuffer.isView(part.value)?'view':'other'
+      bodyChunkType=bodyChunkType==='empty'?chunkType:bodyChunkType===chunkType?chunkType:'mixed'
+      let chunk
+      if(chunkType==='arraybuffer')chunk=new Uint8Array(part.value)
+      else if(chunkType==='uint8array' || chunkType==='view')chunk=new Uint8Array(part.value.buffer,part.value.byteOffset,part.value.byteLength)
+      else if(chunkType==='string' && part.value.length<=64*1024)chunk=new TextEncoder().encode(part.value)
+      else {
+        controller.abort()
+        reader.cancel().catch(()=>{})
+        throw new Error(chunkType==='string'?'DingTalk response too large':'DingTalk response has an unsupported chunk type')
+      }
+      size += chunk.byteLength
       if (size > 64 * 1024) {
         controller.abort()
         reader.cancel().catch(() => {})
         throw new Error('DingTalk response too large')
       }
-      chunks.push(part.value)
+      chunks.push(chunk)
     }
     const bytes = new Uint8Array(size)
     let offset = 0
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
     const headers = new Headers(response.headers)
+    const type=(headers.get('content-type')||'').split(';')[0].trim().toLowerCase()
+    const encoding=(headers.get('content-encoding')||'identity').trim().toLowerCase()
+    const diagnostic={contentType:!type?'missing':type==='application/json'||type.endsWith('+json')?'json':type==='text/html'?'html':type.startsWith('text/')?'text':'other',contentEncoding:['gzip','deflate','br','identity'].includes(encoding)?encoding:'other',bodyBytes:size,bodyChunkType}
     headers.delete('content-length'); headers.delete('content-encoding')
-    return new Response(reader ? bytes : null, { status: response.status, statusText: response.statusText, headers })
+    // EdgeOne documents ArrayBuffer as a body type; it need not accept a typed
+    // array even though Node's Response constructor accepts Uint8Array.
+    const result=new Response(reader ? bytes.buffer : null, { status: response.status, statusText: response.statusText, headers })
+    responseDiagnostics.set(result,diagnostic)
+    return result
   } catch (error) {
     if (timedOut) { const timeout = new Error('DingTalk request timed out'); timeout.name = 'TimeoutError'; throw timeout }
     throw error
@@ -675,18 +697,10 @@ export function createDingTalk(env = {}) {
       // message/body, which can echo the authorization code or client secret.
       const safeRequestId = (value) => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(value) ? value : undefined
       requestId = safeRequestId(r.headers.get('x-acs-request-id'))
-      const reader = r.body?.getReader(), chunks = []
-      let size = 0
-      if (reader) while (true) {
-        const part = await reader.read()
-        if (part.done) break
-        size += part.value.byteLength
-        if (size > 32 * 1024) { await reader.cancel().catch(() => {}); return { ok: false, err: 'invalid_response', status, ...(requestId ? { requestId } : {}) } }
-        chunks.push(part.value)
-      }
-      const bytes = new Uint8Array(size)
-      let offset = 0
-      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+      // The shared helper has already bounded and normalized Edge's supported
+      // string/ArrayBuffer/view chunks. Do not assume a second stream's type.
+      const bytes = new Uint8Array(await r.arrayBuffer())
+      if(bytes.byteLength>32*1024)return {ok:false,err:'invalid_response',status,...(requestId?{requestId}:{})}
       let j = null
       try { j = JSON.parse(new TextDecoder().decode(bytes)) } catch { /* return a fixed category below */ }
       requestId ||= safeRequestId(j?.requestId)

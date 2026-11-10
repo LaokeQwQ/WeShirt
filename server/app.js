@@ -1214,7 +1214,13 @@ export function createApp({ store, env }) {
     const out = { present, oapi: null, newApi: null, robot: null }
     const credentialsOnly=c.req.query('credentialsOnly')==='1'
     const runtime={abortController:typeof globalThis.AbortController==='function',abortSignalTimeout:typeof globalThis.AbortSignal?.timeout==='function'}
-    const {boundedDingTalkFetch}=await import('../packages/core/dingtalk.js')
+    const {boundedDingTalkFetch,dingTalkResponseDiagnostics}=await import('../packages/core/dingtalk.js')
+    const readDiagnostic=async(response)=>{
+      let value=null,jsonParsed=false
+      try{value=await response.json();jsonParsed=true}catch{/* Never retain raw response text. */}
+      const object=value && typeof value==='object' && !Array.isArray(value)?value:null
+      return {value:object,diagnostic:{...dingTalkResponseDiagnostics(response),jsonParsed}}
+    }
 
     // 1) 旧版 gettoken —— 必须 GET（POST 会报 43001）
     if (present.appKey && present.appSecret) {
@@ -1225,8 +1231,9 @@ export function createApp({ store, env }) {
           )}&appsecret=${encodeURIComponent(appSecret)}`,
           { method: 'GET',redirect:'manual' }
         )
-        const j = await r.json().catch(() => ({}))
-        out.oapi = { status: r.status, ok: r.ok && j.errcode === 0, errcode: j.errcode, errmsg: j.errmsg || '' }
+        const {value:j,diagnostic}=await readDiagnostic(r)
+        const ok=r.ok && j?.errcode===0 && typeof j?.access_token==='string' && Boolean(j.access_token)
+        out.oapi = { status:r.status,ok,err:ok?undefined:!j?'invalid_response':!r.ok || j.errcode!=null && j.errcode!==0?'upstream_rejected':'invalid_response',diagnostic,errcode:j?.errcode,errmsg:j?.errmsg||'' }
       } catch (e) {
         out.oapi = { ok: false, err: safeErrorCategory(e) }
       }
@@ -1242,13 +1249,15 @@ export function createApp({ store, env }) {
             appSecret,
           }),
         })
-        const j = await r.json().catch(() => ({}))
-        newToken = r.ok && typeof j.accessToken==='string' ? j.accessToken : ''
+        const {value:j,diagnostic}=await readDiagnostic(r)
+        newToken = r.ok && typeof j?.accessToken==='string' ? j.accessToken : ''
         out.newApi = {
           status: r.status,
           ok: Boolean(newToken),
-          code: j.code || '',
-          message: j.message || '',
+          err:newToken?undefined:!j?'invalid_response':!r.ok || j.code?'upstream_rejected':'invalid_response',
+          diagnostic,
+          code: j?.code || '',
+          message: j?.message || '',
         }
       } catch (e) {
         out.newApi = { ok: false, err: safeErrorCategory(e) }
@@ -1257,7 +1266,7 @@ export function createApp({ store, env }) {
       // Read-only credentials/outbound-connectivity diagnosis: never call a
       // messaging endpoint or echo the provider's text, credentials or tokens.
       if(credentialsOnly){
-        const summary=(result)=>({ok:result?.ok===true,status:Number.isInteger(result?.status)?result.status:0,...(!result?.ok?{err:result?.err||'credentials_rejected'}:{})})
+        const summary=(result)=>({ok:result?.ok===true,status:Number.isInteger(result?.status)?result.status:0,...(result?.diagnostic||{contentType:'missing',contentEncoding:'other',bodyBytes:0,bodyChunkType:'empty',jsonParsed:false}),...(!result?.ok?{err:result?.err||'invalid_response'}:{})})
         return json({present,runtime,oapi:summary(out.oapi),newApi:summary(out.newApi),robot:{skipped:true},eventId:c.get('eventId')},200,{'Cache-Control':'no-store'})
       }
 

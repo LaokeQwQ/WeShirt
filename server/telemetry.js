@@ -1,5 +1,6 @@
 import { apiErr, json } from '../packages/core/util.js'
 import { normalizeDormBuilding } from '../packages/core/buildings.js'
+import { readStreamBytes } from '../packages/core/stream-bytes.js'
 import { normalizeTelemetryEvent, telemetryDay, emptyTelemetryBucket, addTelemetry, summarizeTelemetry, RETENTION_DAYS } from '../packages/core/telemetry.js'
 
 const queues = new WeakMap()
@@ -18,20 +19,9 @@ export function registerTelemetryRoutes(app, { store, checkAdmin }) {
   app.post('/api/telemetry', async (c) => {
     try {
       // 限制真实读入的字节数（不信 Content-Length），避免遥测挤占业务资源。
-      const reader = c.req.raw.body?.getReader()
-      if (!reader) return apiErr('bad_param', '缺少遥测数据')
-      const chunks = []
-      let length = 0
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        length += value.byteLength
-        if (length > 16384) { await reader.cancel(); return apiErr('too_large', '遥测批次过大', 413) }
-        chunks.push(value)
-      }
-      const bytes = new Uint8Array(length)
-      let offset = 0
-      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
+      if (!c.req.raw.body) return apiErr('bad_param', '缺少遥测数据')
+      const bytes = await readStreamBytes(c.req.raw.body, 16384)
+      if (!bytes) return apiErr('too_large', '遥测批次过大', 413)
       let body
       try { body = JSON.parse(new TextDecoder().decode(bytes)) } catch { return apiErr('bad_param', '遥测格式错误') }
       if (!Array.isArray(body?.events) || body.events.length < 1 || body.events.length > 20) return apiErr('bad_param', '每批需要1–20条事件')
