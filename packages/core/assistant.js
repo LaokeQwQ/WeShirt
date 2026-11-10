@@ -1,5 +1,6 @@
 import { normalizeDormBuilding, dormBuildingName, filterDormFloors } from './buildings.js'
 import { resolveMachineKind } from './machine-kind.js'
+import { streamChunkBytes } from './stream-bytes.js'
 
 export const ASSISTANT_LIMITS = Object.freeze({ daily: 20, minute: 3, input: 1000, history: 20, context: 16, retentionDays: 14, responseBytes: 131072, timeoutMs: 15000 })
 export const BUILTIN_SKILLS = Object.freeze([
@@ -146,12 +147,13 @@ export async function readBoundedJson(source, maxBytes = ASSISTANT_LIMITS.respon
       if (signal?.aborted) throw new AssistantError('timeout', 'AI 响应超时，请稍后再试', 504)
       const { done, value } = await reader.read()
       if (done) break
-      size += value.byteLength
-      if (size > maxBytes) throw new AssistantError('body_too_large', '响应或请求内容过大', 413)
-      chunks.push(value)
+      const chunk = streamChunkBytes(value, maxBytes - size)
+      if (!chunk) throw new AssistantError('body_too_large', '响应或请求内容过大', 413)
+      size += chunk.byteLength
+      chunks.push(chunk)
     }
-  } catch (error) { await reader.cancel().catch(() => {}); throw error }
-  finally { signal?.removeEventListener('abort', cancel); reader.releaseLock() }
+  } catch (error) { cancel(); throw error }
+  finally { signal?.removeEventListener('abort', cancel); try { reader.releaseLock() } catch { /* cancellation may still be pending */ } }
   const bytes = new Uint8Array(size)
   let offset = 0
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }

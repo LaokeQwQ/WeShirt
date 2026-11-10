@@ -2,6 +2,7 @@ import { json } from '../packages/core/util.js'
 import { logEvent } from '../packages/core/auditlog.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { withOperationLock } from '../packages/core/operations.js'
+import { readStreamBytes as limitedBytes } from '../packages/core/stream-bytes.js'
 
 const MAX_BODY = 64 * 1024
 const MAX_REPLY = 32 * 1024
@@ -22,23 +23,6 @@ export function requestRoute(c) {
 
 function responseFrom(snapshot) {
   return snapshot ? new Response(snapshot.body, { status: snapshot.status, headers: snapshot.headers }) : json({ error: { code: 'idempotency_result_unavailable', message: '请求已处理，请刷新确认本次操作结果' } }, 409)
-}
-
-async function limitedBytes(body, max) {
-  if (!body) return new Uint8Array()
-  const reader = body.getReader(), chunks = []
-  let length = 0
-  while (true) {
-    const next = await reader.read()
-    if (next.done) break
-    length += next.value.byteLength
-    if (length > max) { reader.cancel().catch(() => {}); return null }
-    chunks.push(next.value)
-  }
-  const bytes = new Uint8Array(length)
-  let at = 0
-  for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.byteLength }
-  return bytes
 }
 
 async function snapshotResponse(response) {
