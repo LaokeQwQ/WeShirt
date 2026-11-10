@@ -154,11 +154,11 @@
           <span class="chip" :class="{ on: status.dingtalk.configured }">应用</span>
           <span class="chip" :class="{ on: status.dingtalk.robot }">机器人</span>
           <span class="chip" :class="{ on: status.dingtalk.callback }">回调</span>
-          <span class="chip" :class="{ on: status.dingtalk.webhook }">群通道（仅手动测试）</span>
+          <span class="chip" :class="{ on: status.dingtalk.webhook }">楼栋群通道</span>
         </div>
         <div class="bind">
           <div class="bind-note text-dim">
-            群内自动播报已停止。洗完提醒、催取衣与异常提醒通过私聊发送。用户统一从「钉钉登录」进入，登录后自动关联身份。
+            整点播报按楼栋发送，状态未变不播报。洗完提醒、催取衣与个人异常提醒通过私聊发送。用户统一从「钉钉登录」进入，登录后自动关联身份。
           </div>
           <van-button block @click="go('/login')">打开钉钉登录入口</van-button>
         </div>
@@ -232,7 +232,7 @@
           {{ notifyResult.text }}
         </div>
         <div class="notify-channels text-dim">
-          自动群播报已停用 · 私聊 {{ notifyState.dm.ready ? '就绪' : '未就绪' }} · 手动群测试
+          整点群播报按楼栋配置 · 私聊 {{ notifyState.dm.ready ? '就绪' : '未就绪' }} · 手动群测试
           {{ notifyState.group.ready ? `就绪（${notifyState.group.via}）` : '未就绪' }}
         </div>
       </section>

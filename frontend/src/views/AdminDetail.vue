@@ -40,6 +40,7 @@
 
     <!-- 留言板管理 -->
     <template v-else-if="tab === 'messages'">
+      <AdminCommunityReports />
       <div class="toolbar">
         <van-button size="small" @click="loadMessages">刷新</van-button>
         <van-button size="small" type="danger" @click="clearMessages">清空全部</van-button>
@@ -192,6 +193,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { showToast, showConfirmDialog } from 'vant'
 import { api, BASE, getAdminSession, getToken } from '../api'
 import Avatar from '../components/Avatar.vue'
+import AdminCommunityReports from '../components/AdminCommunityReports.vue'
 import { useDormStore } from '../stores/dorm'
 import { normalizeDormBuilding } from '../../../packages/core/buildings.js'
 

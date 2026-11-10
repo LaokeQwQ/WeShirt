@@ -18,6 +18,7 @@ const SCOPED_ADMIN_WRITES=[
   ['adminMessages','PATCH',/^\/api\/messages\/[^/]+\/pin$/],
   ['adminMessages','POST',/^\/api\/moderation\/mutes$/],
   ['adminMessages','DELETE',/^\/api\/moderation\/mutes\/[^/]+$/],
+  ['adminMessages','PATCH',/^\/api\/admin\/community-reports\/[^/]+$/],
   ['adminAnnouncements','POST',/^\/api\/admin\/announcements$/],
   ['adminAnnouncements','DELETE',/^\/api\/admin\/announcements\/[^/]+$/],
 ]
@@ -29,7 +30,7 @@ export function resourceFor(path,method='GET'){
     if(part==='status')return 'adminDashboard'
     if(/^(?:user|users|backfill-ding-profile)$/.test(part))return 'adminUsers'
     if(/^(?:machine|machines)$/.test(part))return 'adminMachines'
-    if(/^(?:message|messages)$/.test(part))return 'adminMessages'
+    if(/^(?:message|messages|community-reports)$/.test(part))return 'adminMessages'
     if(part==='operations'||part.startsWith('notify'))return 'adminOperations'
     if(part==='telemetry')return 'adminTelemetry'
     if(part==='announcements')return 'adminAnnouncements'
@@ -121,7 +122,7 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     }
     if(resource==='adminMachines'&&/^\/api\/admin\/machine\//.test(c.req.path))targetCodes.push(dormOf(c.req.path.split('/')[4]))
     if(['messages','adminMessages'].includes(resource)&&/^\/api\/(?:messages|admin\/message)\//.test(c.req.path)&&!/^\/api\/messages\/(?:media|channels|notices|realtime)(?:\/|$)/.test(c.req.path)){
-      const msgId=c.req.path.endsWith('/pin')?c.req.path.split('/').at(-2):suffix
+      const msgId=/\/(?:pin|report)$/.test(c.req.path)?c.req.path.split('/').at(-2):suffix
       const messages=await store.get('messages:'+bid,[]),message=messages.find(m=>m.id===msgId)
       if(message||isAdminWrite)targetCodes.push(message&&(message.channel||message.dormBuilding||dormOf(message.machineId)))
     }
@@ -131,6 +132,10 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
       const uid=c.req.method==='DELETE'?suffix:body?.userId
       const target=uid?await store.get('user:'+uid,null):null
       targetCodes.push(target?.dormBuilding)
+    }
+    if(resource==='adminMessages'&&isAdminWrite&&/^\/api\/admin\/community-reports\/[^/]+$/.test(c.req.path)){
+      const reports=await store.get('community:reports:'+bid,[])
+      targetCodes.push(reports.find(row=>row.id===suffix)?.channel)
     }
     if(resource==='adminAnnouncements'&&isWrite){
       if(c.req.method==='POST')targetCodes.push(body?.dormBuilding||null)

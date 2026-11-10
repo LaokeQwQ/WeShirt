@@ -309,12 +309,14 @@ export function registerInspectionRoutes(app, { store, env = {}, authenticate, g
     const buildings = (await getSiteConfig(store)).buildings.filter((b) => b.code !== 'public')
     if (Object.keys(body).some((key) => !['buildingCode', 'conversationId'].includes(key)) || !normalizeDormBuilding(body.buildingCode, buildings) || typeof body.conversationId !== 'string' || body.conversationId !== '' && !validConversationId(body.conversationId)) return apiErr('bad_param', '请填写有效楼栋和不超过 256 字的群会话 ID，不能填写 URL')
     return withOperationLock(store, GROUPS_KEY, async () => {
-      const groups = await getBuildingGroups(store, buildings)
-      if (body.conversationId) groups[body.buildingCode] = body.conversationId
-      else delete groups[body.buildingCode]
+      const saved = await store.get(GROUPS_KEY, {})
+      const groups = Object.fromEntries(buildings.filter(b => saved?.[b.code] === '' || validConversationId(saved?.[b.code])).map(b => [b.code, saved[b.code]]))
+      // Preserve explicit opt-outs: absence can use a known legacy destination,
+      // while an empty setting must never silently re-enable that destination.
+      groups[body.buildingCode] = body.conversationId
       await store.put(GROUPS_KEY, groups)
       c.header('Cache-Control', 'no-store')
-      return json({ ok: true, groups: Object.entries(groups).map(([buildingCode, conversationId]) => ({ buildingCode, conversationId })) })
+      return json({ ok: true, groups: Object.entries(groups).filter(([, id]) => id).map(([buildingCode, conversationId]) => ({ buildingCode, conversationId })) })
     })
   })
 }

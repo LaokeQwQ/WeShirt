@@ -47,6 +47,7 @@ import { registerTaskMutationLock, withTaskMutation } from './task-mutation-lock
 import { processFavoriteReminders } from '../packages/core/favorites.js'
 import { processQueueReminders } from '../packages/core/queue-reminders.js'
 import { runOperations, applyMachineHealth, withOperationLock } from '../packages/core/operations.js'
+import { resolveBroadcastTargets, buildHourlyGroupNotice } from '../packages/core/group-broadcast.js'
 import { resolveMachineKind, normalizeMachineCategory } from '../packages/core/machine-kind.js'
 import { applyRegisteredAvailability } from '../packages/core/availability.js'
 import { processCommunityNotices } from '../packages/core/community-notices.js'
@@ -701,12 +702,11 @@ async function runSyncOnce(env, store, opts = {}) {
     await estimateFinishAt(store, buildingId, normalized)
     let board = machinesMod.buildBoard(normalized, { buildingId, buildingName })
     for (const m of board.floors.flatMap((f)=>f.machines)) m.dormBuilding=resolveMachineDorm(m,savedMapping?.mapping||{},env.SITE_BUILDINGS)
-    const operations = await runOperations({store,board,env,notify:async(alert)=>{const uid=env.ADMIN_DING_USERID||env.DINGTALK_ADMIN_USERID;if(!uid)return {dm:{ok:false,error:'not_configured'}};const mod=await import('../packages/core/dingtalk.js');const r=await mod.createDingTalk(env).sendSingle(uid,{title:alert.title,text:alert.message});return {dm:{ok:!!r?.ok,error:r?.err||null}}},broadcast:async({board:summary})=>{
+    board.slotMapping = savedMapping?.mapping || {}
+    const operations = await runOperations({store,board,env,broadcastTargets:()=>resolveBroadcastTargets(store,env),notify:async(alert)=>{const uid=env.ADMIN_DING_USERID||env.DINGTALK_ADMIN_USERID;if(!uid)return {dm:{ok:false,error:'not_configured'}};const mod=await import('../packages/core/dingtalk.js');const r=await mod.createDingTalk(env).sendSingle(uid,{title:alert.title,text:alert.message});return {dm:{ok:!!r?.ok,error:r?.err||null}}},broadcast:async({board:summary,hourKey,target})=>{
       const mod=await import('../packages/core/dingtalk.js'); const dt=mod.createDingTalk(env)
-      const text='【等衣 · 整点洗衣房播报】\n'+mod.buildStatusReply(summary)+'\n\n数据来自海乐生活，请以现场为准。查看各楼机器、排队和代取请打开等衣。'
-      if(env.DINGTALK_WEBHOOK)return dt.broadcast(text)
-      const group=await store.get('ding:groupConv',null)
-      return group?.conversationId ? dt.sendGroup(group.conversationId,text) : {ok:false,err:'group_not_configured'}
+      const notice=buildHourlyGroupNotice(summary,{name:target.name,hourKey})
+      return target.via==='webhook' ? dt.broadcastMarkdown(notice.title,notice.markdown) : dt.sendGroup(target.conversationId,notice)
     }})
     board=operations.board
     out.operations=operations.broadcast
