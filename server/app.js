@@ -1107,21 +1107,55 @@ export function createApp({ store, env }) {
     }
     await next()
   })
-  const oauthFlights = new Map()
   app.use('/api/dingtalk/oauth-callback', async(c,next)=>{
+    // Hono routes HEAD through GET handlers. Link probes and explicit prefetch
+    // requests must not consume the one-use code before the browser arrives.
+    const purpose=[c.req.header('Purpose'),c.req.header('Sec-Purpose')].filter(Boolean).join(' ')
+    if(c.req.method==='HEAD' || /(?:^|[\s,;])prefetch(?:$|[\s,;])/i.test(purpose))return new Response(null,{status:204,headers:{'Cache-Control':'no-store'}})
     const code=c.req.query('authCode')||c.req.query('code')||''
     const state=c.req.query('state')||''
     if (!code || !state || code.length>2048 || state.length>2048) return next()
-    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(code+'|'+state))
-    const key=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')
-    const now=Date.now()
-    for(const [k,v] of oauthFlights) if(v.expiresAt<now)oauthFlights.delete(k)
-    const found=oauthFlights.get(key)
-    if(found)return (await found.job).clone()
-    const job=(async()=>{await next();return c.res.clone()})()
-    oauthFlights.set(key,{job,expiresAt:now+120000})
-    if(oauthFlights.size>100)oauthFlights.delete(oauthFlights.keys().next().value)
-    try{const response=await job;if(!response.headers.get('location')?.includes('/#/login?k='))oauthFlights.delete(key);return response.clone()}catch(e){oauthFlights.delete(key);throw e}
+    const authMod=await import('../packages/core/auth.js')
+    let rec=await authMod.verifyTicket(state,env.AUTH_SECRET).catch(()=>null)
+    if (rec?.role!=='login_state' || !/^[a-f0-9]{32,128}$/i.test(rec.d||'')) {
+      const legacy=/^[a-z0-9]{16,80}$/i.test(state)?await store.get('oauthstate:'+state,null):null
+      rec=legacy && /^[a-f0-9]{32,128}$/i.test(legacy.device||'') && Date.parse(legacy.expAt)>=Date.now()?{d:legacy.device,exp:Date.parse(legacy.expAt)}:null
+    }
+    if(!rec)return next()
+    const hash=async(value)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('')
+    const [deviceHash,stateHash,codeHash]=await Promise.all([hash(rec.d),hash(state),hash(code)])
+    const key='oauthcallbacks:'+deviceHash
+    // Serializes app instances sharing this store. The durable record also
+    // catches replays on other instances once KV has propagated; eventual KV
+    // alone cannot provide a distributed compare-and-set lock.
+    return withOperationLock(store,key,async()=>{
+      const now=Date.now(),saved=await store.get(key,[])
+      const rows=(Array.isArray(saved)?saved:[]).filter(row=>row.expiresAt>now)
+      const found=rows.find(row=>row.stateHash===stateHash)
+      if(found){
+        if(found.codeHash!==codeHash || !found.redirect){
+          c.set('oauthReplayError',found.codeHash===codeHash?'state_processing':'state_used')
+          return next()
+        }
+        c.header('Cache-Control','no-store')
+        return c.redirect(new URL(c.req.url).origin+found.redirect)
+      }
+      const row={stateHash,codeHash,expiresAt:Math.min(rec.exp,now+10*60*1000)}
+      const nextRows=[...rows,row].slice(-4)
+      // Retain failures too: a timeout may already have consumed the one-use
+      // upstream code, so refreshing must start a new authorization instead.
+      await store.put(key,nextRows)
+      await next()
+      const location=c.res.headers.get('location')
+      if(location){
+        const redirect=new URL(location,new URL(c.req.url).origin)
+        if(redirect.origin===new URL(c.req.url).origin && /^#\/login\?(?:k|e)=/.test(redirect.hash)){
+          row.redirect='/'+redirect.hash
+          await store.put(key,nextRows).catch(()=>{})
+        }
+      }
+      c.header('Cache-Control','no-store')
+    })
   })
 
 
@@ -1167,9 +1201,10 @@ export function createApp({ store, env }) {
     if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
       return apiErr('forbidden', '需要管理员口令', 403)
     }
+    const appKey=String(env.DINGTALK_APP_KEY||'').trim(),appSecret=String(env.DINGTALK_APP_SECRET||'').trim()
     const present = {
-      appKey: Boolean(env.DINGTALK_APP_KEY),
-      appSecret: Boolean(env.DINGTALK_APP_SECRET),
+      appKey: Boolean(appKey),
+      appSecret: Boolean(appSecret),
       robotCode: Boolean(env.DINGTALK_ROBOT_CODE),
       agentId: Boolean(env.DINGTALK_AGENT_ID),
       aesKey: Boolean(env.DINGTALK_AES_KEY),
@@ -1177,18 +1212,19 @@ export function createApp({ store, env }) {
       webhook: Boolean(env.DINGTALK_WEBHOOK),
     }
     const out = { present, oapi: null, newApi: null, robot: null }
+    const credentialsOnly=c.req.query('credentialsOnly')==='1'
 
     // 1) 旧版 gettoken —— 必须 GET（POST 会报 43001）
     if (present.appKey && present.appSecret) {
       try {
         const r = await fetch(
           `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(
-            env.DINGTALK_APP_KEY
-          )}&appsecret=${encodeURIComponent(env.DINGTALK_APP_SECRET)}`,
-          { method: 'GET' }
+            appKey
+          )}&appsecret=${encodeURIComponent(appSecret)}`,
+          { method: 'GET',redirect:'error',signal:AbortSignal.timeout(8000) }
         )
         const j = await r.json().catch(() => ({}))
-        out.oapi = { status: r.status, ok: j.errcode === 0, errcode: j.errcode, errmsg: j.errmsg || '' }
+        out.oapi = { status: r.status, ok: r.ok && j.errcode === 0, errcode: j.errcode, errmsg: j.errmsg || '' }
       } catch (e) {
         out.oapi = { ok: false, err: safeErrorCategory(e) }
       }
@@ -1197,14 +1233,15 @@ export function createApp({ store, env }) {
       try {
         const r = await fetch('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
           method: 'POST',
+          redirect:'error',signal:AbortSignal.timeout(8000),
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            appKey: env.DINGTALK_APP_KEY,
-            appSecret: env.DINGTALK_APP_SECRET,
+            appKey,
+            appSecret,
           }),
         })
         const j = await r.json().catch(() => ({}))
-        newToken = j.accessToken || ''
+        newToken = r.ok && typeof j.accessToken==='string' ? j.accessToken : ''
         out.newApi = {
           status: r.status,
           ok: Boolean(newToken),
@@ -1213,6 +1250,13 @@ export function createApp({ store, env }) {
         }
       } catch (e) {
         out.newApi = { ok: false, err: safeErrorCategory(e) }
+      }
+
+      // Read-only credentials/outbound-connectivity diagnosis: never call a
+      // messaging endpoint or echo the provider's text, credentials or tokens.
+      if(credentialsOnly){
+        const summary=(result)=>({ok:result?.ok===true,status:Number.isInteger(result?.status)?result.status:0,...(!result?.ok?{err:result?.err||'credentials_rejected'}:{})})
+        return json({present,oapi:summary(out.oapi),newApi:summary(out.newApi),robot:{skipped:true},eventId:c.get('eventId')},200,{'Cache-Control':'no-store'})
       }
 
       // 3) 机器人探测：故意用一个不存在的 userId。
@@ -1255,6 +1299,7 @@ export function createApp({ store, env }) {
       }
     }
 
+    if(credentialsOnly)return json({present,oapi:{ok:false,status:0,err:'not_configured'},newApi:{ok:false,status:0,err:'not_configured'},robot:{skipped:true},eventId:c.get('eventId')},200,{'Cache-Control':'no-store'})
     out.hint =
       out.oapi && out.oapi.ok
         ? out.robot
@@ -2582,7 +2627,8 @@ export function createApp({ store, env }) {
   // 授权前把 device 写进 state，回调时再把 device 绑到 userId 上。
   app.get('/api/dingtalk/login-url', async (c) => {
     try {
-      if (!env.DINGTALK_APP_KEY) return apiErr('not_configured', '钉钉应用未配置', 503)
+      const appKey=typeof env.DINGTALK_APP_KEY==='string'?env.DINGTALK_APP_KEY.trim():''
+      if (!appKey || !String(env.DINGTALK_APP_SECRET||'').trim()) return apiErr('not_configured', '钉钉应用未配置', 503)
       const raw = c.req.query('device') || ''
       const device = /^[a-f0-9]{32,128}$/i.test(raw) ? raw.toLowerCase() : ''
       if (!device) return apiErr('bad_param', '缺少设备标识，请重新打开页面')
@@ -2591,7 +2637,7 @@ export function createApp({ store, env }) {
       // 表现出来就是「偶尔登录失败」。签名票据服务端自己就能验，跟存储无关。
       const authMod = await import('../packages/core/auth.js')
       const state = await authMod.issueTicket(
-        { role:'login_state', d: device, exp: Date.now() + 10 * 60 * 1000 },
+        { role:'login_state', d: device, nonce: randomKey(20), exp: Date.now() + 10 * 60 * 1000 },
         env.AUTH_SECRET
       )
       // 兼容老客户端：仍然留一条 KV 记录（不依赖它）
@@ -2605,7 +2651,7 @@ export function createApp({ store, env }) {
         'https://login.dingtalk.com/oauth2/auth' +
         `?redirect_uri=${encodeURIComponent(redirect)}` +
         '&response_type=code' +
-        `&client_id=${encodeURIComponent(env.DINGTALK_APP_KEY)}` +
+        `&client_id=${encodeURIComponent(appKey)}` +
         '&scope=openid&prompt=consent' +
         `&state=${encodeURIComponent(state)}`
       return json({ url })
@@ -2622,20 +2668,23 @@ export function createApp({ store, env }) {
     const origin = new URL(c.req.url).origin
     // 失败也要留痕：以前只知道「登录失败」，不知道卡在哪一步，
     // 只能靠猜。现在每个分支都带 reason，管理端能直接查。
-    const back = (flag) => {
-      audit(store, {
+    const back = async (flag,diagnostic={}) => {
+      const eventId=c.get('eventId'),status=Number.isInteger(diagnostic.status)?diagnostic.status:flag==='state_processing'?409:400
+      await audit(store, {
         type: 'auth',
         action: '登录失败',
         level: 'warn',
         target: 'dingtalk',
-        detail: { reason: flag },
-      }).catch(() => {})
-      return c.redirect(`${origin}/#/login?e=${encodeURIComponent(flag)}`)
+        detail: { reason: flag,eventId,status,...(Number.isInteger(diagnostic.upstreamStatus)?{upstreamStatus:diagnostic.upstreamStatus}:{}),...(diagnostic.category?{category:diagnostic.category}:{}),...(diagnostic.requestId?{requestId:diagnostic.requestId}:{}) },
+      })
+      c.header('Cache-Control','no-store')
+      return c.redirect(`${origin}/#/login?e=${encodeURIComponent(flag)}&eventId=${encodeURIComponent(eventId)}&status=${status}`)
     }
     try {
       const code = c.req.query('authCode') || c.req.query('code') || ''
       const state = c.req.query('state') || ''
-      if (!code || !state) return back('missing')
+      if (!code || !state || code.length>2048 || state.length>2048) return back('missing')
+      if(c.get('oauthReplayError'))return back(c.get('oauthReplayError'))
 
       // state 里带的是 device（不是 userId）——登录前还没有用户
       // 先按签名票据验（不依赖 KV 一致性）；验不过再回退查老格式的 KV 记录。
@@ -2644,7 +2693,7 @@ export function createApp({ store, env }) {
       rec = rec?.role==='login_state' && /^[a-f0-9]{32,128}$/i.test(rec.d||'') ? {device:rec.d} : null
       if ((!rec || !rec.device) && /^[a-z0-9]{16,80}$/i.test(state)) {
         const kvRec = await store.get(`oauthstate:${state}`, null).catch(() => null)
-        if (kvRec && kvRec.device && new Date(kvRec.expAt).getTime() >= Date.now()) rec = kvRec
+        if (kvRec && /^[a-f0-9]{32,128}$/i.test(kvRec.device||'') && new Date(kvRec.expAt).getTime() >= Date.now()) rec = kvRec
       }
       if (!rec || !rec.device) return back('state_invalid')
       const deleteState = store.del(`oauthstate:${state}`).catch(() => {})
@@ -2655,13 +2704,14 @@ export function createApp({ store, env }) {
 
       const t = await dt.exchangeUserCode(code)
       if (!t.ok) {
-        warn('钉钉登录换 token 失败:', t.err)
-        return back('token')
+        warn('钉钉登录换 token 失败:', t.err, 'status='+t.status, 'event='+c.get('eventId'))
+        const status=t.err==='invalid_code'?400:t.err==='not_configured'?503:t.status===0?0:t.status===429?503:502
+        return back(t.err==='invalid_code'?'code_expired':t.err==='not_configured'?'not_configured':'token',{status,upstreamStatus:t.status,category:t.err,requestId:t.requestId})
       }
       const me = await dt.fetchUserMe(t.accessToken)
       if (!me.ok) {
         warn('钉钉登录取资料失败:', me.err)
-        return back('profile')
+        return back('profile',{status:502,category:me.err})
       }
 
       // unionId → userId，失败退回手机号 → userId
@@ -2814,8 +2864,8 @@ export function createApp({ store, env }) {
       return c.redirect(`${origin}/#/login?k=${encodeURIComponent(claim)}`)
     } catch (e) {
       warn('钉钉登录回调异常:', safeErrorCategory(e))
-      reportError(env, store, 'dingtalk-oauth', e).catch(() => {})
-      return back('error')
+      reportError(env, store, 'dingtalk-oauth', safeErrorCategory(e)).catch(() => {})
+      return back('error',{status:500,category:safeErrorCategory(e)})
     }
   })
 

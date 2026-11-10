@@ -15,14 +15,13 @@ export function probeRoomSupport({ document = globalThis.document } = {}) {
   finally { try { context?.getExtension('WEBGL_lose_context')?.loseContext() } catch { /* Probe cleanup is best effort. */ } }
 }
 
-// Keep normal browsers' quality selection; embedded WebViews begin with a smaller GPU load.
-export function createCompatibleRenderer(Renderer, options = {}, { document = globalThis.document, userAgent = globalThis.navigator?.userAgent || '' } = {}) {
-  const { quality = 'mid', ...base } = options
-  const embedded = isEmbeddedRoomBrowser(userAgent)
-  const choices = embedded ? ['low'] : [quality, 'low']
+// 每种浏览器都先尝试所选清晰度；只有真实初始化失败才换新画布低负载重试。
+export function createCompatibleRenderer(Renderer, options = {}, { document = globalThis.document } = {}) {
+  const { quality = 'high', ...base } = options
+  const choices = [quality, 'low']
   for (const selected of [...new Set(choices)]) {
     const canvas = document.createElement('canvas')
-    const conservative = embedded || selected === 'low'
+    const conservative = selected === 'low'
     try {
       const renderer = new Renderer({ ...base, canvas,
         antialias: conservative ? false : base.antialias !== false,
@@ -33,7 +32,7 @@ export function createCompatibleRenderer(Renderer, options = {}, { document = gl
         error.code = 'ROOM_SHADER_FAILED'
         throw error
       }
-      return { renderer, quality: selected, conservative }
+      return { renderer, quality: selected, conservative, fallback: selected !== quality }
     } catch {
       try { canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext() } catch { /* Do not retain a failed context. */ }
     }

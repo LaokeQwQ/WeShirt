@@ -28,13 +28,13 @@ test('指针取消、错误指针释放和失焦后不误选', () => {
   assert.equal(gesture.up(event(3, 0, 0, 30)), false)
 })
 
-test('用户画质优先、旧非法值回自动，自动尊重设备与减少动态偏好', () => {
+test('用户画质优先、旧非法值回自动，自动先清晰且不以设备标签或减少动态预先降档', () => {
   assert.equal(normalizeQualityPreference('unexpected'), 'auto')
   assert.equal(chooseInitialQuality({ preference: 'high', deviceMemory: 2, reducedMotion: true }), 'high')
-  assert.equal(chooseInitialQuality({ deviceMemory: 2 }), 'low')
-  assert.equal(chooseInitialQuality({ hardwareConcurrency: 4 }), 'low')
-  assert.equal(chooseInitialQuality({ reducedMotion: true }), 'low')
-  assert.equal(chooseInitialQuality({ devicePixelRatio: 3 }), 'mid')
+  assert.equal(chooseInitialQuality({ deviceMemory: 2 }), 'high')
+  assert.equal(chooseInitialQuality({ hardwareConcurrency: 4 }), 'high')
+  assert.equal(chooseInitialQuality({ reducedMotion: true }), 'high')
+  assert.equal(chooseInitialQuality({ devicePixelRatio: 3 }), 'high')
   assert.equal(chooseInitialQuality(), 'high')
 })
 

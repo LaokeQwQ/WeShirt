@@ -95,6 +95,7 @@ function getDeviceSecret() {
 
 // 模块内 token 缓存，避免每次请求都读 localStorage
 let token = localStorage.getItem(TOKEN_KEY) || ''
+let sessionRevision = 0
 
 // 401 重认证后回调（由 stores/user.js 注册，用于同步 pinia 状态）
 let reauthHook = null
@@ -102,6 +103,7 @@ export function onReauth(fn) { reauthHook = fn }
 
 // 外部主动设置 token（如 store 初始化时）
 export function setToken(t) {
+  sessionRevision++
   token = t || ''
   if (t) localStorage.setItem(TOKEN_KEY, t)
   else localStorage.removeItem(TOKEN_KEY)
@@ -123,8 +125,9 @@ function fireNeedLogin() {
 // 匿名注册 / 续用身份（契约 POST /api/auth）
 // 现在只做「设备密钥换 token」：身份只能由钉钉登录产生。
 // 没有绑定过的设备返回 need_login，这里转成 NEED_LOGIN 抛给上层。
-const reauth = createSingleFlight(async function () {
+const reauth = createSingleFlight(async function ({ silent = false } = {}) {
   const device = getDeviceSecret()
+  const revision = sessionRevision
   let res
   try { res = await fetch(BASE + '/api/auth', {
     method: 'POST',
@@ -133,19 +136,24 @@ const reauth = createSingleFlight(async function () {
     signal: AbortSignal.timeout(10000),
     cache: 'no-store',
   }) } catch { throw apiError('登录请求网络异常，请重试', { code: 'network_error' }) }
+  if (revision !== sessionRevision || String(localStorage.getItem(DEVICE_KEY)||'').toLowerCase() !== device) throw apiError('登录状态已变化，请重试', { status:409, code:'session_changed' })
   if (res.status === 401) {
-    fireNeedLogin()
+    if (!silent) fireNeedLogin()
     throw await responseError(res, '请先登录', { sentinel: true })
   }
   if (!res.ok) throw await responseError(res, '登录状态已失效')
   const data = await res.json().catch(() => null)
-  if (!data?.token) throw apiError('登录响应无效，请重新登录', { status: res.status, eventId: res.headers.get('X-Event-ID'), code: 'invalid_response' })
-  token = data.token
-  localStorage.setItem(TOKEN_KEY, token)
+  if (!data?.token || !data?.user?.id) throw apiError('登录响应无效，请重新登录', { status: res.status, eventId: res.headers.get('X-Event-ID'), code: 'invalid_response' })
+  if (revision !== sessionRevision || String(localStorage.getItem(DEVICE_KEY)||'').toLowerCase() !== device) throw apiError('登录状态已变化，请重试', { status:409, code:'session_changed' })
+  setToken(data.token)
   if (data.user?.id) localStorage.setItem(UUID_KEY, data.user.id)
   if (reauthHook) reauthHook(token, data.user)
   return data
 })
+
+// Explicit device restoration shares the same request/payload as 401 renewal.
+// A public-page startup probe can stay silent when this is a new device.
+export function restoreDeviceSession(options = {}) { return reauth(options) }
 
 // 用一次性取回码换 token（钉钉登录找回旧账号后调用，避免 token 出现在 URL 里）
 export async function claimCode(code) {
@@ -157,7 +165,7 @@ export async function claimCode(code) {
     body: JSON.stringify({ code, device: getDeviceSecret() })
   }) } catch { throw apiError('登录请求网络异常，请重试', { code: 'network_error' }) }
   const data = await res.json().catch(() => null)
-  if (!res.ok || !data?.token) {
+  if (!res.ok || !data?.token || !data?.user?.id) {
     throw apiError(data?.error?.message || '登录已过期，请重新登录', { status: res.status, eventId: res.headers.get('X-Event-ID') || data?.error?.eventId, code: data?.error?.code || 'invalid_response' })
   }
   setToken(data.token)
@@ -265,7 +273,7 @@ async function performApi(path, opts, timing) {
   }
   if (res.status === 401 && auth && !optionalAuth && retry) {
     if (token === sentToken) setToken('')
-    if (!token) await reauth()
+    if (!token) await reauth({silent})
     return performApi(path, { ...opts, retry: false }, timing)
   }
 
@@ -292,6 +300,7 @@ export function hasToken() {
 
 // 退出登录：解绑设备密钥 + 清本地状态
 export async function logout() {
+  sessionRevision++
   const device = getDeviceSecret()
   try {
     await fetch(BASE + '/api/auth/logout', {

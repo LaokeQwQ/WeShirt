@@ -337,6 +337,7 @@ import { track } from '../telemetry'
 import { normalizeQualityPreference, chooseInitialQuality, renderInterval, labelSignature, createPointerGesture } from '../room/strategy'
 import { mergeStaticEnvironment, disposeObjectResources } from '../room/resources'
 import { createCompatibleRenderer, signalRoomFailure } from '../room/compatibility'
+import { ROOM_QUALITY, roomPixelRatio, createAdaptiveRoomQuality } from '../room/quality'
 import { WASHER_PROGRAMS, machineRemainingMinutes, machineActionName, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } from '../taskRegistration'
 import '../userActionConfirm.css'
 
@@ -354,14 +355,14 @@ const clockNow = ref(Date.now())
 let lastBoardUpdated = 0
 let disposed = false
 let contextFailed = false
-let conservativeRenderer = false
+let pendingQualityFallback = false
 let readyAt = 0
 const startedAt = performance.now()
 let performanceWindow = { at: 0, frames: 0 }
 function roomTrack(name, fields) { try { track(name, fields)?.catch?.(() => {}) } catch { /* 统计失败不影响交互 */ } }
 function readQualityPreference() { try { return normalizeQualityPreference(localStorage.getItem('ws_room_quality')) } catch { return 'auto' } }
 const qualityPreference = ref(readQualityPreference())
-const activeQuality = ref('mid')
+const activeQuality = ref('high')
 const qualityName = computed(() => ({ low: '省电', mid: '均衡', high: '清晰' })[activeQuality.value])
 const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
 let reducedMotion = motionQuery.matches
@@ -2570,7 +2571,7 @@ function initThree() {
   })
   renderer = created.renderer
   tier = created.quality
-  conservativeRenderer = created.conservative
+  pendingQualityFallback = created.fallback
   qualityTier = tier
   renderer.setSize(w, h)
   renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -2721,6 +2722,7 @@ function initThree() {
     pointerGesture.cancel()
     interacting = false
     performanceWindow = { at: 0, frames: 0, sent: performanceWindow.sent }
+    qualityMonitor.reset(performance.now())
     if (document.visibilityState === 'visible' && !contextFailed) {
       syncData().catch(() => {})
       lastRafTs = 0
@@ -2740,37 +2742,26 @@ let cameraGoal = null // { pos, target } 相机飞行目标（点选机器/公�
 
 // ── 画质档位 ──
 // 画质控制分辨率和阴影，帧率由交互、动画和减少动态偏好共同决定。
-const QUALITY = {
-  low: { dprCap: 1.15, shadow: false },
-  mid: { dprCap: 1.45, shadow: true },
-  high: { dprCap: 1.75, shadow: true },
-}
-let qualityTier = 'mid'
+let qualityTier = 'high'
+const qualityMonitor = createAdaptiveRoomQuality()
 
 function initialQuality() {
-  if (conservativeRenderer && qualityPreference.value === 'auto') return 'low'
-  return chooseInitialQuality({
-    preference: qualityPreference.value,
-    deviceMemory: Number(navigator.deviceMemory) || 0,
-    hardwareConcurrency: Number(navigator.hardwareConcurrency) || 0,
-    devicePixelRatio: window.devicePixelRatio || 1,
-    reducedMotion,
-  })
+  return chooseInitialQuality({ preference: qualityPreference.value })
 }
 
 function changeQuality() {
   qualityPreference.value = normalizeQualityPreference(qualityPreference.value)
   try { localStorage.setItem('ws_room_quality', qualityPreference.value) } catch { /* 私密模式仍可即时切换 */ }
   applyQuality(initialQuality())
-  qBad = qGood = 0
-  qWin = { t: 0, n: 0, cost: 0 }
+  qualityMonitor.reset(performance.now())
+  busyMinMs = 0
   roomTrack('room_interaction', { action: 'quality' })
 }
 
 function onMotionChange(event) {
   reducedMotion = event.matches
   if (controls) controls.enableDamping = !reducedMotion
-  if (qualityPreference.value === 'auto') applyQuality(initialQuality())
+  qualityMonitor.reset(performance.now())
 }
 motionQuery.addEventListener('change', onMotionChange)
 
@@ -2802,9 +2793,9 @@ function onContextRestored() {
 function applyQuality(tier) {
   qualityTier = tier
   activeQuality.value = tier
-  const q = QUALITY[tier] || QUALITY.mid
+  const q = ROOM_QUALITY[tier] || ROOM_QUALITY.high
   if (renderer) {
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.dprCap))
+    renderer.setPixelRatio(roomPixelRatio(tier, window.devicePixelRatio || 1))
     renderer.shadowMap.enabled = q.shadow
     renderer.shadowMap.type = THREE.PCFShadowMap
     renderer.shadowMap.needsUpdate = true
@@ -2823,70 +2814,14 @@ const perfEl = /[?&]perf=1/.test(location.href)
     })()
   : null
 
-// ── 自适应画质 ──
-//
-// 关键：**用「单帧渲染耗时」判断，而不是「帧率」**。
-// 我们自己限了帧（空闲 30fps），按帧率判断的话永远达不到高分阈值，
-// 结果就是所有人几秒内被打到 low（上一版就踩了这个坑）。
-// 渲染耗时和限帧无关：一帧画 20ms 说明 30fps 都吃力，一帧画 3ms 说明还有富余。
-//
-// 用真实墙钟（performance.now）而不是 rAF 的 ts，避免掉帧时时间戳跳跃干扰统计。
-let qWin = { t: 0, n: 0, cost: 0 }
-let qBad = 0
-let qGood = 0
-
-function tuneQuality(renderCost) {
-  if (qualityPreference.value !== 'auto' || reducedMotion || conservativeRenderer) return
-  const now = performance.now()
-  if (!qWin.t) {
-    qWin.t = now
-    qWin.n = 1
-    qWin.cost = renderCost
-    return
-  }
-  qWin.n++
-  qWin.cost += renderCost
-  const span = now - qWin.t
-  if (span < 1500) return // 1.5 秒一个观察窗口
-
-  const avgCost = qWin.cost / qWin.n
-  const fps = (qWin.n * 1000) / span
-  qWin = { t: now, n: 0, cost: 0 }
-  // 帧成本决定 busy 时能开多快（5ms 就别限帧了，限了反而抖）
-  setBusyTarget(avgCost)
-
-  // 一帧超过 16ms 就别想稳住 30fps 了，往下走
-  const canHold = avgCost <= 16
-  // 一帧 5ms 以内、且确实跑满了限帧上限，说明还有余量，可以往上试
-  const hasHeadroom = avgCost <= 5 && fps >= (qualityTier === 'low' ? 12 : 18)
-
-  if (!canHold) {
-    qGood = 0
-    if (++qBad < 2) return // 连续两个窗口都不行才降，避开打开页面时的抖动
-    qBad = 0
-    if (qualityTier === 'high') {
-      applyQuality('mid')
-    } else if (qualityTier === 'mid') {
-      applyQuality('low')
-
-    }
-    return
-  }
-
-  qBad = 0
-  if (!hasHeadroom || qualityTier === 'high') {
-    qGood = 0
-    return
-  }
-  // 升级要更保守：连续四个窗口有余量才抬一档
-  if (++qGood < 4) return
-  qGood = 0
-  if (qualityTier === 'low') {
-    applyQuality('mid')
-
-  } else if (qualityTier === 'mid') {
-    applyQuality('high')
-  }
+function tuneQuality(frameCostMs, interval, active) {
+  const sample = qualityMonitor.sample({ now: performance.now(), frameCostMs, targetIntervalMs: interval,
+    quality: qualityTier, preference: qualityPreference.value, visible: document.visibilityState === 'visible', active: active && !loading.value })
+  if (!sample) return
+  setBusyTarget(sample.averageCost)
+  if (!sample.changeTo) return
+  applyQuality(sample.changeTo)
+  if (sample.direction === 'down') showToast({ message: `检测到持续掉帧，已切换${qualityName.value}画质，可在画质菜单调整`, duration: 3000 })
 }
 
 // ── 帧节奏 ──
@@ -2922,6 +2857,7 @@ function animate(ts) {
   if (interval > 0 && rafAccMs + 0.5 < interval) return
   // 只扣掉一个周期，积压最多留一个周期：落后时不要「连追几帧」，那样更抖
   rafAccMs = interval > 0 ? Math.max(0, Math.min(rafAccMs - interval, interval)) : 0
+  const frameStartedAt = performance.now()
 
   timer?.update(ts)
   const t = timer?.getElapsed() || 0
@@ -3014,7 +2950,7 @@ function animate(ts) {
     try { renderer.render(scene, camera) } catch { failScene('render_failed'); return }
     renderCost = performance.now() - r0
   }
-  if (renderCost && (busy || animated)) tuneQuality(renderCost)
+  tuneQuality(performance.now() - frameStartedAt, interval, busy || animated && !reducedMotion)
   samplePerformance()
 
   // ?perf=1 时右上角显示帧率 / 单帧耗时 / 绘制调用数，方便现场判断卡在哪
@@ -3459,6 +3395,11 @@ async function bootstrap() {
     if (disposed) return
     loading.value = false
     if (!readyAt) readyAt = performance.now()
+    qualityMonitor.reset(performance.now())
+    if (pendingQualityFallback) {
+      pendingQualityFallback = false
+      showToast({ message: '当前环境暂无法启用所选画质，已切换省电', duration: 3000 })
+    }
     startPoll()
   } catch (e) {
     loading.value = false
@@ -3573,6 +3514,7 @@ function releaseThree() {
   cameraGoal = null
   pointerGesture.cancel()
   interacting = false
+  pendingQualityFallback = false
   lastRafTs = rafAccMs = prevT = 0
 }
 

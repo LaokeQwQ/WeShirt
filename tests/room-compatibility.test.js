@@ -22,12 +22,19 @@ test('normal browser retries a failed high-performance context at low load on a 
   assert.notEqual(canvases[0], canvases[1]); assert.equal(result.renderer.domElement, canvases[1])
 })
 
-test('DingTalk starts conservatively without rejecting a capable embedded browser', () => {
+test('capable DingTalk starts at the requested clear quality without a UA downgrade', () => {
   const options = []
   class Renderer { constructor(value) { options.push(value) } }
   const result = createCompatibleRenderer(Renderer, { quality: 'high', antialias: true }, { document: { createElement: () => ({}) }, userAgent: 'Android AliApp(DingTalk/8.0)' })
-  assert.equal(result.quality, 'low'); assert.equal(result.conservative, true)
-  assert.equal(options.length, 1); assert.equal(options[0].antialias, false); assert.equal(options[0].powerPreference, 'default')
+  assert.equal(result.quality, 'high'); assert.equal(result.conservative, false); assert.equal(result.fallback, false)
+  assert.equal(options.length, 1); assert.equal(options[0].antialias, true); assert.equal(options[0].powerPreference, 'high-performance')
+})
+
+test('DingTalk falls back only after a real renderer initialization failure', () => {
+  let attempts = 0
+  class Renderer { constructor() { if (++attempts === 1) throw Error('driver'); this.debug = {} } }
+  const result = createCompatibleRenderer(Renderer, { quality: 'high' }, { document: { createElement: () => ({ getContext: () => null }) }, userAgent: 'DingTalk Android' })
+  assert.equal(attempts, 2); assert.equal(result.quality, 'low'); assert.equal(result.fallback, true)
 })
 
 test('unrecoverable renderer failure exposes a fixed error without driver details', () => {
