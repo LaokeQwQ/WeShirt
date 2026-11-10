@@ -220,7 +220,7 @@ export async function processQueueReminders({ store, board, env = {}, now = Date
           if (!machine || !isMachineDormEnabled(machine, await currentDormCatalog(store, env.SITE_BUILDINGS), board.slotMapping)) return
           allowed = true
           // 请求在排队锁内发起，完成等待在锁外，取消预约不会等待网络。
-          try { sending = Promise.resolve(notify(userId, { title: item.title, text: item.text, markdown: item.markdown, url: item.url, type: 'queue', machineId: item.machineId, machineName: item.machineName, kind: item.kind, confirmed: item.confirmed, estimated: item.estimated, availabilitySource: item.availabilitySource, finishAt: item.finishAt, phase: item.phase, noticeId: item.id })) }
+          try { sending = Promise.resolve(notify(userId, { title: item.title, text: item.text, markdown: item.markdown, url: item.url, type: 'queue', machineId: item.machineId, machineName: item.machineName, kind: item.kind, confirmed: item.confirmed, estimated: item.estimated, availabilitySource: item.availabilitySource, finishAt: item.finishAt, phase: item.phase, noticeId: item.id, reservationId: qid })) }
           catch { sending = Promise.resolve({ ok: false }) }
         })
         if (!allowed) continue

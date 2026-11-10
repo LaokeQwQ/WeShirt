@@ -16,7 +16,7 @@ import {
   warn,
   log,
 } from '../packages/core/util.js'
-import { newUserId, issueToken, verifyToken, verifyAdminSession } from '../packages/core/auth.js'
+import { newUserId, issueToken, verifyRequestUser, verifyAdminSession } from '../packages/core/auth.js'
 import { pickIndex as pickPoolIndex } from '../packages/core/egress.js'
 import { checkNick } from '../packages/core/nick.js'
 import {
@@ -39,6 +39,9 @@ import { registerOperationsRoutes } from './operations.js'
 import { registerFavoriteRoutes } from './favorites.js'
 import { registerQueueNoticeRoutes } from './queue-reminders.js'
 import { registerInspectionRoutes } from './inspections.js'
+import { createMobileAuth, registerMobileRoutes } from './mobile.js'
+import { createRemoteMobileAtomicStore } from '../packages/core/mobile-store.js'
+import { createMobilePush } from '../packages/core/mobile-push.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { registerPermissionMiddleware, registerPermissionRoutes } from './permissions.js'
 import { registerAuditMiddleware } from './audit-middleware.js'
@@ -75,9 +78,10 @@ const DORM_BUILDING_CODES = new Set(['guiyuan', 'liuyuan', 'meiyuan', 'zhuyuan']
 // 现场机位类型优先于上游名称（例如 D1 的名字只有“柳园西”）。
 const machineKind = resolveMachineKind
 
-async function notifyCommunityUser(env,store,uid,notice){
+async function notifyCommunityUser(env,store,uid,notice,mobilePush){
   const user=await store.get('user:'+uid,null)
   if(!user||user.disabled||user.blocked||user.notifyOn===false)return {ok:false,skipped:true}
+  const native = Promise.resolve().then(()=> (mobilePush || createMobilePush({store,env})).notify(uid,notice)).catch(()=>({ok:false}))
   let dm={ok:false},pushOK=false
   if(user.dingUserId){
     try{const mod=await import('../packages/core/dingtalk.js');dm=await mod.createDingTalk(env).sendSingle(user.dingUserId,notice)}catch{}
@@ -89,7 +93,8 @@ async function notifyCommunityUser(env,store,uid,notice){
       try{const result=await wp.send(sub.subscription||{endpoint:sub.endpoint,keys:sub.keys},{...notice,body:notice.text});pushOK ||= result?.ok===true}catch{}
     }
   }
-  return {ok:user.dingUserId?dm?.ok===true:pushOK}
+  const mobileResult=await native
+  return {ok:dm?.ok===true||pushOK||mobileResult?.ok===true,nativeQueued:mobileResult?.queued===true}
 }
 
 function noticeMachine(machine, mapping = {}) {
@@ -142,12 +147,7 @@ function adminSecret(env) {
 
 // 取出 Bearer 中的 userId（失败返回 null）
 async function bearerUser(c, env) {
-  const secret = authSecret(env)
-  if (!secret) return null
-  const h = c.req.header('authorization') || ''
-  const m = h.match(/^Bearer\s+(.+)$/i)
-  if (!m) return null
-  return verifyToken(m[1], secret)
+  return verifyRequestUser(c, authSecret(env))
 }
 
 // 管理口令校验：优先请求头（避免口令出现在 URL / 访问日志里）。
@@ -642,6 +642,8 @@ export function runSync(env, store, opts = {}) {
 }
 
 async function runSyncOnce(env, store, opts = {}) {
+  const nativePush = createMobilePush({store,env,...(opts.mobileAtomicStore?{atomicStore:opts.mobileAtomicStore}:{}) ,...(opts.mobilePushTransports?{transports:opts.mobilePushTransports}:{})})
+  await nativePush.drain().catch(()=>null)
   env = await loadSiteRuntime(store,env)
   env.SITE_BUILDINGS=(await getSiteConfig(store)).buildings
   const out = { fetched: 0, events: [], notified: 0, error: null }
@@ -722,19 +724,18 @@ async function runSyncOnce(env, store, opts = {}) {
     // 预约与收藏共用新鲜快照；各自保存去重和投递状态，不影响主同步。
     const notifyUser = async (uid, notice) => {
       const user = await store.get(`user:${uid}`, null)
-      if (!user?.dingUserId || user.disabled || user.blocked || user.notifyOn === false) return { ok: false, skipped: true }
+      if (!user || user.disabled || user.blocked || user.notifyOn === false) return { ok: false, skipped: true }
       const catalog = await currentDormCatalog(store, env.SITE_BUILDINGS)
       const machine = notice.machineId && nextMachines.find((item) => String(item.id) === String(notice.machineId))
       if (machine ? !isMachineDormEnabled(machine, catalog, savedMapping?.mapping || {})
         : catalog.some((building) => building.code === user.dormBuilding && building.enabled === false)) return { ok: false, skipped: true }
-      const mod = await import('../packages/core/dingtalk.js')
-      return mod.createDingTalk(env).sendSingle(user.dingUserId, notice)
+      return notifyCommunityUser(env,store,uid,notice,nativePush)
     }
     const reminderBoard = { board: enabledMachineBoard(board, await currentDormCatalog(store, env.SITE_BUILDINGS), savedMapping?.mapping || {}), mapping: savedMapping?.mapping || {} }
     const reminders = await Promise.allSettled([
       processQueueReminders({ store, board, env, notify: notifyUser }),
       processFavoriteReminders({ store, board: reminderBoard, env, notify: notifyUser }),
-      processCommunityNotices({store,env,notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice)}),
+      processCommunityNotices({store,env,notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,nativePush)}),
       pruneCommunityMedia({store,now:Date.now(),limit:20}),
     ])
     out.queueReminders = reminders[0].status === 'fulfilled' ? reminders[0].value : { error: 'unavailable' }
@@ -826,6 +827,13 @@ async function runSyncOnce(env, store, opts = {}) {
                     : `【等衣】${t.machineName || t.machineId} 洗好了，快来取`,
               }
         const text = notice.text
+        // Persist an independent native outbox before the older channels mark
+        // this task notified. A later DingTalk success cannot cancel its retry.
+        try {
+          const confirmed=t.mode==='machine'&&left<=0&&currentMachine.state==='idle'&&!currentMachine.health?.stale
+          const nativeResult = await nativePush.notify(userId,{...notice,nativeEventKey:'task:'+t.id+':take:'+lead,taskId:t.id,finishAt:t.endAt,confirmed,nativeKind:left>0?'QUEUE_THREE_MINUTES':confirmed?'TASK_FINISHED':'ESTIMATED_END'})
+          if(nativeResult.ok)anyOk=true
+        } catch { /* delivery stays bounded and never exposes provider data */ }
         // 记下有没有推送订阅，写审计时用（作用域只在这条任务里）
         const userSubsCount = (Array.isArray(subs) ? subs : []).filter((s) => s.userId === userId).length
 
@@ -966,11 +974,15 @@ async function runSyncOnce(env, store, opts = {}) {
 // ─────────────────────────────────────────────────────────────
 // createApp 工厂
 // ─────────────────────────────────────────────────────────────
-export function createApp({ store, env }) {
+export function createApp({ store, env, mobile = {} }) {
   if (!store) throw new Error('createApp 需要 store')
   env = env || {}
 
   const app = new Hono()
+  const mobileAtomicStore = mobile.atomicStore || createRemoteMobileAtomicStore(env)
+  const mobileAuth = createMobileAuth({ store, env, atomicStore: mobileAtomicStore, identityProvider: mobile.identityProvider, now: mobile.now })
+  const mobilePush = createMobilePush({store,env,atomicStore:mobileAtomicStore,...(mobile.pushTransports?{transports:mobile.pushTransports}:{})})
+  app.use('/api/*', async (c, next) => { c.set('mobileAuthService', mobileAuth); await next() })
   // CORS：前端（Vite 5173 / 独立静态站）跨域访问 API 必须放行
   app.use(
     '*',
@@ -3622,18 +3634,19 @@ export function createApp({ store, env }) {
   registerAdminRoutes(app, { store, env, authorize:c=>checkAdmin(c,env,store) })
   const authenticate = async(c)=>{const uid=await bearerUser(c,env);return uid ? store.get(`user:${uid}`,null):null}
   const getBoard = async()=>{const bid=env.BUILDING_ID||'b1';const [entry,mapping]=await Promise.all([store.get(`machines:${bid}`,null),store.get(`mapping:${bid}`,null)]);return {board:entry?.board,mapping:mapping?.mapping||{},buildings:env.SITE_BUILDINGS}}
+  registerMobileRoutes(app,{store,env,authenticate,getBoard,auth:mobileAuth,atomicStore:mobileAtomicStore,pushProviders:mobile.pushProviders||mobilePush.providers,mobilePush})
   registerPermissionRoutes(app,{store,authenticate,checkSuperAdmin:c=>checkSuperAdmin(c,env)})
   registerFavoriteRoutes(app,{store,env,authenticate,getBoard})
   registerQueueNoticeRoutes(app,{store,authenticate})
   registerAssistantRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),getBoard:async()=>{const bid=env.BUILDING_ID||'b1';const [entry,mapping]=await Promise.all([store.get(`machines:${bid}`,null),store.get(`mapping:${bid}`,null)]);return {board:entry?.board,mapping:mapping?.mapping||{},buildings:env.SITE_BUILDINGS}}})
-  registerOperationsRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env),notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice)})
+  registerOperationsRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env),notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,mobilePush)})
   registerInspectionRoutes(app,{store,env,authenticate,getBoard,checkSuperAdmin:c=>checkSuperAdmin(c,env),notifyBuilding:async({conversationId,inspection})=>{
     const mod=await import('../packages/core/dingtalk.js')
     const notice=['【等衣 · 楼栋巡检异常】',inspection.machineName,'志愿管理已现场上报异常，请前往洗衣房确认并协助处理。','巡检照片和备注请在管理页面查看。'].join('\n')
     return mod.createDingTalk(env).sendGroup(conversationId,notice)
   }})
   registerAnnouncementRoutes(app,{store,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store)})
-  registerSocialRoutes(app,{store,env,authenticate,notify:async(uid,notice)=>{const user=await store.get(`user:${uid}`,null);if(!user?.dingUserId || user.notifyOn===false)return {ok:false,skipped:true};const mod=await import('../packages/core/dingtalk.js');return mod.createDingTalk(env).sendSingle(user.dingUserId,notice)}})
+  registerSocialRoutes(app,{store,env,authenticate,notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,mobilePush)})
   registerTelemetryRoutes(app, { store, checkAdmin: (c) => checkAdmin(c, env, store) })
 
   return app
