@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { boundedDingTalkFetch, createDingTalk } from '../packages/core/dingtalk.js'
+import { boundedDingTalkFetch, dingTalkResponseDiagnostics, createDingTalk } from '../packages/core/dingtalk.js'
 import { createMemoryStore } from '../packages/core/store.js'
 import { createApp } from '../server/app.js'
 
@@ -107,4 +107,92 @@ test('successful completion removes the caller listener before subsequent caller
   external.abort()
   assert.equal(internal.aborted,false)
   assert.equal(remove.mock.callCount(),1);assert.equal(clock.active.size,0)
+})
+
+test('the shared helper uses ArrayBuffer with a restricted Edge-style Response constructor',async(t)=>{
+  withoutTimeout(t)
+  const NativeResponse=globalThis.Response,bodyTypes=[]
+  class RestrictedResponse extends NativeResponse {
+    constructor(body,options){
+      assert.equal(ArrayBuffer.isView(body),false,'Edge-style constructor does not accept a typed array')
+      assert.ok(body==null || typeof body==='string' || body instanceof ArrayBuffer || body instanceof ReadableStream)
+      bodyTypes.push(body instanceof ArrayBuffer?'arraybuffer':typeof body)
+      super(body,options)
+    }
+  }
+  t.mock.method(globalThis,'fetch',async(input)=>{
+    const path=new URL(String(input)).pathname
+    if(path==='/gettoken')return NativeResponse.json({errcode:0,access_token:'synthetic-oapi-token'})
+    return NativeResponse.json({accessToken:'synthetic-new-token'})
+  })
+  Object.defineProperty(globalThis,'Response',{configurable:true,writable:true,value:RestrictedResponse})
+  t.after(()=>Object.defineProperty(globalThis,'Response',{configurable:true,writable:true,value:NativeResponse}))
+  assert.equal((await createDingTalk(env).exchangeUserCode('synthetic-code')).ok,true)
+  const response=await createApp({store:createMemoryStore(),env}).request('/api/debug/dingtalk?credentialsOnly=1',{headers:{'x-admin-token':env.ADMIN_TOKEN}})
+  const data=await response.json()
+  assert.equal(data.oapi.ok,true);assert.equal(data.newApi.ok,true)
+  assert.equal(data.oapi.jsonParsed,true);assert.equal(data.newApi.jsonParsed,true)
+  assert.equal(bodyTypes.filter(type=>type==='arraybuffer').length,3)
+})
+
+test('credentials-only diagnostics distinguish malformed JSON from upstream rejection without returning headers or body',async(t)=>{
+  const app=createApp({store:createMemoryStore(),env})
+  let fixture
+  t.mock.method(globalThis,'fetch',async()=>new Response(fixture.body,{status:fixture.status,headers:{'content-type':fixture.type,'content-encoding':fixture.encoding}}))
+  for(fixture of [
+    {body:'private-upstream-page',status:200,type:'text/html; private=header',encoding:'gzip',contentType:'html',contentEncoding:'gzip',jsonParsed:false,err:'invalid_response'},
+    {body:'{}',status:200,type:'application/problem+json',encoding:'identity',contentType:'json',contentEncoding:'identity',jsonParsed:true,err:'invalid_response'},
+    {body:'{"errcode":40096,"code":"invalid_client","message":"private-provider-message"}',status:400,type:'application/json',encoding:'private-header-value',contentType:'json',contentEncoding:'other',jsonParsed:true,err:'upstream_rejected'},
+  ]){
+    const response=await app.request('/api/debug/dingtalk?credentialsOnly=1',{headers:{'x-admin-token':env.ADMIN_TOKEN}})
+    const data=await response.json()
+    for(const result of [data.oapi,data.newApi]){
+      assert.equal(result.ok,false);assert.equal(result.err,fixture.err)
+      assert.equal(result.jsonParsed,fixture.jsonParsed)
+      assert.equal(result.contentType,fixture.contentType)
+      assert.equal(result.contentEncoding,fixture.contentEncoding)
+      assert.equal(result.bodyBytes,new TextEncoder().encode(fixture.body).byteLength)
+      assert.equal(result.bodyChunkType,'uint8array')
+    }
+    assert.doesNotMatch(JSON.stringify(data),/private-|invalid_client|40096/)
+    assert.equal(data.robot.skipped,true)
+  }
+})
+
+test('documented ArrayBuffer, offset views, strings and mixed chunks preserve exact bytes and OAuth tokens',async(t)=>{
+  const body=JSON.stringify({accessToken:'synthetic-chunk-token',hint:'中文'})
+  const bytes=new TextEncoder().encode(body)
+  const backing=new Uint8Array(bytes.byteLength+8)
+  backing.fill(120);backing.set(bytes,4)
+  const cases=[
+    {type:'arraybuffer',chunks:[bytes.buffer]},
+    {type:'uint8array',chunks:[new Uint8Array(backing.buffer,4,bytes.byteLength)]},
+    {type:'view',chunks:[new DataView(backing.buffer,4,bytes.byteLength)]},
+    {type:'string',chunks:[body]},
+    {type:'mixed',chunks:[bytes.buffer.slice(0,10),new DataView(bytes.buffer,10,8),new Uint8Array(bytes.buffer,18,bytes.byteLength-18)]},
+  ]
+  let fixture
+  t.mock.method(globalThis,'fetch',async()=>new Response(new ReadableStream({start(controller){for(const chunk of fixture.chunks)controller.enqueue(chunk);controller.close()}}),{headers:{'content-type':'application/json'}}))
+  for(fixture of cases){
+    const response=await boundedDingTalkFetch('https://api.dingtalk.com/test')
+    const diagnostic=dingTalkResponseDiagnostics(response)
+    assert.equal(diagnostic.bodyBytes,bytes.byteLength)
+    assert.equal(Number.isInteger(diagnostic.bodyBytes),true)
+    assert.equal(diagnostic.bodyChunkType,fixture.type)
+    assert.deepEqual(await response.json(),JSON.parse(body),fixture.type)
+    assert.deepEqual(await createDingTalk(env).exchangeUserCode('synthetic-code'),{ok:true,accessToken:'synthetic-chunk-token',corpId:''},fixture.type)
+  }
+})
+
+test('unsupported and oversized string chunks fail safely, cancel the stream and clean timers',async(t)=>{
+  const clock=timers(t);let chunk,cancelled=0
+  t.mock.method(globalThis,'fetch',async()=>new Response(new ReadableStream({start(controller){controller.enqueue(chunk)},cancel(){cancelled++}})))
+  for(chunk of [{private:'must-not-appear'},'汉'.repeat(64*1024),'x'.repeat(64*1024+1)]){
+    await assert.rejects(()=>boundedDingTalkFetch('https://api.dingtalk.com/test'),error=>{
+      assert.match(error.message,/^DingTalk response (?:has an unsupported chunk type|too large)$/)
+      return true
+    })
+    assert.equal(clock.active.size,0)
+  }
+  assert.equal(cancelled,3);assert.equal(clock.created,clock.cleared)
 })

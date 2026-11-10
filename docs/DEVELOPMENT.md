@@ -81,4 +81,6 @@ GitHub 公共仓库还需要在 Settings → Actions → Policies 为 `.github/w
 
 钉钉 HTTP 请求共用 `boundedDingTalkFetch`，使用 `AbortController` 与可清理的 8 秒计时器，期限覆盖响应体读取，不依赖 `AbortSignal.timeout`。响应体最多 64KiB；授权接口不跟随重定向。回归须移除静态 timeout 方法，检查成功、取消及失败后没有遗留计时器。云端凭据诊断仅返回运行时能力布尔值。
 
+Edge 的流数据块可能为字符串、`ArrayBuffer` 或带偏移的视图，必须先归一再按 UTF-8 字节计数；共用 `stream-bytes.js`，超限或读取失败后取消并释放读取器。构造二进制 `Response` 使用精确范围的 `ArrayBuffer`，不要假设 Node 接受的 `Uint8Array` 在所有云端均可用。参考 [读取器](https://cloud.tencent.com/document/product/1552/81924) 与 [响应类型](https://cloud.tencent.com/document/product/1552/81917)。
+
 3D 自动画质从清晰档开始，不按浏览器名称或内存标签预降级。首屏及回前台后预热 8 秒，每 2 秒检查实际动态帧；连续 3 个窗口频繁掉帧才降一级，并提示 3 秒。静态限帧、后台及加载期间不计入；调整后冷却 30 秒，持续恢复后才尝试升档，手动画质保持用户选择。

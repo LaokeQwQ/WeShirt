@@ -1,4 +1,5 @@
 import { json,apiErr } from '../packages/core/util.js'
+import { readStreamBytes } from '../packages/core/stream-bytes.js'
 import { getSiteConfig } from './site.js'
 import { PERMISSION_RESOURCES,getUserPermissions,normalizePermissionOverrides } from '../packages/core/permissions.js'
 import { resolveMachineDorm } from '../packages/core/buildings.js'
@@ -92,10 +93,10 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     if(isWrite&&c.req.raw.body&&!binaryMediaUpload){
       if(Number(c.req.header('content-length'))>1024*1024)return apiErr('too_large','请求内容过长',413)
       try {
-        const reader=c.req.raw.clone().body.getReader(),chunks=[];let size=0
-        while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>1024*1024){reader.cancel().catch(()=>{});return apiErr('too_large','请求内容过长',413)}chunks.push(part.value)}
-        const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength}body=JSON.parse(new TextDecoder().decode(bytes))
-      }catch{}
+        const bytes=await readStreamBytes(c.req.raw.clone().body,1024*1024)
+        if(!bytes)return apiErr('too_large','请求内容过长',413)
+        body=JSON.parse(new TextDecoder().decode(bytes))
+      }catch{return apiErr('bad_param','请求须为有效 JSON 内容',400)}
     }
     let targetCodes=[]
     if(binaryMediaUpload)targetCodes.push(c.req.path==='/api/messages/media'?c.req.query('channel'):decodeURIComponent(c.req.path.split('/')[4]||''))
