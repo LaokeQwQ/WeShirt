@@ -38,11 +38,13 @@ test('FCM uses signed service-account OAuth and HTTPv1 data payload, and removes
 })
 test('U-Push checksums exact HTTPS request bytes and supports OEM conversion without secondary FCM delivery', async () => {
   for(const input of ['', 'abc', '中文消息', 'A'.repeat(1000)])assert.equal(umengMD5(input),createHash('md5').update(input).digest('hex'))
-  const env={UMENG_PUSH_APP_KEY:'a'.repeat(24),UMENG_PUSH_MASTER_SECRET:'b'.repeat(32),UMENG_PUSH_OEM_NOTIFICATIONS:'true'}
+  // Public fixture only. MD5 here independently checks the provider's mandated wire format.
+  const checksumFixture='b'.repeat(32)
+  const env={UMENG_PUSH_APP_KEY:'a'.repeat(24),UMENG_PUSH_MASTER_SECRET:checksumFixture,UMENG_PUSH_OEM_NOTIFICATIONS:'true'}
   let posted
   const transports=createMobilePushTransports(env,{fetcher:async(url,options)=>{
     const parsed=new URL(url);assert.equal(parsed.origin,'https://msgapi.umeng.com')
-    assert.equal(parsed.searchParams.get('sign'),createHash('md5').update('POST'+'https://msgapi.umeng.com/api/send'+options.body+env.UMENG_PUSH_MASTER_SECRET).digest('hex'))
+    assert.equal(parsed.searchParams.get('sign'),createHash('md5').update('POST'+'https://msgapi.umeng.com/api/send'+options.body+checksumFixture).digest('hex'))
     posted=JSON.parse(options.body)
     return new Response('{"ret":"SUCCESS","data":{"msg_id":"provider_id"}}',{status:200})
   }})
