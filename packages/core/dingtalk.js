@@ -1,4 +1,43 @@
-async function boundedFetch(url,options={}) { return fetch(url,{...options,signal:options.signal||AbortSignal.timeout(8000)}) }
+// Edge runtimes need not implement AbortSignal.timeout. Keep one cancellable
+// deadline through response-body consumption and release it on every outcome.
+export async function boundedDingTalkFetch(url, options = {}) {
+  const controller = new AbortController()
+  const external = options.signal
+  const cancel = () => controller.abort()
+  let timedOut = false
+  if (external?.aborted) cancel()
+  else external?.addEventListener('abort', cancel, { once: true })
+  const timer = setTimeout(() => { timedOut = true; controller.abort() }, 8000)
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal })
+    const reader = response.body?.getReader(), chunks = []
+    let size = 0
+    if (reader) while (true) {
+      const part = await reader.read()
+      if (part.done) break
+      size += part.value.byteLength
+      if (size > 64 * 1024) {
+        controller.abort()
+        reader.cancel().catch(() => {})
+        throw new Error('DingTalk response too large')
+      }
+      chunks.push(part.value)
+    }
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+    const headers = new Headers(response.headers)
+    headers.delete('content-length'); headers.delete('content-encoding')
+    return new Response(reader ? bytes : null, { status: response.status, statusText: response.statusText, headers })
+  } catch (error) {
+    if (timedOut) { const timeout = new Error('DingTalk request timed out'); timeout.name = 'TimeoutError'; throw timeout }
+    throw error
+  } finally {
+    clearTimeout(timer)
+    external?.removeEventListener('abort', cancel)
+  }
+}
+const boundedFetch = boundedDingTalkFetch
 // WeShirt · 钉钉通道（Agent DingTalk）
 // ESM / 纯 JS / 零依赖，仅用全局 fetch、crypto、atob/btoa。
 // 严格实现契约 docs/CONTRACTS.md §2.6。
@@ -622,7 +661,7 @@ export function createDingTalk(env = {}) {
     try {
       const r = await boundedFetch('https://api.dingtalk.com/v1.0/oauth2/userAccessToken', {
         method: 'POST',
-        redirect: 'error',
+        redirect: 'manual',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           clientId: env.DINGTALK_APP_KEY,

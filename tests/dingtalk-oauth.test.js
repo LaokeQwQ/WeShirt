@@ -29,7 +29,7 @@ function mockSuccess(t){
     if(url.pathname==='/v1.0/oauth2/userAccessToken'){
       exchanges++
       assert.equal(options.method,'POST')
-      assert.equal(options.redirect,'error')
+      assert.equal(options.redirect,'manual')
       assert.ok(options.signal)
       assert.deepEqual(JSON.parse(options.body),{clientId:env.DINGTALK_APP_KEY,clientSecret:env.DINGTALK_APP_SECRET,code:'synthetic-code',grantType:'authorization_code'})
       return Response.json({accessToken:'synthetic-user-token'})
@@ -49,7 +49,7 @@ test('OAuth exchange follows documented JSON fields, normalizes config, and neve
   t.mock.method(globalThis,'fetch',async(url,options)=>{
     calls++
     assert.equal(url,'https://api.dingtalk.com/v1.0/oauth2/userAccessToken')
-    assert.equal(options.redirect,'error')
+    assert.equal(options.redirect,'manual')
     assert.equal(options.headers['content-type'],'application/json')
     assert.deepEqual(JSON.parse(options.body),{clientId:'client',clientSecret:'secret',code:'temporary-code',grantType:'authorization_code'})
     return Response.json({accessToken:'synthetic-user-token',corpId:'synthetic-corp'})
@@ -194,7 +194,7 @@ test('credentialsOnly diagnosis calls just two token endpoints, never robot send
   const app=createApp({store:createMemoryStore(),env:{...env,DINGTALK_ROBOT_CODE:'synthetic-robot'}}),paths=[]
   t.mock.method(globalThis,'fetch',async(input,options)=>{
     const path=new URL(String(input)).pathname;paths.push(path)
-    assert.ok(options.signal);assert.equal(options.redirect,'error')
+    assert.ok(options.signal);assert.equal(options.redirect,'manual')
     if(path==='/gettoken')return Response.json({errcode:0,access_token:'private-legacy-token',errmsg:'private-message'})
     if(path==='/v1.0/oauth2/accessToken')return Response.json({accessToken:'private-app-token',message:'private-message'})
     assert.fail('must not call a message endpoint')

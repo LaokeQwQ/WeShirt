@@ -1213,15 +1213,17 @@ export function createApp({ store, env }) {
     }
     const out = { present, oapi: null, newApi: null, robot: null }
     const credentialsOnly=c.req.query('credentialsOnly')==='1'
+    const runtime={abortController:typeof globalThis.AbortController==='function',abortSignalTimeout:typeof globalThis.AbortSignal?.timeout==='function'}
+    const {boundedDingTalkFetch}=await import('../packages/core/dingtalk.js')
 
     // 1) 旧版 gettoken —— 必须 GET（POST 会报 43001）
     if (present.appKey && present.appSecret) {
       try {
-        const r = await fetch(
+        const r = await boundedDingTalkFetch(
           `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(
             appKey
           )}&appsecret=${encodeURIComponent(appSecret)}`,
-          { method: 'GET',redirect:'error',signal:AbortSignal.timeout(8000) }
+          { method: 'GET',redirect:'manual' }
         )
         const j = await r.json().catch(() => ({}))
         out.oapi = { status: r.status, ok: r.ok && j.errcode === 0, errcode: j.errcode, errmsg: j.errmsg || '' }
@@ -1231,9 +1233,9 @@ export function createApp({ store, env }) {
       // 2) 新版 oauth2/accessToken（api.dingtalk.com 系接口用）
       let newToken = ''
       try {
-        const r = await fetch('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
+        const r = await boundedDingTalkFetch('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
           method: 'POST',
-          redirect:'error',signal:AbortSignal.timeout(8000),
+          redirect:'manual',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             appKey,
@@ -1256,7 +1258,7 @@ export function createApp({ store, env }) {
       // messaging endpoint or echo the provider's text, credentials or tokens.
       if(credentialsOnly){
         const summary=(result)=>({ok:result?.ok===true,status:Number.isInteger(result?.status)?result.status:0,...(!result?.ok?{err:result?.err||'credentials_rejected'}:{})})
-        return json({present,oapi:summary(out.oapi),newApi:summary(out.newApi),robot:{skipped:true},eventId:c.get('eventId')},200,{'Cache-Control':'no-store'})
+        return json({present,runtime,oapi:summary(out.oapi),newApi:summary(out.newApi),robot:{skipped:true},eventId:c.get('eventId')},200,{'Cache-Control':'no-store'})
       }
 
       // 3) 机器人探测：故意用一个不存在的 userId。
@@ -1299,7 +1301,7 @@ export function createApp({ store, env }) {
       }
     }
 
-    if(credentialsOnly)return json({present,oapi:{ok:false,status:0,err:'not_configured'},newApi:{ok:false,status:0,err:'not_configured'},robot:{skipped:true},eventId:c.get('eventId')},200,{'Cache-Control':'no-store'})
+    if(credentialsOnly)return json({present,runtime,oapi:{ok:false,status:0,err:'not_configured'},newApi:{ok:false,status:0,err:'not_configured'},robot:{skipped:true},eventId:c.get('eventId')},200,{'Cache-Control':'no-store'})
     out.hint =
       out.oapi && out.oapi.ok
         ? out.robot
