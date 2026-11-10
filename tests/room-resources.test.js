@@ -62,3 +62,24 @@ test('移除排队道具时保留其他机位仍在用的共享衣物材质', ()
   assert.equal(localDisposals, 1)
   shared.dispose()
 })
+
+test('固定机器零件按完整材质合批，保留独立状态灯与可动门',()=>{
+  const scene=new THREE.Scene(),dynamic=new THREE.Group();scene.add(dynamic)
+  const state=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshStandardMaterial({color:0x123456}));dynamic.add(state)
+  const door=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshStandardMaterial({color:0x123456}));dynamic.add(door)
+  for(let i=0;i<6;i++){const part=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshStandardMaterial({color:0x123456,roughness:.5}));part.position.x=i*2;scene.add(part)}
+  const different=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshStandardMaterial({color:0x123456,roughness:.9}));scene.add(different)
+  assert.equal(mergeStaticEnvironment(scene,[dynamic],{shareMaterials:true}),5)
+  assert.equal(state.parent,dynamic);assert.equal(door.parent,dynamic)
+  assert.equal(different.parent,scene,'different roughness must not be combined')
+  state.material.color.set(0xff0000)
+  assert.notEqual(scene.children.find(x=>x.name==='static-environment-batch').material.color.getHex(),0xff0000)
+  disposeObjectResources(scene)
+})
+
+test('删除排队桶不能释放所有机位仍共享的衣物几何',()=>{
+  const geometry=new THREE.PlaneGeometry(),material=new THREE.MeshStandardMaterial(),bucket=new THREE.Group()
+  bucket.add(new THREE.Mesh(geometry,material));let disposed=0;geometry.addEventListener('dispose',()=>disposed++)
+  disposeObjectResources(bucket,[],[],[material],[geometry]);assert.equal(disposed,0)
+  disposeObjectResources(bucket);assert.equal(disposed,1)
+})

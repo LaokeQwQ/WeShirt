@@ -10,3 +10,9 @@ export function createSingleFlight(fn) {
     return running
   }
 }
+
+export function canAutoDingLogin({ userAgent = '', ready = false, loggedIn = false, hasError = false, session, local } = {}) {
+  if (!ready || loggedIn || hasError || !/DingTalk/i.test(userAgent)) return false
+  try { return !session.getItem('ws_ding_auto_attempt') && !session.getItem('ws_ding_guest') && !local.getItem('ws_ding_auto_disabled') }
+  catch { return false }
+}

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { ref, computed, watch, nextTick, reactive } from 'vue'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
+import { createMessageHold } from '../frontend/src/messageHold.js'
 
 const sources = Object.fromEntries(await Promise.all([
   ['admin', '../frontend/src/components/AdminOperations.vue'],
@@ -18,7 +19,7 @@ const base = { ref, computed, watch, onMounted() {}, onUnmounted() {}, showToast
 // Transport has its own tests. Keep this view harness free of sockets, timers
 // and background refreshes so request ordering remains under each test's control.
 const messageBase = {
-  ...base, nextTick,
+  ...base, nextTick, createMessageHold,
   document: { visibilityState: 'visible', querySelector: () => null, getElementById: () => null },
   createChannelTransport: ({ onState }) => ({
     start() { onState('polling') }, stop() { onState('stopped') }, visibilityChanged() {},

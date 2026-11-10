@@ -42,15 +42,13 @@
       </div>
     </div>
 
-    <!-- 机器悬浮面板：点中某台机器后跟随其上方悬浮（90% 不透明） -->
+    <!-- 详情稳定停靠，拖动画面时操作位置保持不变；手机使用底部卡片。 -->
     <transition name="sheet">
       <div
         v-if="selected || facility"
-        ref="panelRef"
         class="machine-panel"
         role="region"
         aria-label="机位详情"
-        :style="isWide ? { left: panelPos.x + 'px', top: panelPos.y + 'px' } : {}"
       >
         <template v-if="facility === 'boiler'">
           <div class="mp-head">
@@ -79,11 +77,10 @@
           </ul>
         </template>
         <template v-else>
-        <div class="mp-head">
-          <button class="mp-nav" aria-label="上一台机器" @click="switchMachine(-1)">‹</button>
+        <div class="mp-head mp-machine-head">
           <div class="mp-no" :style="{ borderColor: cssColor(selected.state) }">{{ selected.no }}</div>
           <div class="mp-meta">
-            <div class="mp-name">{{ selected.rawName || selected.name }}</div>
+            <div class="mp-name" :title="selected.rawName || selected.name">{{ selected.rawName || selected.name }}</div>
             <div class="mp-state" :style="{ color: cssColor(selected.state) }">
               {{ selected.availabilityLabel || stateText(selected.state) }}
               <template v-if="selected.state === 'occupied' && selected.leftMin != null">
@@ -95,15 +92,13 @@
             <div v-if="selected.state === 'unknown'" class="mp-dev">
               没对上设备（后台给这个机位绑的机器不在看板里）
             </div>
-            <div v-else-if="selected.machineId" class="mp-dev">
-              设备 {{ selected.machineId
-              }}<template v-if="selected.rawState !== undefined && selected.rawState !== null">
-                · 上游状态码 {{ selected.rawState }}</template
-              >
-            </div>
           </div>
-          <button class="mp-nav" aria-label="下一台机器" @click="switchMachine(1)">›</button>
           <button class="mp-close" aria-label="关闭机位详情" @click="clearSelection"><van-icon name="cross" /></button>
+          <div class="mp-machine-nav">
+            <button class="mp-nav" aria-label="上一台机器" @click="switchMachine(-1)">‹ <span>上一台</span></button>
+            <span>机位 {{ selected.no }} · {{ selected.kind === 'dryer' ? '烘干机' : '洗衣机' }}</span>
+            <button class="mp-nav" aria-label="下一台机器" @click="switchMachine(1)"><span>下一台</span> ›</button>
+          </div>
         </div>
 
         <!-- 占用者：头像 + 昵称（打码）+ 几分钟前登记 -->
@@ -336,6 +331,8 @@ import { useUserStore } from '../stores/user'
 import { track } from '../telemetry'
 import { normalizeQualityPreference, chooseInitialQuality, renderInterval, labelSignature, createPointerGesture } from '../room/strategy'
 import { mergeStaticEnvironment, disposeObjectResources } from '../room/resources'
+import { createGarmentAssets, makeGarmentPile } from '../room/garments'
+import { roomDampingFactor } from '../room/motion'
 import { createCompatibleRenderer, signalRoomFailure } from '../room/compatibility'
 import { ROOM_QUALITY, roomPixelRatio, createAdaptiveRoomQuality } from '../room/quality'
 import { WASHER_PROGRAMS, machineRemainingMinutes, machineActionName, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } from '../taskRegistration'
@@ -347,7 +344,6 @@ const dorm = useDormStore()
 const router = useRouter()
 const route = useRoute()
 const stageRef = ref(null)
-const panelRef = ref(null)
 const loading = ref(true)
 const error = ref('')
 const staleMin = ref(null) // 看板数据过期多少分钟（≥3 才提示）
@@ -595,7 +591,6 @@ const useDisinfectant = ref(false)
 const selfCleaned = ref(false)
 const msgText = ref('')
 const allMessages = ref([]) // 全楼留言（含 machineId 标记）
-const panelPos = ref({ x: 0, y: 0 }) // 悬浮面板的屏幕坐标（每帧投影更新）
 const queueList = ref([]) // 排队列表（每条 { machineId, nick, at, mine }）
 const queueSubmitting = ref(false)
 const occupancyMap = ref({}) // machineId → { nick(打码), avatar, startMin }
@@ -656,12 +651,6 @@ async function recoverFault() {
   }
 }
 
-// 宽屏（平板/桌面）面板跟随机器悬浮；窄屏（手机）固定在底部成卡片
-const widthQuery = window.matchMedia('(min-width: 720px)')
-const isWide = ref(widthQuery.matches)
-const onWidthChange = (event) => { isWide.value = event.matches }
-widthQuery.addEventListener('change', onWidthChange)
-
 // 场景编号 → 空间坐标（x 正为右，z 正为近）
 // 机器直放、略微靠墙（墙面 x=±2.05，机身背面距墙约 0.32m，背后留投放装置/水管空间）
 // 现场布局：右手边从近到远 = D1、1、2、3、4；左手边 = 开水机、D2、7、6、5
@@ -719,7 +708,8 @@ const pointerGesture = createPointerGesture()
 const pointerNdc = new THREE.Vector2()
 const pointerRay = new THREE.Raycaster()
 const pointerHits = []
-const panelAnchor = new THREE.Vector3()
+let garmentAssets = null
+let drumMetalTexture = null
 let environmentTarget = null
 let resizeObserver = null
 let interacting = false
@@ -810,24 +800,6 @@ function makeFaucet({ axis = 'x', sign = 1, clickable = false } = {}) {
   addBox(0.006, 0.034, 0.006, 0.046, 0.038, 0, dark)
   addBox(0.006, 0.006, 0.034, 0.046, 0.038, 0, dark)
   return g
-}
-
-function makeClothPiece(radius, material) {
-  const fold = 0.35 + Math.random() * 0.45
-  const geo = new THREE.PlaneGeometry(radius * 2.4, radius * 1.55, 7, 5)
-  const pos = geo.attributes.position
-  const v = new THREE.Vector3()
-  const p1 = Math.random() * 6.28
-  for (let i = 0; i < pos.count; i++) {
-    v.fromBufferAttribute(pos, i)
-    const wave = Math.sin((v.x / radius) * 2.2 + p1) * Math.cos((v.y / radius) * 1.6) * radius * 0.22
-    const crease = Math.abs(v.y) < radius * 0.12 ? -radius * fold : 0
-    pos.setXYZ(i, v.x, v.y + crease * 0.15, wave + crease)
-  }
-  geo.computeVertexNormals()
-  const mesh = new THREE.Mesh(geo, material)
-  mesh.rotation.set(Math.random() * 0.8, Math.random() * 6.28, (Math.random() - 0.5) * 0.6)
-  return mesh
 }
 
 // 桶内水面（半透明水盘，顶点做轻微波浪；水位只盖下半部）
@@ -1020,7 +992,7 @@ function buildDrumInterior(group, facing, doorR, isDryer) {
   drum.add(lip)
 
   // 后壁和筒壁都贴穿孔不锈钢，三条提衣筋沿筒深方向凸起
-  const perf = perforatedMetalTexture()
+  const perf = drumMetalTexture ||= perforatedMetalTexture()
   base.material.map = perf
   base.material.color.set(0xffffff)
   const shell = new THREE.Mesh(
@@ -1045,15 +1017,11 @@ function buildDrumInterior(group, facing, doorR, isDryer) {
     drum.add(lifter)
   }
 
-  // 衣物堆在筒底、泡在水位线下，不绕着筒壁转
+  // 低几何的衣服/裤子保持正面可辨识，整堆衣物只需一次绘制。
+  garmentAssets ||= createGarmentAssets()
   const clothGroup = new THREE.Group()
-  const n = 7
-  for (let i = 0; i < n; i++) {
-    const c = makeClothPiece(0.062 + (i % 3) * 0.01, DRUM_MATS.cloth[i % DRUM_MATS.cloth.length])
-    c.position.set(facing * 0.012, -doorR * 0.46 + (i % 4) * 0.016, -doorR * 0.22 + (i % 5) * doorR * 0.1)
-    clothGroup.add(c)
-  }
-  clothGroup.position.x = facing * 0.005 // 最深处 0.305、最浅处约 0.34，低于内凸玻璃面
+  clothGroup.add(makeGarmentPile(garmentAssets, doorR * .74, facing))
+  clothGroup.position.set(facing * .035, -doorR * .06, 0)
   clothGroup.visible = false
   drum.add(clothGroup)
 
@@ -1332,6 +1300,7 @@ function buildMachine(slot) {
     doorTarget: 0, // 当前动画目标角度（默认关门）
     xMark: drum.xMark,
     stripMat,
+    strip, queueGroup,
     data: null
   }
   machines.push(m)
@@ -2610,11 +2579,13 @@ function initThree() {
   controls = new OrbitControls(camera, renderer.domElement)
   controls.target.set(...cam0.target)
   controls.enableDamping = !reducedMotion
-  controls.dampingFactor = 0.08
+  controls.dampingFactor = roomDampingFactor(1 / 60)
+  controls.rotateSpeed = 1.15
   controls.enablePan = false
   applyCameraLimits()
   controls.addEventListener('start', onControlsStart)
   controls.addEventListener('end', onControlsEnd)
+  controls.addEventListener('change', onControlsChange)
   // 允许转到背后回看门口（门框 / 电闸）
   controls.minAzimuthAngle = -Math.PI
   controls.maxAzimuthAngle = Math.PI
@@ -2679,7 +2650,9 @@ function initThree() {
   buildBreakerBox()
   buildCorridorProps()
   for (const slot of SLOTS) buildMachine(slot)
-  mergeStaticEnvironment(scene, [...clickTargets, ...windowSashes.map((sash) => sash.group), ...machines.map((machine) => machine.group), faucetStream?.stream, faucetStream?.splash])
+  mergeStaticEnvironment(scene, [...clickTargets, ...windowSashes.map((sash) => sash.group),
+    ...machines.flatMap((m) => [m.doorPivot, m.clothGroup, m.waterGroup, m.xMark, m.drumBase, m.strip, m.queueGroup]),
+    faucetStream?.stream, faucetStream?.splash], { shareMaterials: true })
 
   // 灯管下方的点光源，制造顶灯光斑（暖白）
   for (const x of [-0.85, 0.85]) {
@@ -2765,8 +2738,9 @@ function onMotionChange(event) {
 }
 motionQuery.addEventListener('change', onMotionChange)
 
-function onControlsStart() { interacting = true; cameraGoal = null; lastInteractionAt = performance.now() }
+function onControlsStart() { interacting = true; cameraGoal = null; lastInteractionAt = performance.now(); if (controls) controls.dampingFactor = roomDampingFactor(1 / 60, true) }
 function onControlsEnd() { interacting = false; lastInteractionAt = performance.now() }
+function onControlsChange() { lastInteractionAt = performance.now() }
 
 function onContextLost(event) {
   event.preventDefault()
@@ -2848,7 +2822,7 @@ function animate(ts) {
   const animated = faucetOn || machines.some((machine) => machine.clothGroup?.visible ||
     (machine.doorPivot && Math.abs(machine.doorPivot.rotation.y - machine.doorTarget) > 0.002)) ||
     windowSashes.some((sash) => Math.abs(sash.group.rotation.y - sash.targetRot) > 0.004)
-  const interval = Math.max(busy ? busyMinMs : 0, renderInterval({ busy, animated, reducedMotion, quality: qualityTier }))
+  const interval = Math.max(busy && !interacting && !pointerGesture.active ? busyMinMs : 0, renderInterval({ busy, animated, reducedMotion, quality: qualityTier }))
 
   if (ts !== undefined) {
     if (lastRafTs) rafAccMs += Math.max(0, ts - lastRafTs)
@@ -2870,29 +2844,6 @@ function animate(ts) {
     camera.position.lerp(cameraGoal.pos, k)
     controls.target.lerp(cameraGoal.target, k)
     if (camera.position.distanceTo(cameraGoal.pos) < 0.02) cameraGoal = null
-  }
-
-  // 悬浮面板跟随：锚在机器朝走道一侧，夹在画面边缘，避免盖住舱门
-  if (isWide.value && (selected.value || facility.value) && camera) {
-    const m = selected.value ? machines.find((x) => x.no === selected.value.no) : null
-    const el = stageRef.value
-    if (el && (m || facility.value)) {
-      const anchor = m
-        ? panelAnchor.set(
-            m.group.position.x + m.slotFacing * 0.85,
-            m.kind === 'dryer' ? 1.35 : 1.15,
-            m.group.position.z
-          )
-        : panelAnchor.set(-1.35, 1.2, 4.02)
-      anchor.project(camera)
-      const w = el.clientWidth
-      const h = el.clientHeight
-      const half = Math.min(w * 0.42, 160)
-      const x = Math.min(Math.max(((anchor.x + 1) / 2) * w, half + 8), w - half - 8)
-      const halfHeight = Math.min((panelRef.value?.offsetHeight || 320) / 2, h / 2 - 10)
-      const y = el.offsetTop + Math.min(Math.max(((-anchor.y + 1) / 2) * h, halfHeight + 10), h - halfHeight - 10)
-      if (Math.abs(panelPos.value.x - x) > 1 || Math.abs(panelPos.value.y - y) > 1) panelPos.value = { x, y }
-    }
   }
 
   // 状态环轻微呼吸，空闲机更明显（提醒"这台能用"）
@@ -2924,10 +2875,7 @@ function animate(ts) {
     if (!reducedMotion && m.clothGroup?.visible) {
       const seed = typeof m.no === 'number' ? m.no : m.no === 'D1' ? 2.3 : 3.1
       m.clothGroup.rotation.x += dt * (0.85 + (seed % 3) * 0.18)
-      // 每件衣物再带一点自转，像被筒壁带起又翻落
-      for (let i = 0; i < m.clothGroup.children.length; i++) {
-        m.clothGroup.children[i].rotation.y += dt * (0.4 + i * 0.13)
-      }
+      // 保留衣服轮廓，不让每件衣物独立翻到侧面。
     }
     // 桶内水面波动
     if (!reducedMotion && qualityTier !== 'low' && m.waterGroup?.visible && m.water) {
@@ -2942,6 +2890,7 @@ function animate(ts) {
       })
     }
   }
+  if (controls) controls.dampingFactor = roomDampingFactor(dt, interacting)
   controls?.update()
   // 量一帧到底画了多久：自适应画质靠这个判断，不靠帧率（我们自己限了帧）
   let renderCost = 0
@@ -3164,7 +3113,7 @@ function updateQueueVisuals() {
     m.queueCount = count
     while (m.queueGroup.children.length) {
       const oldBucket = m.queueGroup.children[0]
-      disposeObjectResources(oldBucket, [], [], DRUM_MATS.cloth)
+      disposeObjectResources(oldBucket, [], [], DRUM_MATS.cloth, garmentAssets?.geometries)
       m.queueGroup.remove(oldBucket)
     }
     const show = Math.min(count, 3) // 最多画 3 个桶
@@ -3188,7 +3137,10 @@ function updateQueueVisuals() {
       rim.rotation.x = Math.PI / 2
       rim.position.y = 0.11
       bucket.add(rim)
-      const cloth = makeClothPiece(0.05, DRUM_MATS.cloth[i % DRUM_MATS.cloth.length])
+      garmentAssets ||= createGarmentAssets()
+      const cloth = new THREE.Mesh(i % 2 ? garmentAssets.trousers : garmentAssets.shirt, DRUM_MATS.cloth[i % DRUM_MATS.cloth.length])
+      cloth.scale.setScalar(.09)
+      cloth.rotation.set(-.45, 0, i % 2 ? -.2 : .2)
       cloth.position.y = 0.12
       bucket.add(cloth)
       // 排在机器舱门前的走道一侧，逐个往 z 方向排开
@@ -3490,6 +3442,7 @@ function releaseThree() {
   timer?.dispose()
   controls?.removeEventListener('start', onControlsStart)
   controls?.removeEventListener('end', onControlsEnd)
+  controls?.removeEventListener('change', onControlsChange)
   controls?.dispose()
   if (renderer) {
     for (const [name, handler] of [
@@ -3501,7 +3454,9 @@ function releaseThree() {
   if (scene) scene.environment = null
   environmentTarget?.dispose()
   environmentTarget = null
-  disposeObjectResources(scene, Object.values(GEO), [DRUM_MATS.base, DRUM_MATS.lip, DRUM_MATS.x, ...DRUM_MATS.cloth])
+  disposeObjectResources(scene, [...Object.values(GEO), ...(garmentAssets?.geometries || [])], [DRUM_MATS.base, DRUM_MATS.lip, DRUM_MATS.x, ...DRUM_MATS.cloth, garmentAssets?.material])
+  garmentAssets = null
+  drumMetalTexture = null
   renderer?.renderLists.dispose()
   renderer?.dispose()
   renderer?.domElement.remove()
@@ -3523,7 +3478,6 @@ onUnmounted(() => {
   clearInterval(countdownTimer)
   stopPoll()
   releaseThree()
-  widthQuery.removeEventListener('change', onWidthChange)
   motionQuery.removeEventListener('change', onMotionChange)
   perfEl?.remove()
 })
@@ -3690,7 +3644,7 @@ onUnmounted(() => {
   backdrop-filter: blur(6px);
 }
 
-/* 机器面板：窄屏（手机）= 底部固定卡片；宽屏 = 跟随机器悬浮 */
+/* 操作面板保持稳定，避免每帧投影造成重排和移动靶。 */
 .machine-panel {
   position: absolute;
   z-index: 6;
@@ -3700,6 +3654,10 @@ onUnmounted(() => {
   border-radius: 14px;
   padding: 10px 12px 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-sizing: border-box;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
 }
 
 /* 窄屏：底部卡片，好按、不挡场景 */
@@ -3726,13 +3684,16 @@ onUnmounted(() => {
 .mp-nav, button.mp-close { min-width: 36px; min-height: 36px; border: 1px solid #34506a; background: #142a40; color: #b5defc; border-radius: 8px; cursor: pointer; }
 @media (prefers-reduced-motion: reduce) { .sheet-enter-active, .sheet-leave-active { transition: none; } }
 
-/* 宽屏：跟随机器上方悬浮 */
+/* 宽屏：停靠右侧，不追随相机移动。 */
 @media (min-width: 720px) {
+  .stage.has-panel { margin-right: min(calc(40vw + 32px), 392px); }
   .machine-panel {
-    width: min(84vw, 320px);
-    max-height: calc(100% - 76px);
+    top: 102px;
+    right: 16px;
+    width: min(40vw, 360px);
+    max-height: calc(100% - 118px);
     overflow-y: auto;
-    transform: translate(-50%, -50%);
+    overscroll-behavior: contain;
   }
 }
 
@@ -3770,6 +3731,7 @@ onUnmounted(() => {
 }
 
 .mp-no {
+  flex: none;
   width: 38px;
   height: 38px;
   border-radius: 10px;
@@ -3788,14 +3750,29 @@ onUnmounted(() => {
 }
 
 .mp-name {
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
   color: #e8f0fb;
   margin-bottom: 2px;
 }
 
 .mp-state {
   font-size: 12px;
+  line-height: 1.6;
 }
+
+.mp-machine-head { display:grid; grid-template-columns:38px minmax(0,1fr) 36px; align-items:start; gap:10px; }
+.mp-machine-head > .mp-close { padding:0; }
+.mp-machine-nav { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:8px; border-top:1px solid #26394d; color:#8fa4bb; font-size:11px; }
+.mp-machine-nav .mp-nav { display:flex; align-items:center; gap:5px; padding:5px 9px; flex:none; }
+.mp-machine-nav .mp-nav span { font-size:12px; }
+.mp-machine-nav > span { min-width:0; text-align:center; }
 
 .mp-dev {
   margin-top: 2px;
@@ -3857,7 +3834,7 @@ onUnmounted(() => {
   color: #b6c2d2;
   cursor: pointer;
   text-align: center;
-  white-space: nowrap;
+  white-space: normal;
 }
 .mp-dur:disabled,.mp-modes button:disabled{opacity:.55;cursor:default}
 
@@ -3889,6 +3866,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   margin-top: 8px;
+  flex-wrap: wrap;
 }
 
 .mp-queue-n {
@@ -3939,7 +3917,7 @@ onUnmounted(() => {
 }
 
 .mp-dry { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
-.mp-dry-row { display: flex; align-items: center; gap: 8px; justify-content: center; }
+.mp-dry-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .mp-dry-label { font-size: 13px; color: #cdd8e5; }
 .mp-dry-input {
   width: 84px; height: 34px; text-align: center;
@@ -3975,7 +3953,7 @@ onUnmounted(() => {
   gap: 8px;
 }
 .mp-proof-title { font-size: 13px; color: #ffc9c9; font-weight: 600; }
-.mp-proof-line { font-size: 12px; color: #e6eef7; display: flex; align-items: center; gap: 6px; }
+.mp-proof-line { font-size: 12px; color: #e6eef7; display: block; line-height: 1.7; }
 .mp-proof-line b { color: #ffd48a; }
 .mp-proof-photos { display: flex; gap: 8px; }
 .mp-proof-btn {
@@ -4002,6 +3980,7 @@ onUnmounted(() => {
 .mp-msg-post .mp-note {
   margin-bottom: 0;
   flex: 1;
+  min-width: 0;
 }
 
 .mp-send {

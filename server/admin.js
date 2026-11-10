@@ -13,6 +13,7 @@ import { normalizeAvatar, normalizeAvatarUrl } from '../packages/core/profile.js
 import { verifyAdminSession, issueAdminSession, verifyToken } from '../packages/core/auth.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { withOperationLock } from '../packages/core/operations.js'
+import { resolveBroadcastTargets } from '../packages/core/group-broadcast.js'
 import { DORM_BUILDINGS, normalizeDormBuilding, normalizeKnownDormBuilding, dormBuildingName, resolveMachineDorm } from '../packages/core/buildings.js'
 import { computeLeftMin } from '../packages/core/machines.js'
 import { resolveMachineKind } from '../packages/core/machine-kind.js'
@@ -1086,6 +1087,8 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       const dt = dingMod.createDingTalk(env)
 
       const conv = await store.get('ding:groupConv', null).catch(() => null)
+      const targets = await resolveBroadcastTargets(store, env)
+      const operationsConfig = await store.get('operations:config', null)
       const cbStats = (await store.get('ding:cbStats', null).catch(() => null)) || {}
       const adminId = env.ADMIN_DING_USERID || env.DINGTALK_ADMIN_USERID || ''
       const boundUsers = []
@@ -1110,7 +1113,8 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
           dm: { ready: Boolean(env.DINGTALK_ROBOT_CODE && boundUsers.length), boundUsers: boundUsers.length },
           // 群消息：webhook 优先，其次是回调里记录的 conversationId
           group: {
-            automatic: false,
+            automatic: operationsConfig?.broadcast?.enabled !== false && targets.length > 0,
+            buildings: targets.map(t => ({ code: t.dormBuilding, name: t.name })),
             ready: Boolean(env.DINGTALK_WEBHOOK || (conv && conv.conversationId)),
             via: env.DINGTALK_WEBHOOK ? 'webhook' : conv && conv.conversationId ? 'conversation' : '',
             conversationId: conv && conv.conversationId ? String(conv.conversationId).slice(0, 12) + '…' : null,
@@ -1129,7 +1133,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         lastCallback: await store.get('ding:lastCallback', null).catch(() => null),
         // 最近一次群播报的原文：用户质疑「为什么发了这些」时直接对账
         lastDigest: await store.get('ding:lastDigest', null).catch(() => null),
-        hint: '自动群播报已关闭；群通道仅用于管理员主动测试或回复查询。',
+        hint: '整点群播报按楼栋配置，默认每天 8:00–22:00；状态较上次未变不发送。未绑定楼栋的群仅用于手动测试或回复查询。',
       })
     } catch (e) {
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)

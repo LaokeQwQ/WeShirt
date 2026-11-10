@@ -1,9 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { safeLoginTarget,createSingleFlight } from '../frontend/src/loginFlow.js'
+import { safeLoginTarget,createSingleFlight,canAutoDingLogin } from '../frontend/src/loginFlow.js'
 import { createApp } from '../server/app.js'
 import { createMemoryStore } from '../packages/core/store.js'
 import { issueTicket } from '../packages/core/auth.js'
+
+test('钉钉自动登录等待设备恢复，退出/访客/失败/尝试过均不再跳转',()=>{
+ const map=()=>{const m=new Map();return {getItem:k=>m.get(k),setItem:(k,v)=>m.set(k,v)}}
+ const args={userAgent:'DingTalk Android',ready:true,session:map(),local:map()}
+ assert.equal(canAutoDingLogin(args),true)
+ for(const patch of [{ready:false},{loggedIn:true},{hasError:true},{userAgent:'Mozilla Chrome'}])assert.equal(canAutoDingLogin({...args,...patch}),false)
+ for(const [storage,key]of [['session','ws_ding_auto_attempt'],['session','ws_ding_guest'],['local','ws_ding_auto_disabled']]){
+   const fixture={...args,session:map(),local:map()};fixture[storage].setItem(key,'1');assert.equal(canAutoDingLogin(fixture),false)
+ }
+ assert.equal(canAutoDingLogin({...args,session:{getItem(){throw Error('disabled')}}}),false)
+})
 test('登录回跳保留社交票据，拒绝跨站/登录循环',()=>{
  assert.equal(safeLoginTarget('/social?ticket=abc'),'/social?ticket=abc')
  for(const s of ['//evil.test','/\\evil.test','/login?k=a','https://evil.test','/\nother'])assert.equal(safeLoginTarget(s),'/')

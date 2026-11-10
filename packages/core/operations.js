@@ -1,6 +1,6 @@
 // 运营规则仅依赖标准 Web API。不同页面读取健康投影时不会增加确认次数。
 import { applyRegisteredAvailability } from './availability.js'
-import { currentDormCatalog, enabledMachineBoard } from './buildings.js'
+import { currentDormCatalog, enabledMachineBoard, filterDormFloors } from './buildings.js'
 const MINUTE = 60000
 // 容忍短暂抓取失败和调度抖动；超过窗口统一显示过期。
 const FRESH_MS = 7 * MINUTE
@@ -151,7 +151,7 @@ export function buildQueueSchedule(queue, machineList, now = Date.now()) {
   })
 }
 
-export async function runOperations({ store, board, env = {}, now = Date.now(), broadcast, notify }) {
+export async function runOperations({ store, board, env = {}, now = Date.now(), broadcast, broadcastTargets, notify }) {
   const bid = env.BUILDING_ID || board?.buildingId || 'b1'
   return withOperationLock(store, `run:${bid}`, async () => {
     const previous = await store.get(`operations:health:${bid}`, {})
@@ -179,40 +179,54 @@ export async function runOperations({ store, board, env = {}, now = Date.now(), 
     const hourKey = broadcastWindow(config, now)
     let broadcastResult = { sent: false, reason: hourKey ? 'not_sent' : 'outside_window' }
     if (hourKey && freshSnapshot(board, now) !== null) {
-      const key = `operations:broadcast:${bid}`
-      const last = (await store.get(key, {})) || {}
-      const catalog = await currentDormCatalog(store, env.SITE_BUILDINGS)
-      const hash = meaningfulBoardHash(enabledMachineBoard(projected, catalog), last.successHash)
-      if (last.checkedHour === hourKey && (last.success || last.unchanged)) broadcastResult.reason = 'already_checked'
-      else if (hash === '[]' || last.successHash === hash) {
-        await store.put(key, { ...last, checkedHour: hourKey, unchanged: true, success: false })
-        broadcastResult.reason = 'unchanged'
-      } else if (Number(last.retryAfter || 0) > now) broadcastResult.reason = 'retry_cooldown'
-      else if (typeof broadcast !== 'function') broadcastResult.reason = 'not_configured'
-      else {
-        const attempt = { ...last, checkedHour: hourKey, unchanged: false, success: false, retryAfter: now + MINUTE, attemptAt: now }
-        await store.put(key, attempt)
-        try {
-          // Site configuration can change while an earlier notification awaits
-          // I/O. Recheck just before handing the public summary to its sender.
-          const current = enabledMachineBoard(projected, await currentDormCatalog(store, env.SITE_BUILDINGS))
-          const currentHash = meaningfulBoardHash(current, last.successHash)
-          if (currentHash === '[]' || last.successHash === currentHash) {
-            await store.put(key, { ...attempt, unchanged: true, retryAfter: 0 })
-            broadcastResult.reason = 'unchanged'
-          } else {
-            const broadcastBoard = projectBoard({ ...current, floors: current.floors.map((floor) => ({ ...floor, machines: floor.machines.filter((m) => m.state !== 'unknown' && !m.health?.suspectedFault) })) }, (m) => m)
-            const sent = await broadcast({ board: broadcastBoard, hourKey, config })
-            if (!sent?.ok) throw new Error(sent?.error || sent?.err || '群播报发送失败')
-            await store.put(key, { ...attempt, success: true, successHash: currentHash, successAt: new Date(now).toISOString(), retryAfter: 0 })
-            broadcastResult = { sent: true, hourKey }
-          }
-        } catch (e) {
-          broadcastResult = { sent: false, reason: 'failed', error: String(e?.message || e).slice(0, 160) }
-          await store.put(key, { ...attempt, error: broadcastResult.error })
-          alerts.push(await recordAdminAlert(store, { key: 'broadcast:' + bid, kind: 'notification', severity: 'warn', title: '整点群播报未送达', message: broadcastResult.error }, { now, notify }))
+      const targets = typeof broadcastTargets === 'function' ? await broadcastTargets() : [{}]
+      const deliveries = []
+      for (const target of targets) {
+        const key = `operations:broadcast:${bid}${target.key ? ':' + target.key : ''}`
+        const last = (await store.get(key, {})) || {}
+        const catalog = await currentDormCatalog(store, env.SITE_BUILDINGS)
+        const scoped = (catalog) => {
+          const enabled = enabledMachineBoard(projected, catalog)
+          return target.dormBuilding ? projectBoard({ ...enabled, floors: filterDormFloors(enabled, target.dormBuilding, catalog) }, m => m) : enabled
         }
+        const hash = meaningfulBoardHash(scoped(catalog), last.successHash)
+        broadcastResult = { sent: false, reason: 'not_sent' }
+        if (last.checkedHour === hourKey && (last.success || last.unchanged)) broadcastResult.reason = 'already_checked'
+        else if (hash === '[]' || last.successHash === hash) {
+          await store.put(key, { ...last, checkedHour: hourKey, unchanged: true, success: false })
+          broadcastResult.reason = 'unchanged'
+        } else if (Number(last.retryAfter || 0) > now) broadcastResult.reason = 'retry_cooldown'
+        else if (typeof broadcast !== 'function') broadcastResult.reason = 'not_configured'
+        else {
+          const attempt = { ...last, checkedHour: hourKey, unchanged: false, success: false, retryAfter: now + MINUTE, attemptAt: now }
+          await store.put(key, attempt)
+          try {
+            // Site configuration can change while an earlier notification awaits
+            // I/O. Recheck just before handing the public summary to its sender.
+            const current = scoped(await currentDormCatalog(store, env.SITE_BUILDINGS))
+            const currentHash = meaningfulBoardHash(current, last.successHash)
+            const targetCurrent = typeof broadcastTargets !== 'function' || (await broadcastTargets()).some(t => t.key === target.key && t.dormBuilding === target.dormBuilding && t.via === target.via && t.conversationId === target.conversationId)
+            const currentConfig = normalizeOperationsConfig(await store.get('operations:config', DEFAULT_OPERATIONS_CONFIG))
+            if (!targetCurrent || broadcastWindow(currentConfig, now) !== hourKey) broadcastResult.reason = 'configuration_changed'
+            else if (currentHash === '[]' || last.successHash === currentHash) {
+              await store.put(key, { ...attempt, unchanged: true, retryAfter: 0 })
+              broadcastResult.reason = 'unchanged'
+            } else {
+              const broadcastBoard = projectBoard({ ...current, floors: current.floors.map((floor) => ({ ...floor, machines: floor.machines.filter((m) => m.state !== 'unknown' && !m.health?.suspectedFault) })) }, (m) => m)
+              const sent = await broadcast({ board: broadcastBoard, hourKey, config, target })
+              if (!sent?.ok) throw new Error(sent?.error || sent?.err || '群播报发送失败')
+              await store.put(key, { ...attempt, success: true, successHash: currentHash, successAt: new Date(now).toISOString(), retryAfter: 0 })
+              broadcastResult = { sent: true, hourKey }
+            }
+          } catch (e) {
+            broadcastResult = { sent: false, reason: 'failed', error: String(e?.message || e).slice(0, 160) }
+            await store.put(key, { ...attempt, error: broadcastResult.error })
+            alerts.push(await recordAdminAlert(store, { key: 'broadcast:' + bid + ':' + (target.key || 'legacy'), kind: 'notification', severity: 'warn', title: '整点群播报未送达', message: broadcastResult.error }, { now, notify }))
+          }
+        }
+        deliveries.push({ ...broadcastResult, building: target.dormBuilding || null })
       }
+      if (typeof broadcastTargets === 'function') broadcastResult = { sent: deliveries.some(d => d.sent), reason: deliveries.some(d => d.sent) ? 'sent' : deliveries[0]?.reason || 'not_configured', deliveries }
     }
     return { board: projected, health, broadcast: broadcastResult, alerts }
   })

@@ -9,6 +9,7 @@ import { issueTicket, verifyTicket } from '../packages/core/auth.js'
 import { enqueueCommunityNotices, ensureCommunityNoticeCapacity, readCommunityNotices, markCommunityNoticesRead, processCommunityNotices } from '../packages/core/community-notices.js'
 import { createCommunityMedia, publicMedia } from './community-media.js'
 import { readStreamBytes } from '../packages/core/stream-bytes.js'
+import { registerCommunityReportRoutes } from './community-reports.js'
 
 const MINUTE = 60000
 const MUTES_KEY = 'moderation:mutes'
@@ -187,6 +188,8 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
         reply: parent ? { id: parent.id, nick: parentAuthor.nick, text: String(parent.text || '').slice(0, 80), identity: parentAuthor.identity, authorBuilding: parentAuthor.authorBuilding, authorBuildingName: parentAuthor.authorBuildingName } : null }
     }))
   }
+
+  registerCommunityReportRoutes(app, { store, bid, actor, context, messageChannel, requireChannel, now })
 
   app.get('/api/messages/channels', wrap(async (c) => {
     const [requester, ctx] = await Promise.all([actor(c), context()])

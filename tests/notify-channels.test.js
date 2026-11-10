@@ -46,7 +46,7 @@ test('notify-check：全新环境里 dm/group 都未就绪', async () => {
   assert.equal(r.j.channels.dm.ready, false)
   assert.equal(r.j.channels.group.ready, false)
   assert.equal(r.j.channels.group.automatic, false)
-  assert.match(r.j.hint, /自动群播报已关闭/)
+  assert.match(r.j.hint, /整点群播报按楼栋配置/)
 })
 
 test('notify-check：有绑定用户才认为私聊可用', async () => {

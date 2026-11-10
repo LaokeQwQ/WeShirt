@@ -35,11 +35,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { startDingLogin, claimCode } from '../api'
 import { useUserStore } from '../stores/user'
-import { safeLoginTarget } from '../loginFlow'
+import { safeLoginTarget, canAutoDingLogin } from '../loginFlow'
 
 const router = useRouter()
 const route = useRoute()
@@ -48,6 +48,9 @@ const userStore = useUserStore()
 const loading = ref(false)
 const err = ref('')
 const trace = ref('')
+let disposed = false, loginGeneration = 0
+onUnmounted(() => { disposed = true; loginGeneration++ })
+watch(() => route.fullPath, () => { loginGeneration++; loading.value = false })
 
 const ERR_MSG = {
   claim_failed: '登录凭证兑换失败，请重新登录',
@@ -71,6 +74,13 @@ function targetPath() {
 watch(()=>userStore.ready && userStore.isLoggedIn,(loggedIn)=>{
   if(loggedIn)router.replace(targetPath())
 })
+watch(()=>userStore.ready,()=>tryAutomaticLogin())
+
+function tryAutomaticLogin() {
+  if (loading.value || route.query.k || !canAutoDingLogin({userAgent:navigator.userAgent,ready:userStore.ready,loggedIn:userStore.isLoggedIn,hasError:Boolean(route.query.e || err.value),session:sessionStorage,local:localStorage})) return
+  try { sessionStorage.setItem('ws_ding_auto_attempt','1') } catch { return }
+  login(true)
+}
 
 onMounted(async () => {
   // 从钉钉授权跳回来：带着一次性取回码，换 token
@@ -99,25 +109,35 @@ onMounted(async () => {
 
   // 已经有登录态就直接进站
   if (userStore.isLoggedIn) router.replace(targetPath())
+  else tryAutomaticLogin()
 })
 
-async function login() {
+async function login(automatic = false) {
   if (loading.value) return
+  const request = ++loginGeneration
   err.value = ''
   trace.value = ''
   loading.value = true
   try {
+    if (automatic !== true) {
+      localStorage.removeItem('ws_ding_auto_disabled')
+      sessionStorage.removeItem('ws_ding_guest')
+      sessionStorage.setItem('ws_ding_auto_attempt','1')
+    }
     const to = String(route.query.to || '')
     sessionStorage.setItem('ws_login_to', safeLoginTarget(to))
-    await startDingLogin()
+    await startDingLogin({ canRedirect: () => !disposed && request === loginGeneration })
     // 成功会整页跳走，这里不用收尾
   } catch (e) {
+    if (disposed || request !== loginGeneration) return
     err.value = e?.message || '无法发起登录'
     loading.value = false
   }
 }
 
 function skip() {
+  loginGeneration++
+  try { sessionStorage.setItem('ws_ding_guest','1') } catch { /* Browsing as a guest remains available. */ }
   router.replace('/')
 }
 </script>
