@@ -6,7 +6,7 @@ import { issueTicket, verifyTicket } from '../packages/core/auth.js'
 
 const secret = 'test-auth-ticket-boundary-32chars'
 const device = 'a'.repeat(32)
-const env = { AUTH_SECRET: secret, ADMIN_TOKEN: 'test-admin-secret', BUILDING_ID: 'b1', DINGTALK_APP_KEY: 'test-app-key', HAIER_MODE: 'mock' }
+const env = { AUTH_SECRET: secret, ADMIN_TOKEN: 'test-admin-secret', BUILDING_ID: 'b1', DINGTALK_APP_KEY: 'test-app-key', DINGTALK_APP_SECRET:'synthetic-secret', HAIER_MODE: 'mock' }
 async function setup() {
   const store = createMemoryStore()
   await store.put('user:u_a', { id: 'u_a', nick: '甲', dormBuilding: 'guiyuan' })
