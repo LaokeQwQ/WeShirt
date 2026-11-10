@@ -300,6 +300,9 @@ function notCfg(what) {
 export function createDingTalk(env = {}) {
   // 一次客户端调用使用一份完整配置，调用方后续修改原对象不会改变已选缓存键。
   env = { ...env }
+  // Dashboard/env pastes can contain a trailing newline. Use the same normalized
+  // credentials for both the OAuth client and the application-token cache.
+  for (const key of ['DINGTALK_APP_KEY', 'DINGTALK_APP_SECRET']) env[key] = typeof env[key] === 'string' ? env[key].trim() : ''
   const credentialKey = JSON.stringify([env.DINGTALK_APP_KEY || '', env.DINGTALK_APP_SECRET || ''])
   // 按能力分别判定，不要「一个都不能少」：
   //   机器人单聊只要 appKey/appSecret/robotCode；工作通知才需要 agentId；
@@ -613,10 +616,13 @@ export function createDingTalk(env = {}) {
 
   // 用 authCode 换「用户级」accessToken
   async function exchangeUserCode(code) {
-    if (!hasBase) return notCfg()
+    if (!hasBase) return { ok: false, err: 'not_configured', status: 0 }
+    if (typeof code !== 'string' || !code || code.length > 2048 || /[\u0000-\u0020\u007f]/.test(code)) return { ok: false, err: 'invalid_code', status: 0 }
+    let status = 0, requestId
     try {
       const r = await boundedFetch('https://api.dingtalk.com/v1.0/oauth2/userAccessToken', {
         method: 'POST',
+        redirect: 'error',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           clientId: env.DINGTALK_APP_KEY,
@@ -625,11 +631,39 @@ export function createDingTalk(env = {}) {
           grantType: 'authorization_code',
         }),
       })
-      const j = await r.json().catch(() => ({}))
-      if (!j.accessToken) return { ok: false, err: `http_${r.status}` }
+      status = r.status
+      // Only a UUID-shaped provider request ID is retained; never retain its
+      // message/body, which can echo the authorization code or client secret.
+      const safeRequestId = (value) => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(value) ? value : undefined
+      requestId = safeRequestId(r.headers.get('x-acs-request-id'))
+      const reader = r.body?.getReader(), chunks = []
+      let size = 0
+      if (reader) while (true) {
+        const part = await reader.read()
+        if (part.done) break
+        size += part.value.byteLength
+        if (size > 32 * 1024) { await reader.cancel().catch(() => {}); return { ok: false, err: 'invalid_response', status, ...(requestId ? { requestId } : {}) } }
+        chunks.push(part.value)
+      }
+      const bytes = new Uint8Array(size)
+      let offset = 0
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+      let j = null
+      try { j = JSON.parse(new TextDecoder().decode(bytes)) } catch { /* return a fixed category below */ }
+      requestId ||= safeRequestId(j?.requestId)
+      const providerCode = typeof j?.code === 'string' ? j.code.toLowerCase() : ''
+      const businessError = j?.code != null && ![0, '0', 'OK', 'ok', 'Success'].includes(j.code)
+      const validToken = typeof j?.accessToken === 'string' && j.accessToken.length > 0 && j.accessToken.length <= 8192 && !/[\u0000-\u0020\u007f]/.test(j.accessToken)
+      if (!r.ok || businessError || !validToken) {
+        let err = status === 429 ? 'rate_limited' : status >= 500 ? 'upstream_unavailable' : status === 200 ? 'invalid_response' : 'upstream_rejected'
+        if (/^(?:invalidparameter\.)?(?:authcode|code)(?:\.|$)/.test(providerCode) || /^(?:invalid_grant|invalidauthcode|authcodeexpired)$/.test(providerCode)) err = 'invalid_code'
+        else if (/^(?:invalidparameter\.)?(?:clientid|clientsecret)(?:\.|$)/.test(providerCode) || /^(?:invalid_client|invalidclient|invalidclientsecret)$/.test(providerCode)) err = 'invalid_client'
+        else if (/^(?:forbidden|accessdenied|permissiondenied)(?:\.|$)/.test(providerCode)) err = 'permission_denied'
+        return { ok: false, err, status, ...(requestId ? { requestId } : {}) }
+      }
       return { ok: true, accessToken: j.accessToken, corpId: j.corpId || '' }
     } catch (e) {
-      return { ok: false, err: safeErrorCategory(e) }
+      return { ok: false, err: safeErrorCategory(e), status, ...(requestId ? { requestId } : {}) }
     }
   }
 

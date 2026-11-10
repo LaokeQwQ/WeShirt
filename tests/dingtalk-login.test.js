@@ -114,7 +114,7 @@ test('login-url 需要 device 且不要求登录态', async () => {
   const store = createMemoryStore()
   const app = createApp({
     store,
-    env: { ADMIN_TOKEN: 'test-admin-token', BUILDING_ID: 'b1', AUTH_SECRET: SECRET, DINGTALK_APP_KEY: 'dingkey' },
+    env: { ADMIN_TOKEN: 'test-admin-token', BUILDING_ID: 'b1', AUTH_SECRET: SECRET, DINGTALK_APP_KEY: 'dingkey', DINGTALK_APP_SECRET: 'synthetic-secret' },
   })
   const r = await app.fetch(new Request('http://x/api/dingtalk/login-url'))
   assert.equal(r.status, 400)
@@ -136,7 +136,7 @@ test('login-url 的 device 必须合法，user id 冒充不了', async () => {
   const store = createMemoryStore()
   const app = createApp({
     store,
-    env: { ADMIN_TOKEN: 'test-admin-token', BUILDING_ID: 'b1', AUTH_SECRET: SECRET, DINGTALK_APP_KEY: 'dingkey' },
+    env: { ADMIN_TOKEN: 'test-admin-token', BUILDING_ID: 'b1', AUTH_SECRET: SECRET, DINGTALK_APP_KEY: 'dingkey', DINGTALK_APP_SECRET: 'synthetic-secret' },
   })
   const r = await app.fetch(new Request('http://x/api/dingtalk/login-url?device=u_1rvr170b34'))
   assert.equal(r.status, 400)

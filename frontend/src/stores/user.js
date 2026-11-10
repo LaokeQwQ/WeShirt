@@ -1,7 +1,7 @@
 // 用户身份 store（pinia）
 // 身份只来自钉钉登录：没有匿名注册这条路，所以不会出现「换个设备变成另一个人」。
 import { defineStore } from 'pinia'
-import { api, setToken, getToken, onReauth, NEED_LOGIN, logout as apiLogout } from '../api'
+import { api, setToken, getToken, onReauth, restoreDeviceSession, NEED_LOGIN, logout as apiLogout } from '../api'
 
 const PROFILE_KEY = 'ws_profile'
 
@@ -70,7 +70,7 @@ export const useUserStore = defineStore('user', {
       try {
         if (!this.token) {
           // 没有 token：尝试设备密钥续用（老设备可能绑过）
-          const data = await api('/api/auth', { method: 'POST', body: {}, auth: false, silent: true })
+          const data = await restoreDeviceSession({ silent: true })
           if (this.profileRevision !== requestRevision || this.token !== requestToken) return this.isLoggedIn
           setToken(data.token)
           this.token = data.token
@@ -99,7 +99,12 @@ export const useUserStore = defineStore('user', {
       if (!this.token) {
         // 仍尝试一次设备密钥（比如 token 被 401 清掉了，但设备还绑着）
         try {
-          const data = await api('/api/auth', { method: 'POST', body: {}, auth: false })
+          const requestRevision = this.profileRevision, requestToken = this.token
+          const data = await restoreDeviceSession()
+          if (this.profileRevision !== requestRevision || this.token !== requestToken) {
+            if(this.token === data.token && this.user?.id === data.user?.id)return this.token
+            throw new Error(NEED_LOGIN)
+          }
           setToken(data.token)
           this.token = data.token
           this.applyUser(data.user)

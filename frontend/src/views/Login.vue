@@ -19,6 +19,7 @@
       </van-button>
 
       <p v-if="err" class="err">{{ err }}</p>
+      <p v-if="trace" class="text-dim login-trace">{{ trace }}</p>
 
       <div class="tips text-dim">
         <div>· 用的是你手机钉钉里的企业身份，不需要额外注册</div>
@@ -34,7 +35,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { startDingLogin, claimCode } from '../api'
 import { useUserStore } from '../stores/user'
@@ -46,13 +47,18 @@ const userStore = useUserStore()
 
 const loading = ref(false)
 const err = ref('')
+const trace = ref('')
 
 const ERR_MSG = {
   claim_failed: '登录凭证兑换失败，请重新登录',
   missing: '授权回调缺少参数，请重新登录',
   state_invalid: '授权已过期，请重新登录',
+  state_used: '本次授权已使用，请重新点击钉钉登录',
+  state_processing: '本次授权正在处理，请稍后重新点击钉钉登录',
+  code_expired: '授权码已失效或已使用，请重新点击钉钉登录',
+  not_configured: '钉钉登录配置未完成，请联系管理员',
   module: '钉钉模块未就绪，请联系管理员',
-  token: '换取登录凭证失败，请重试',
+  token: '换取登录凭证失败，请重新点击钉钉登录；仍失败时请提供下方事件编号',
   profile: '读取钉钉资料失败，请重试',
   no_userid: '换不到你的企业内钉钉 userId，请确认已加入组织并开通讯录权限',
   error: '登录过程出错，请重试',
@@ -61,6 +67,10 @@ const ERR_MSG = {
 function targetPath() {
   return safeLoginTarget(route.query.to || sessionStorage.getItem('ws_login_to'))
 }
+
+watch(()=>userStore.ready && userStore.isLoggedIn,(loggedIn)=>{
+  if(loggedIn)router.replace(targetPath())
+})
 
 onMounted(async () => {
   // 从钉钉授权跳回来：带着一次性取回码，换 token
@@ -81,7 +91,11 @@ onMounted(async () => {
   }
   // 授权失败跳回来：带 e=<flag>
   const e = route.query.e
-  if (e) err.value = ERR_MSG[String(e).split(':')[0]] || `登录失败：${e}`
+  if (e) {
+    err.value = ERR_MSG[String(e).split(':')[0]] || '登录失败，请重新点击钉钉登录'
+    const eventId=route.query.eventId,status=Number(route.query.status)
+    if(typeof eventId==='string' && /^(?:evt|client)_[a-f0-9]{24}$/.test(eventId) && typeof route.query.status==='string' && Number.isInteger(status) && (status===0 || status>=100 && status<=599))trace.value=`事件 ${eventId} · 状态码 ${status}`
+  }
 
   // 已经有登录态就直接进站
   if (userStore.isLoggedIn) router.replace(targetPath())
@@ -90,6 +104,7 @@ onMounted(async () => {
 async function login() {
   if (loading.value) return
   err.value = ''
+  trace.value = ''
   loading.value = true
   try {
     const to = String(route.query.to || '')
