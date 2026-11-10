@@ -12,7 +12,7 @@ import { useUserStore } from './stores/user'
 import { setToken, onNeedLogin, claimCode, restoreDeviceSession } from './api'
 import { initTelemetry } from './telemetry'
 import { useDormStore } from './stores/dorm'
-import { safeLoginTarget } from './loginFlow'
+import { safeLoginTarget, canAutoDingLogin } from './loginFlow'
 
 /**
  * 钉钉登录回调会带着一次性取回码跳回来（#/login?k=xxx）。
@@ -104,7 +104,17 @@ async function boot() {
 
   // token 与 store 对齐：api.js 模块里缓存了 token，store 从 localStorage 读，
   // 两者必须在启动时同步一次，否则首次请求会漏带 Authorization。
-  if (!claimed && !bootstrapped) userStore.bootstrap().catch(() => console.warn('恢复登录态失败，请稍后重试'))
+  const maybeOpenDingLogin = async () => {
+    // Initial guards may still be redirecting a protected URL to /login?to=….
+    // Wait for that navigation instead of replacing its target with START_LOCATION.
+    try { await router.isReady() } catch { return }
+    const cur=router.currentRoute.value
+    if(cur.path!=='/login' && canAutoDingLogin({userAgent:navigator.userAgent,ready:userStore.ready,loggedIn:userStore.isLoggedIn,session:sessionStorage,local:localStorage})) {
+      await router.replace({path:'/login',query:{to:safeLoginTarget(cur.fullPath)}})
+    }
+  }
+  if (!claimed && !bootstrapped) userStore.bootstrap().then(maybeOpenDingLogin).catch(() => console.warn('恢复登录态失败，请稍后重试'))
+  else if (!claimed) maybeOpenDingLogin()
 }
 
 boot()

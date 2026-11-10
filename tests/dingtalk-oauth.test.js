@@ -7,6 +7,7 @@ import { createMemoryStore } from '../packages/core/store.js'
 import { issueTicket, verifyTicket } from '../packages/core/auth.js'
 import { listEvents } from '../packages/core/auditlog.js'
 import { createApp } from '../server/app.js'
+import { safeLoginTarget, canAutoDingLogin } from '../frontend/src/loginFlow.js'
 
 const env = { AUTH_SECRET:'synthetic-oauth-secret-at-least-32', ADMIN_TOKEN:'synthetic-admin-secret', DINGTALK_APP_KEY:'synthetic-oauth-client', DINGTALK_APP_SECRET:'synthetic-oauth-client-secret' }
 const device='a'.repeat(32), providerRequestId='12345678-1234-1234-1234-123456789abc'
@@ -213,7 +214,9 @@ test('Login displays only allowlisted callback errors and well-formed event/stat
   const script=source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]*\n/gm,'')
   async function render(query){
     let mounted
-    const panel=new Function('ref','onMounted','watch','useRouter','useRoute','useUserStore','safeLoginTarget','sessionStorage',script+'\nreturn {err,trace}')(ref,fn=>mounted=fn,()=>{},()=>({replace(){}}),()=>({query}),()=>({isLoggedIn:false}),()=>'/ ',{getItem(){return null}})
+    const storage={getItem(){return null},setItem(){},removeItem(){}}
+    const bindings={ref,onMounted:fn=>mounted=fn,onUnmounted(){},watch(){},useRouter:()=>({replace(){}}),useRoute:()=>({query}),useUserStore:()=>({isLoggedIn:false,ready:true}),safeLoginTarget,canAutoDingLogin,sessionStorage:storage,localStorage:storage,navigator:{userAgent:'DingTalk Android'}}
+    const panel=new Function(...Object.keys(bindings),script+'\nreturn {err,trace}')(...Object.values(bindings))
     await mounted()
     return {error:panel.err.value,trace:panel.trace.value}
   }

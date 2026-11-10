@@ -155,8 +155,9 @@ test('protected ingest hourly broadcast excludes disabled building machines with
  assert.equal(ingested.status,200);assert.equal(ingested.data.ok,true,JSON.stringify(ingested.data))
  assert.ok(sent.length>0,'the local webhook mock should receive the enabled hourly summary')
  assert.equal(JSON.stringify(sent).includes('柳园停用机器'),false,'disabled machine must not enter a broadcast payload')
- assert.match(sent[0].text.content,/洗衣机 1\/1 空闲/,'summary counts must exclude disabled devices')
- assert.doesNotMatch(sent[0].text.content,/洗衣机 2\/2 空闲/)
+ assert.equal(sent[0].msgtype,'markdown')
+ assert.match(sent[0].markdown.text,/空闲 1 台 · 使用中 0 台/,'summary counts must exclude disabled devices')
+ assert.match(sent[0].markdown.text,/仅统计桂园楼下机器/)
  assert.equal((await store.get('machines:b1')).board.floors.flatMap(f=>f.machines).length,2,'diagnostic raw snapshot remains complete')
 })
 

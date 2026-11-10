@@ -5,7 +5,7 @@ import { createPinia, defineStore, setActivePinia } from 'pinia'
 import { createApp } from '../server/app.js'
 import { createMemoryStore } from '../packages/core/store.js'
 import { issueTicket } from '../packages/core/auth.js'
-import { safeLoginTarget, createSingleFlight } from '../frontend/src/loginFlow.js'
+import { safeLoginTarget, createSingleFlight, canAutoDingLogin } from '../frontend/src/loginFlow.js'
 
 const sources=Object.fromEntries(await Promise.all(['api','main','stores/user'].map(async name=>[name,await readFile(new URL('../frontend/src/'+name+'.js',import.meta.url),'utf8')])))
 const device='a'.repeat(32),secret='synthetic-bootstrap-auth-secret-32'
@@ -36,7 +36,7 @@ async function fixture({hash='#/',storedToken='',storedProfile=null,bindDevice=t
   const location={hash,pathname:'/',search:''},timeline=[]
   const nativeHistory={replaceState(_state,_title,url){location.hash=url.slice(url.indexOf('#'))}}
   const routerHistory={location:hash.slice(1),replace(path){this.location=path;location.hash='#'+path;timeline.push('history:'+path)}}
-  const router={options:{history:routerHistory},resolve:path=>({meta:{login:['/settings','/task','/inspection','/assistant'].includes(path.split('?')[0])}}),currentRoute:{value:{path:'/',fullPath:'/'}},replace(){}}
+  const router={options:{history:routerHistory},isReady:async()=>{},resolve:path=>({meta:{login:['/settings','/task','/inspection','/assistant'].includes(path.split('?')[0])}}),currentRoute:{value:{path:'/',fullPath:'/'}},replace(){}}
   let firstNavigation,mounted
   const createVueApp=()=>({
     use(plugin){
@@ -50,7 +50,7 @@ async function fixture({hash='#/',storedToken='',storedProfile=null,bindDevice=t
   })
   const body=strip(sources.main).replace(/\bboot\(\)\s*$/,'')
   const registrations=[],listeners=[]
-  const bindings={location,history:nativeHistory,sessionStorage:{getItem(){return null},removeItem(){}},claimCode:client.claimCode,restoreDeviceSession:client.restoreDeviceSession,safeLoginTarget,createApp:createVueApp,App:{},createPinia:()=>pinia,useUserStore,setToken:client.setToken,router,Vant:{},initTelemetry(){},useDormStore:()=>({code:'guiyuan',loadSite(){}}),onNeedLogin:client.onNeedLogin,navigator:serviceWorker?{serviceWorker:{register:async(...args)=>registrations.push(args)}}:{},window:{isSecureContext:true,addEventListener:(name,callback,options)=>listeners.push({name,callback,options})},document:{readyState:documentState},console:{warn(){}}}
+  const bindings={location,history:nativeHistory,sessionStorage:{getItem(){return null},removeItem(){}},localStorage,claimCode:client.claimCode,restoreDeviceSession:client.restoreDeviceSession,safeLoginTarget,canAutoDingLogin,createApp:createVueApp,App:{},createPinia:()=>pinia,useUserStore,setToken:client.setToken,router,Vant:{},initTelemetry(){},useDormStore:()=>({code:'guiyuan',loadSite(){}}),onNeedLogin:client.onNeedLogin,navigator:serviceWorker?{serviceWorker:{register:async(...args)=>registrations.push(args)}}:{},window:{isSecureContext:true,addEventListener:(name,callback,options)=>listeners.push({name,callback,options})},document:{readyState:documentState},console:{warn(){}}}
   const main=new Function(...Object.keys(bindings),body+'\nreturn {boot,preclaim}')(...Object.values(bindings))
   const claim=()=>issueTicket({role:'login_claim',u:'alice',d:device,nonce:crypto.randomUUID(),exp:Date.now()+60000},secret)
   return {main,user,client,localStorage,location,requests,claim,setHash(value){location.hash=value;routerHistory.location=value.slice(1)},setBeforeRequest(fn){beforeRequest=fn},get firstNavigation(){return firstNavigation},get mounted(){return mounted},timeline,registrations,listeners}

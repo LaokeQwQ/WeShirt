@@ -5,27 +5,24 @@
     <van-cell-group inset title="资料与账号" class="account-group">
       <div class="profile">
         <div class="profile-head">
-          <Avatar :name="nick" :src="avatarUrl" :size="56" />
+          <button class="avatar-edit" type="button" aria-label="更换头像" :aria-busy="avatarBusy" :disabled="avatarBusy" @click="showAvatarActions = true">
+            <Avatar :name="nick" :src="avatarUrl" :size="56" />
+            <van-icon name="edit" class="avatar-edit-icon" />
+          </button>
           <div class="profile-head-meta">
             <div class="profile-name">{{ nick || '还没起名' }}</div>
-            <div class="profile-actions">
-              <button class="dice-btn" type="button" @click="rollNick">换昵称</button>
-              <button class="dice-btn" type="button" @click="pickUpload">上传头像</button>
-              <button class="dice-btn" type="button" :disabled="dingAvatarLoading" @click="useDingAvatar">
-                {{ dingAvatarLoading ? '获取中…' : '用钉钉头像' }}
-              </button>
-            </div>
+            <div class="profile-avatar-tip">{{ avatarBusy ? '正在更新头像…' : '点击头像更换' }}</div>
           </div>
         </div>
         <input ref="fileInput" type="file" accept="image/*" class="file-input" @change="onFilePicked" />
-        <div v-if="avatarUrl" class="avatar-clear">
-          <span @click="clearAvatar">去掉头像（改用昵称首字）</span>
-        </div>
         <div class="profile-row">
-          <input v-model="nick" class="nick-input" maxlength="16" placeholder="昵称（1-16 字）" />
-          <van-button size="small" type="primary" :loading="profileSaving" @click="saveProfile">保存</van-button>
+          <input v-model="nick" class="nick-input" aria-label="昵称" maxlength="16" placeholder="昵称（1-16 字）" />
+          <div class="profile-editor-actions">
+            <van-button size="small" plain class="random-nick-btn" :disabled="profileSaving" @click="rollNick">随机昵称</van-button>
+            <van-button size="small" type="primary" :loading="profileSaving" @click="saveProfile">保存</van-button>
+          </div>
         </div>
-        <div class="profile-tip">留言板/排队里别人看到的是 {{ maskedPreview }}</div>
+        <div class="profile-tip">昵称点击保存后生效 · 留言板/排队里别人看到的是 {{ maskedPreview }}</div>
       </div>
       <van-cell title="住宿楼" :value="dorm.name || '选择住宿楼'" :label="!user?.dormBuilding ? '首次选择后自动记住，之后可自行修改一次' : dorm.changesRemaining > 0 ? `还可自行修改 ${dorm.changesRemaining} 次` : '自行修改次数已用完，需要调整请联系管理员'" :is-link="!user?.dormBuilding || dorm.changesRemaining > 0" @click="(!user?.dormBuilding || dorm.changesRemaining > 0) && (dorm.showPicker = true)" />
       <van-cell
@@ -34,7 +31,7 @@
         :label="user?.dingUserId ? '取衣提醒会发到这个钉钉' : '未获取到钉钉身份'"
       />
       <van-cell title="手机号" :value="user?.mobile || '—'" />
-      <van-cell>
+      <van-cell class="logout-cell">
         <template #title>
           <button class="logout-btn" type="button" :disabled="loggingOut" @click="doLogout">
             {{ loggingOut ? '退出中…' : '退出登录' }}
@@ -46,7 +43,6 @@
     <!-- 通知 -->
     <van-cell-group inset title="通知">
       <van-cell title="接收开屏公告" label="关闭后不再弹出公告"><template #value><van-switch :model-value="announcementsOn" :loading="announcementSaving" @update:model-value="setAnnouncements" /></template></van-cell>
-      <van-cell title="匿名性能数据" label="收集页面耗时、错误类别和3D性能，保留14天；不含身份和消息"><template #value><van-switch :model-value="telemetryOn" :disabled="dnt" @update:model-value="setTelemetry" /></template></van-cell>
       <van-cell title="Web Push 订阅">
         <template #value>
           <van-button size="small" :loading="pushLoading" @click="subscribePush">{{ pushText }}</van-button><van-button v-if="pushSubscribed" size="small" plain :loading="pushLoading" @click="unsubscribePush">关闭</van-button>
@@ -99,6 +95,10 @@
       </div>
     </van-cell-group>
 
+    <van-cell-group inset title="隐私" class="privacy-group">
+      <van-cell title="匿名性能数据" label="收集页面耗时、错误类别和3D性能，保留14天；不含身份和消息"><template #value><van-switch :model-value="telemetryOn" :disabled="dnt" @update:model-value="setTelemetry" /></template></van-cell>
+    </van-cell-group>
+
     <FavoriteSettings />
 
     <van-cell-group inset title="朋友与代取" class="collaboration-group">
@@ -112,6 +112,7 @@
 
     <van-cell-group v-if="adminVisible" inset title="管理"><van-cell title="管理员后台" is-link @click="goAdmin" /></van-cell-group>
     <AboutDonation />
+    <van-action-sheet v-model:show="showAvatarActions" title="更换头像" :actions="avatarActions" cancel-text="取消" close-on-click-action @select="selectAvatarAction" />
   </div>
 </template>
 
@@ -127,6 +128,7 @@ import AboutDonation from '../components/AboutDonation.vue'
 import FavoriteSettings from '../components/FavoriteSettings.vue'
 import { findBannedWord } from '../nick'
 import { telemetryEnabled, setTelemetryEnabled } from '../telemetry'
+import { randomNickExcept } from '../../../packages/core/profile.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -203,6 +205,21 @@ const avatarUrl = ref(userStore.user?.avatarUrl || '')
 const profileSaving = ref(false)
 const fileInput = ref(null)
 const dingAvatarLoading = ref(false)
+const avatarSaving = ref(false)
+const avatarBusy = computed(() => dingAvatarLoading.value || avatarSaving.value)
+const showAvatarActions = ref(false)
+const avatarActions = computed(() => [
+  { name: '用钉钉头像', action: 'dingtalk' },
+  { name: '自定义头像', action: 'upload' },
+  ...(avatarUrl.value ? [{ name: '移除头像，使用昵称首字', action: 'clear' }] : []),
+])
+function selectAvatarAction(item) {
+  showAvatarActions.value = false
+  if (avatarBusy.value) return
+  if (item.action === 'dingtalk') return useDingAvatar()
+  if (item.action === 'upload') return pickUpload()
+  if (item.action === 'clear') return clearAvatar()
+}
 const maskedPreview = computed(() => {
   const s = (nick.value || '匿名').trim()
   return (s ? [...s][0] : '匿') + '**'
@@ -230,15 +247,9 @@ async function doLogout() {
   }
 }
 
-// 随机昵称：只换昵称，绝不动头像。
-// （之前传的是 'both'，点一下骰子头像也跟着变，用户以为自己的头像丢了）
-async function rollNick() {
-  try {
-    const data = await userStore.randomProfile('nick')
-    if (data?.nick) nick.value = data.nick
-  } catch (e) {
-    showToast(e?.message || '换一个失败')
-  }
+// 本地即时预览，不请求或保存资料，也没有迟到响应覆盖手动输入。
+function rollNick() {
+  if (!profileSaving.value) nick.value = randomNickExcept(nick.value)
 }
 
 // 选预设头像 = 放弃自定义图片
@@ -278,23 +289,31 @@ function compressImage(file) {
 async function onFilePicked(e) {
   const f = e.target.files && e.target.files[0]
   e.target.value = '' // 允许连续选同一张
-  if (!f) return
+  if (!f || avatarBusy.value) return
   if (f.size > 8 * 1024 * 1024) return showToast('图片太大了，换一张（<8MB）')
+  const requestUser = userStore.user?.id
+  avatarSaving.value = true
   try {
     const dataUrl = await compressImage(f)
-    await userStore.setAvatarUrl(dataUrl)
+    if (disposed || requestUser !== userStore.user?.id) return
+    const saved = await userStore.setAvatarUrl(dataUrl)
+    if (!saved || disposed || requestUser !== userStore.user?.id) return
     avatarUrl.value = dataUrl
     showToast('头像已更新')
   } catch (err) {
     showToast(err?.message || '上传失败')
+  } finally {
+    avatarSaving.value = false
   }
 }
 
 async function useDingAvatar() {
-  if (dingAvatarLoading.value) return
+  if (avatarBusy.value) return
+  const requestUser = userStore.user?.id
   dingAvatarLoading.value = true
   try {
     const r = await userStore.useDingtalkAvatar()
+    if (!r || disposed || requestUser !== userStore.user?.id) return
     avatarUrl.value = r?.user?.avatarUrl || ''
     showToast('已使用钉钉头像')
   } catch (e) {
@@ -305,12 +324,18 @@ async function useDingAvatar() {
 }
 
 async function clearAvatar() {
+  if (avatarBusy.value) return
+  const requestUser = userStore.user?.id
+  avatarSaving.value = true
   try {
-    await userStore.setAvatarUrl(null)
+    const saved = await userStore.setAvatarUrl(null)
+    if (!saved || disposed || requestUser !== userStore.user?.id) return
     avatarUrl.value = ''
     showToast('已改回昵称首字')
   } catch (e) {
     showToast(e?.message || '操作失败')
+  } finally {
+    avatarSaving.value = false
   }
 }
 
@@ -344,6 +369,7 @@ function setLead(m) {
 }
 
 async function saveProfile() {
+  if (profileSaving.value) return
   const n = nick.value.trim()
   if (!n) {
     showToast('昵称不能为空')
@@ -357,11 +383,9 @@ async function saveProfile() {
   }
   profileSaving.value = true
   try {
-    await userStore.setProfile({
-      nick: n,
-      // 头像只有 avatarUrl 一种来源，null 表示回退到昵称首字
-      avatarUrl: avatarUrl.value || null,
-    })
+    // 头像操作单独保存；改昵称不携带可能过时的头像。
+    const saved = await userStore.setProfile({ nick: n })
+    if (!saved || disposed) return
     showToast('已保存')
   } catch (e) {
     showToast(e?.message || '保存失败')
@@ -491,64 +515,26 @@ onMounted(async () => {
   gap: 6px;
   min-width: 0;
 }
-.profile-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
+.avatar-edit { position: relative; flex: none; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.avatar-edit:disabled { opacity: .6; cursor: wait; }
+.avatar-edit-icon { position: absolute; right: -3px; bottom: -2px; padding: 4px; border-radius: 50%; background: #164e63; color: #d4f1fc; font-size: 13px; border: 2px solid var(--surface, #172332); }
+.profile-avatar-tip { color: var(--text-dim, #94a3b8); font-size: 12px; }
 .file-input {
   display: none;
-}
-.avatar-clear {
-  font-size: 12px;
-  color: #7dd3fc;
-  margin: -4px 0 8px 2px;
-  cursor: pointer;
 }
 .profile-name {
   font-size: 16px;
   font-weight: 700;
   color: #e8f0fb;
 }
-.dice-btn {
-  align-self: flex-start;
-  font-size: 12px;
-  min-height: 36px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  background: rgba(148, 163, 184, 0.12);
-  color: #dbe6f5;
-  cursor: pointer;
-}
-.dice-btn:active {
-  background: rgba(148, 163, 184, 0.22);
-}
-.profile-avatars {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.avatar-opt {
-  display: flex;
-  padding: 3px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-  line-height: 0;
-}
-.avatar-opt.on {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18);
-}
 .profile-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
 .nick-input {
-  flex: 1;
+  flex: 1 1 150px;
   min-width: 0;
   background: rgba(148, 163, 184, 0.1);
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -559,13 +545,18 @@ onMounted(async () => {
   outline: none;
 }
 .nick-input:focus-visible { border-color: #7dd3fc; box-shadow: 0 0 0 2px #7dd3fc22; }
+.profile-editor-actions { display: flex; gap: 8px; margin-left: auto; }
+.profile-editor-actions :deep(.van-button) { min-height: 36px; }
+.profile-editor-actions :deep(.random-nick-btn) { color: #c5e4fa; background: #17324a; border-color: #456789; }
+.logout-cell { padding-top: 24px; padding-bottom: 16px; }
+.logout-cell::after { display: none; }
 .settings :deep(.van-cell-group__title) { padding-top: 24px; font-weight: 600; letter-spacing: .02em; }
 .settings :deep(.van-cell__value) { min-width: 0; overflow-wrap: anywhere; }
 .settings-destination { min-height: 72px; align-items: center; }
 .destination-icon { display: grid; place-items: center; width: 38px; height: 38px; margin-right: 12px; border: 1px solid; border-radius: 10px; font-size: 21px; }
 .settings-social .destination-icon { color: #a5e5c9; border-color: #335f52; background: #15342d; }
 .settings-assistant .destination-icon { color: #a4dcf5; border-color: #365c75; background: #142f45; }
-.dice-btn:focus-visible, .logout-btn:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 2px; }
+.avatar-edit:focus-visible, .logout-btn:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 3px; }
 .profile-tip {
   margin-top: 8px;
   font-size: 11px;

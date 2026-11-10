@@ -18,7 +18,7 @@
     </section>
 
     <template v-else-if="currentChannel">
-      <div class="chat-topline"><span>{{ transportState === 'connected' ? '消息实时更新' : '消息自动更新' }}</span><span>长按消息可回复或@</span></div>
+      <div class="chat-topline"><span>{{ transportState === 'connected' ? '消息实时更新' : '消息自动更新' }}</span><span>长按头像@，长按消息回复或举报</span></div>
       <p v-if="isPublic" class="channel-intro">全校公共交流频道。机器留言与预约请进入对应楼栋频道。</p>
       <template v-else>
         <div class="filters"><label>机器<select v-model="machineId"><option value="">全部机器 / 楼内留言</option><option v-for="machine in machines" :key="machine.id" :value="String(machine.id)">{{ machineName(machine) }}</option></select></label></div>
@@ -30,8 +30,8 @@
         <div v-if="loading && !messages.length" class="empty text-dim">加载中…</div>
         <div v-else-if="!messages.length" class="empty text-dim">这个频道还没有留言，来聊两句吧。</div>
         <div class="msg-list">
-          <article v-for="message in visibleMessages" :id="'message-'+message.id" :key="message.id" class="msg card" :class="{ pinned: message.pinned, 'mentions-me': message.mentionedMe || route.query.message === message.id }" @pointerdown="startHold($event,message)" @pointerup="cancelHold" @pointercancel="cancelHold" @pointermove="moveHold" @contextmenu.prevent="openMessageActions(message)">
-            <Avatar :name="message.nick || '同学'" :src="message.avatarUrl" :size="34" />
+          <article v-for="message in visibleMessages" :id="'message-'+message.id" :key="message.id" class="msg card" tabindex="0" aria-label="消息，按回车打开操作" :class="{ pinned: message.pinned, 'mentions-me': message.mentionedMe || route.query.message === message.id }" @pointerdown="startHold($event,message)" @pointerup="cancelHold" @pointercancel="cancelHold" @pointermove="moveHold" @pointerleave="cancelHold" @click.capture="hold.suppressClick($event)" @contextmenu.prevent="messageContext($event,message)" @keydown="messageKey($event,message)">
+            <button class="message-avatar" type="button" :aria-label="'长按@'+(message.nick || '这位成员')" :disabled="message.mine || !message.mentionRef" @pointerdown.stop="startAvatarHold($event,message)" @pointerup.stop="cancelHold" @pointercancel.stop="cancelHold" @pointermove.stop="moveHold" @pointerleave="cancelHold" @click.stop.prevent @contextmenu.stop.prevent="mentionAuthor(message)" @keydown.enter.stop.prevent="mentionAuthor(message)" @keydown.space.stop.prevent="mentionAuthor(message)"><Avatar :name="message.nick || '同学'" :src="message.avatarUrl" :size="34" /></button>
             <div class="msg-body">
               <div class="msg-head"><b>{{ message.nick || '同学' }}</b><span class="author-building">{{ authorBuildingName(message) }}</span><IdentityBadge :identity="message.identity" /></div>
               <div class="msg-meta"><span v-if="message.pinned" class="pinned-tag">置顶</span><span v-if="message.type === 'announcement'" class="announcement-tag">频道公告</span><span v-if="message.mentionAll" class="mention-channel-badge">@全体</span><time>{{ format(message.at) }}</time><span v-if="message.machineId" class="machine-tag">{{ message.machineName || '机器留言' }}</span></div>
@@ -55,7 +55,7 @@
         <div v-if="attachment" class="attachment-draft"><img v-if="attachment.kind==='image'" :src="attachment.preview" alt="待发送图片" /><video v-else :src="attachment.preview" controls playsinline preload="metadata" /><span>{{ attachment.kind==='video' ? '短视频 · 最多30秒' : '图片' }}</span><button type="button" @click="clearAttachment">移除</button></div>
         <div v-if="selectedMentions.length || mentionAll" class="mention-draft"><button v-for="item in selectedMentions" :key="item.ref" type="button" @click="removeMention(item)">@{{ item.nick }} ×</button><button v-if="mentionAll" type="button" @click="mentionAll=false">@全体成员 ×</button></div>
         <div v-if="reply" class="reply-target">回复 {{ reply.nick || '同学' }}：{{ reply.text.slice(0, 40) }}<button type="button" @click="reply = null" aria-label="取消回复">×</button></div>
-        <div class="composer"><button class="composer-plus" type="button" aria-label="添加图片或视频" :disabled="sending || isMuted || preparing" @click="openAdd">＋</button><label class="visually-hidden" for="message-composer">留言内容</label><van-field id="message-composer" v-model="text" class="composer-input" placeholder="消息 / @成员（最多200字）" maxlength="200" type="textarea" autosize rows="1" /><button class="composer-at" type="button" :disabled="isMuted" @click="openMentions">@</button><van-button type="primary" size="small" :disabled="(!text.trim() && !attachment) || sending || isMuted || preparing" :loading="sending || preparing" @click="send">发送</van-button></div>
+        <div class="composer"><button class="composer-plus" type="button" aria-label="添加附件或提及成员" :disabled="sending || isMuted || preparing" @click="openAdd">＋</button><label class="visually-hidden" for="message-composer">留言内容</label><van-field id="message-composer" v-model="text" class="composer-input" placeholder="消息 / 输入@提及成员" maxlength="200" type="textarea" autosize rows="1" /><van-button type="primary" size="small" :disabled="(!text.trim() && !attachment) || sending || isMuted || preparing" :loading="sending || preparing" @click="send">发送</van-button></div>
         <label v-if="currentChannel.permissions?.canAnnounce" class="announcement-option"><input v-model="announcement" type="checkbox" />发布为置顶频道公告</label>
       </div>
     </template>
@@ -64,8 +64,9 @@
     <van-action-sheet v-model:show="showMute" title="选择禁言时长" :actions="muteActions" cancel-text="取消" :close-on-click-action="false" @select="confirmMute">
       <div class="mute-reason"><van-field v-model="muteReason" label="原因" placeholder="选填，最多200字" maxlength="200" type="textarea" rows="2" /></div>
     </van-action-sheet>
-    <van-action-sheet v-model:show="showAdd" title="发送附件" :actions="[{name:'图片',kind:'image'},{name:'短视频（≤30秒、4MB）',kind:'video'}]" cancel-text="取消" @select="chooseAttachment" />
+    <van-action-sheet v-model:show="showAdd" title="添加到消息" :actions="[{name:'图片',kind:'image'},{name:'短视频（≤30秒、4MB）',kind:'video'},{name:'提及成员 / @全体',kind:'mention'}]" cancel-text="取消" @select="chooseAttachment" />
     <van-action-sheet v-model:show="showMessageActions" title="消息操作" :actions="messageActions" cancel-text="取消" @select="actOnMessage" />
+    <van-popup v-model:show="showReport" position="bottom" round :closeable="!reporting" :close-on-click-overlay="!reporting"><section class="report-form"><h3>举报消息</h3><p>举报仅供管理员处理，不会在频道内公开你的身份。</p><blockquote>{{ reportTarget?.text || '附件消息' }}</blockquote><label>举报原因<select v-model="reportReason"><option value="spam">广告或垃圾信息</option><option value="abuse">辱骂或骚扰</option><option value="privacy">泄露个人信息</option><option value="unsafe">不当或危险内容</option><option value="other">其他原因</option></select></label><van-field v-model="reportDetail" type="textarea" rows="3" maxlength="300" show-word-limit placeholder="补充说明（其他原因必填）" /><p v-if="reportError" class="error" role="alert">{{ reportError }}</p><van-button block type="primary" :loading="reporting" :disabled="reporting" @click="submitReport">提交举报</van-button></section></van-popup>
     <van-popup v-model:show="showMentions" position="bottom" round closeable><section class="mention-picker"><h3>@频道成员</h3><p>可选择此频道近期发言的成员</p><button v-if="currentChannel?.permissions?.canMentionAll" type="button" @click="selectAll">@全体成员<span>每频道每小时一次</span></button><button v-for="item in participants" :key="item.ref" type="button" @click="selectMention(item)">{{ item.nick }}<IdentityBadge :identity="item.identity" /></button><p v-if="!participants.length">{{ participantsLoading ? '正在读取成员…' : '暂无近期发言成员' }}</p></section></van-popup>
     <input ref="imageInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" @change="pickAttachment($event,'image')" />
     <input ref="videoInput" class="visually-hidden" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" @change="pickAttachment($event,'video')" />
@@ -87,6 +88,7 @@ import QueuePanel from '../components/QueuePanel.vue'
 import CommunityMedia from '../components/CommunityMedia.vue'
 import { prepareCommunityFile, uploadCommunityMedia } from '../communityMedia'
 import { createChannelTransport } from '../channelTransport'
+import { createMessageHold } from '../messageHold'
 
 const route = useRoute()
 const router = useRouter()
@@ -126,8 +128,9 @@ const attachment = ref(null), preparing = ref(false), announcement = ref(false)
 const selectedMentions = ref([]), mentionAll = ref(false), mentionCounts = ref({}), participants = ref([]), participantsLoading = ref(false)
 const showMentions = ref(false), showAdd = ref(false), showMessageActions = ref(false), heldMessage = ref(null)
 const imageInput = ref(null), videoInput = ref(null), avatarInput = ref(null), transportState = ref('polling')
-const messageActions = computed(() => [{ name: '回复', action: 'reply' }, ...(heldMessage.value?.mentionRef && !heldMessage.value?.mine ? [{ name: '@这位成员', action: 'mention' }] : [])])
-let holdTimer, holdPoint = null
+const messageActions = computed(() => [{ name: '回复', action: 'reply' }, ...(!heldMessage.value?.mine ? [{ name: '举报', action: 'report', color: '#ef4444' }] : [])])
+const hold = createMessageHold()
+const showReport = ref(false), reportTarget = ref(null), reportReason = ref('spam'), reportDetail = ref(''), reportError = ref(''), reporting = ref(false)
 const mute = ref(null)
 const clock = ref(Date.now())
 const isMuted = computed(() => Boolean(mute.value?.active || mute.value?.isMuted) && (!mute.value?.until || Date.parse(mute.value.until) > clock.value))
@@ -168,15 +171,29 @@ function openChannel(code) { router.push({ path: '/board', query: { channel: cod
 async function loadNoticeCounts() { if (!user.isLoggedIn) { mentionCounts.value = {}; return }; const owner = user.user?.id; try { const data = await api('/api/messages/notices', { silent: true }); if (owner !== user.user?.id || disposed) return; const counts = {}; for (const entry of data.notices || []) if (!entry.readAt) counts[entry.channel] = (counts[entry.channel] || 0) + 1; mentionCounts.value = counts } catch {} }
 function requireLogin() { if (user.isLoggedIn) return true; router.push({ path: '/login', query: { to: route.fullPath } }); return false }
 function openAdd() { if (requireLogin()) showAdd.value = true }
-function chooseAttachment(action) { showAdd.value = false; (action.kind === 'video' ? videoInput.value : imageInput.value)?.click() }
+function chooseAttachment(action) { showAdd.value = false; if (action.kind === 'mention') { openMentions(); return }; (action.kind === 'video' ? videoInput.value : imageInput.value)?.click() }
 function clearAttachment() { if (attachment.value?.preview) URL.revokeObjectURL(attachment.value.preview); attachment.value = null }
 async function pickAttachment(event, kind) { const file = event.target.files?.[0]; event.target.value = ''; if (!file) return; const target = scope.value; preparing.value = true; try { const blob = await prepareCommunityFile(file); if (target !== scope.value || disposed) return; clearAttachment(); attachment.value = { blob, kind, preview: URL.createObjectURL(blob), media: null } } catch (e) { showToast(e.message) } finally { preparing.value = false } }
 async function pickAvatar(event) { const file = event.target.files?.[0]; event.target.value = ''; if (!file || !currentChannel.value?.permissions?.canManageAvatar) return; const channel = channelCode.value; preparing.value = true; try { const blob = await prepareCommunityFile(file, true); await uploadCommunityMedia(blob, channel, true); await loadChannels(); showToast('频道头像已更新') } catch (e) { showToast(e.message) } finally { preparing.value = false } }
-function cancelHold() { clearTimeout(holdTimer); holdPoint = null }
-function startHold(event, message) { if (event.button && event.button !== 0) return; cancelHold(); holdPoint = { x: event.clientX, y: event.clientY }; holdTimer = setTimeout(() => { openMessageActions(message); holdPoint = null }, 500) }
-function moveHold(event) { if (holdPoint && Math.hypot(event.clientX - holdPoint.x, event.clientY - holdPoint.y) > 8) cancelHold() }
+function cancelHold() { hold.cancel() }
+function startHold(event, message) { if (event.target?.closest('button,a,input,textarea,select,video,[role="button"]')) { cancelHold(); return }; hold.start(event, () => openMessageActions(message)) }
+function startAvatarHold(event, message) { hold.start(event, () => mentionAuthor(message)) }
+function moveHold(event) { hold.move(event) }
+function messageContext(event, message) { if (event.target?.closest('button,a,input,textarea,select,video,[role="button"]')) return; openMessageActions(message) }
+function messageKey(event, message) { if (event.target !== event.currentTarget) return; if (event.key === 'Enter' || event.key === ' ' || event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openMessageActions(message) } }
+function mentionAuthor(message) { if (!message.mine && message.mentionRef && requireLogin() && !isMuted.value) selectMention({ ref: message.mentionRef, nick: message.nick || '同学' }) }
 function openMessageActions(message) { cancelHold(); heldMessage.value = message; showMessageActions.value = true }
-function actOnMessage(action) { const message = heldMessage.value; showMessageActions.value = false; if (!message) return; if (action.action === 'reply') replyTo(message); else selectMention({ ref: message.mentionRef, nick: message.nick }) }
+function actOnMessage(action) { const message = heldMessage.value; showMessageActions.value = false; if (!message) return; if (action.action === 'reply') replyTo(message); else if (requireLogin()) { reportTarget.value = message; reportReason.value = 'spam'; reportDetail.value = ''; reportError.value = ''; showReport.value = true } }
+async function submitReport() {
+  const target = reportTarget.value, owner = scope.value
+  if (!target || reporting.value || !requireLogin()) return
+  reporting.value = true; reportError.value = ''
+  try {
+    const result = await api('/api/messages/' + encodeURIComponent(target.id) + '/report', { method: 'POST', body: { reason: reportReason.value, detail: reportDetail.value.trim() } })
+    if (!disposed && owner === scope.value) { showReport.value = false; showToast(result.duplicate ? '你已举报过这条消息' : '举报已提交') }
+  } catch (e) { if (!disposed && owner === scope.value) reportError.value = e.message || '提交失败，请重试' }
+  finally { reporting.value = false }
+}
 async function openMentions() { if (!requireLogin() || !currentChannel.value || isMuted.value) return; showMentions.value = true; participantsLoading.value = true; const channel = channelCode.value; try { const data = await api('/api/messages/participants?channel=' + encodeURIComponent(channel)); if (channel === channelCode.value) participants.value = data.participants || [] } catch (e) { showToast(e.message) } finally { participantsLoading.value = false } }
 function selectMention(item) { if (!item?.ref) return; if (selectedMentions.value.some((entry) => entry.ref === item.ref)) { showMentions.value = false; return }; if (selectedMentions.value.length >= 5) { showToast('每条最多@五位成员'); return }; selectedMentions.value.push(item); text.value = (text.value.replace(/@$/, '') + '@' + item.nick + ' ').slice(0, 200); showMentions.value = false }
 function removeMention(item) { selectedMentions.value = selectedMentions.value.filter((entry) => entry.ref !== item.ref); text.value = text.value.replace('@' + item.nick + ' ', '') }
@@ -235,7 +252,7 @@ async function refresh() {
   if (!currentChannel.value) { await loadChannels(); if (!currentChannel.value) return }
   await Promise.all([load(false), loadMachines()])
 }
-function replyTo(message) { if (!requireLogin()) return; reply.value = message; sendError.value = ''; nextTick(() => document.querySelector('#message-composer textarea')?.focus()) }
+function replyTo(message) { if (!requireLogin()) return; reply.value = message; sendError.value = ''; nextTick(() => document.getElementById('message-composer')?.focus()) }
 
 async function send() {
   const value = text.value.trim()
@@ -315,7 +332,7 @@ watch(scope, (next) => {
   text.value = draft?.text || ''
   reply.value = draft?.reply || null
   attachment.value = draft?.attachment || null; selectedMentions.value = draft?.mentions || []; mentionAll.value = draft?.mentionAll || false; announcement.value = draft?.announcement || false
-  cancelHold(); showAdd.value = false; showMentions.value = false; showMessageActions.value = false; participants.value = []
+  cancelHold(); showAdd.value = false; showMentions.value = false; showMessageActions.value = false; showReport.value = false; participants.value = []
   generation++; machineGeneration++
   messages.value = []; machines.value = []; error.value = ''; sendError.value = ''; hasMore.value = false; page.value = 1
   loading.value = false; refreshing.value = false; showMute.value = false
@@ -326,17 +343,24 @@ watch(() => Boolean(currentChannel.value), (available) => { if (available && cha
 const transport = createChannelTransport({ configure: (channel) => user.isLoggedIn ? api('/api/messages/realtime?channel=' + encodeURIComponent(channel), { silent: true }) : Promise.resolve({ enabled: false }), refresh: () => { if (!loading.value && !sending.value && page.value === 1) refresh() }, onState: (state) => { transportState.value = state } })
 watch(() => [channelCode.value, user.user?.id, Boolean(currentChannel.value)], () => { if (channelCode.value && currentChannel.value) transport.start(channelCode.value); else transport.stop() }, { immediate: true })
 watch(text, (value, old) => { if (value.endsWith('@') && value.length > old.length) openMentions() })
-function onVisible() { clock.value = Date.now(); transport.visibilityChanged(); if (document.visibilityState === 'visible' && !channelCode.value) refresh() }
+function onVisible() { cancelHold(); clock.value = Date.now(); transport.visibilityChanged(); if (document.visibilityState === 'visible' && !channelCode.value) refresh() }
+function onScroll() { cancelHold() }
 onMounted(() => {
   if (!channelsLoading.value && !channelRows.value.length) loadChannels()
   ticker = setInterval(() => { if (document.visibilityState === 'visible') clock.value = Date.now() }, 30000)
   document.addEventListener('visibilitychange', onVisible)
+  document.addEventListener('scroll', onScroll, true)
+  window.addEventListener('blur', cancelHold)
 })
-onUnmounted(() => { disposed = true; generation++; machineGeneration++; channelGeneration++; transport.stop(); cancelHold(); clearInterval(ticker); const previews = new Set([attachment.value?.preview, ...[...drafts.values()].map((draft) => draft.attachment?.preview)]); for (const url of previews) if (url) URL.revokeObjectURL(url); drafts.clear(); document.removeEventListener('visibilitychange', onVisible) })
+onUnmounted(() => { disposed = true; generation++; machineGeneration++; channelGeneration++; transport.stop(); cancelHold(); clearInterval(ticker); const previews = new Set([attachment.value?.preview, ...[...drafts.values()].map((draft) => draft.attachment?.preview)]); for (const url of previews) if (url) URL.revokeObjectURL(url); drafts.clear(); document.removeEventListener('visibilitychange', onVisible); document.removeEventListener('scroll', onScroll, true); window.removeEventListener('blur', cancelHold) })
 </script>
 
 <style scoped>
+.message-avatar{display:grid;place-items:center;flex:none;width:40px;height:40px;margin:-3px;border:0;padding:0;background:none;border-radius:50%;touch-action:pan-y;color:inherit}.message-avatar:disabled{opacity:1}.message-avatar:focus-visible,.msg:focus-visible{outline:2px solid #93c5fd;outline-offset:3px}.msg{touch-action:pan-y;-webkit-touch-callout:none}.report-form{padding:20px 18px max(26px,env(safe-area-inset-bottom));max-height:80vh;overflow:auto}.report-form h3{margin:0 0 10px}.report-form>p{font-size:12px;color:var(--text-dim);line-height:1.7}.report-form label{display:grid;gap:8px;font-size:13px;margin:16px 0}.report-form select{width:100%;min-height:42px;padding:8px 12px;border:1px solid var(--border);border-radius:12px;color:var(--text);background:var(--bg-card)}.report-form blockquote{max-height:100px;overflow:auto}.report-form .van-button{margin-top:16px;border-radius:20px}
 .channel-title{display:flex;align-items:center;gap:8px;border:0;background:none;color:inherit;font-size:16px}.channel-title:disabled{opacity:1}.channel-title img,.small-channel-icon{width:28px;height:28px;border-radius:8px;object-fit:cover}.small-channel-icon{display:grid;place-items:center;background:#1e3a5f;color:#93c5fd;font-size:12px}.chat-topline{display:flex;justify-content:space-between;padding:10px 14px;font-size:11px;color:var(--text-dim)}.mentions-me{border-color:#f59e0b;box-shadow:inset 3px 0 #f59e0b}.mention-channel-badge{display:inline-block;color:#c2410c;background:#ffedd5;border-radius:10px;padding:2px 6px;font-size:10px}.announcement-tag{font-size:10px;color:#c4b5fd;background:#3b2d65;border-radius:5px;padding:2px 5px}.composer-plus,.composer-at{border:0;background:none;color:#93c5fd;font-size:27px;cursor:pointer;padding:6px}.composer-at{font-size:20px}.attachment-draft{display:flex;align-items:center;gap:10px;padding:8px;font-size:12px}.attachment-draft img,.attachment-draft video{max-height:95px;max-width:140px;border-radius:8px}.attachment-draft button{border:0;background:none;color:#fca5a5}.mention-draft{display:flex;gap:7px;padding:5px;flex-wrap:wrap}.mention-draft button{border:0;border-radius:12px;background:#1e3a5f;color:#93c5fd;font-size:11px;padding:4px 8px}.mention-picker{padding:15px 20px 30px;max-height:65vh;overflow:auto}.mention-picker>p{font-size:12px;color:var(--text-dim)}.mention-picker>button{display:flex;align-items:center;justify-content:space-between;width:100%;padding:14px 0;border:0;border-bottom:1px solid var(--border);background:none;color:var(--text);text-align:left}.mention-picker>button span{font-size:11px;color:#f59e0b}.announcement-option{display:flex;align-items:center;gap:6px;font-size:11px;color:#c4b5fd;padding:6px}
 .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .messages{min-height:100vh;padding-bottom:calc(65px + env(safe-area-inset-bottom))}.messages.has-channel{padding-bottom:calc(170px + env(safe-area-inset-bottom))}.text-button,.msg-actions button,.reply-target button{border:0;background:transparent;color:#93c5fd;font-size:12px;padding:7px;cursor:pointer}.text-button:disabled,.msg-actions button:disabled{opacity:.5;cursor:default}.channel-directory{padding:20px 14px}.channel-directory h1{font-size:20px;margin:0 0 8px}.directory-hint,.directory-footnote{font-size:12px;line-height:1.6;color:var(--text-dim)}.directory-hint{margin-bottom:20px}.directory-footnote{text-align:center;margin-top:20px}.channel-card{width:100%;display:flex;gap:12px;align-items:center;padding:16px;margin-bottom:10px;text-align:left;color:var(--text);border:1px solid var(--border);cursor:pointer}.channel-icon{display:grid;place-items:center;width:42px;height:42px;flex:none;border-radius:12px;background:rgba(59,130,246,.13);color:#93c5fd;font-weight:600}.channel-description{display:grid;gap:7px;flex:1;min-width:0}.channel-description strong{font-size:15px;overflow-wrap:anywhere}.channel-description small{display:inline-block;margin-left:7px;font-size:10px;font-weight:400;color:#86efac}.channel-description>span{font-size:12px;color:var(--text-dim)}.channel-chevron{font-size:25px;color:var(--text-dim)}.channel-intro{margin:14px;font-size:12px;line-height:1.6;color:var(--text-dim)}.filters{display:flex;gap:10px;align-items:end;padding:12px}.filters label{display:grid;gap:5px;min-width:0;flex:1;font-size:12px;color:var(--text-dim)}.filters select{min-height:38px;width:100%;padding:5px 10px;color:var(--text);background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color-scheme:dark}.queue-box{margin:0 12px 14px}.hint{padding:0 14px;font-size:12px;color:var(--text-dim)}.error{margin:12px;color:#fca5a5;font-size:12px;overflow-wrap:anywhere}.empty{text-align:center;padding:30px 12px;font-size:13px}.msg-list{display:grid;gap:10px;padding:0 12px}.msg{display:flex;gap:10px;padding:12px}.msg.pinned{border-color:rgba(251,191,36,.3)}.msg-body{min-width:0;flex:1}.msg-head{display:flex;flex-wrap:wrap;gap:5px 7px;align-items:center;font-size:12px}.msg-head b{max-width:100%;overflow-wrap:anywhere}.author-building{font-size:10px;color:var(--text-dim);overflow-wrap:anywhere}.msg-meta{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:5px;font-size:10px;color:var(--text-dim)}.machine-tag,.pinned-tag{color:#fbbf24}.pinned-tag{padding:1px 5px;border-radius:4px;background:rgba(245,158,11,.1)}.msg-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.6;margin:7px 0}blockquote{margin:8px 0;padding:6px 10px;border-left:2px solid var(--border);color:var(--text-dim);font-size:11px;overflow-wrap:anywhere}.msg-actions{display:flex;flex-wrap:wrap;gap:14px}.msg-actions button{min-height:32px;padding:4px 0}.composer-wrap{position:fixed;left:0;right:0;bottom:calc(50px + env(safe-area-inset-bottom));z-index:20;border-top:1px solid var(--border);background:var(--bg-elev)}.composer{display:flex;gap:8px;padding:10px 12px;align-items:end}.composer-input{flex:1;padding:0;max-height:130px;overflow-y:auto}.reply-target{display:flex;justify-content:space-between;gap:8px;padding:6px 14px;color:var(--text-dim);font-size:11px;overflow-wrap:anywhere}.reply-target button{padding:0 4px;font-size:18px;flex:none}.mute-notice,.send-error{margin:0;padding:8px 14px;font-size:11px;line-height:1.5;overflow-wrap:anywhere}.mute-notice{color:#fcd34d;background:rgba(245,158,11,.08)}.send-error{color:#fca5a5}.mute-reason{padding:0 12px 12px}.channel-card:focus-visible,.msg-actions button:focus-visible,.text-button:focus-visible{outline:2px solid #93c5fd;outline-offset:2px}
+</style>
+<style scoped>
+.composer{align-items:center;max-width:640px;margin:0 auto;gap:10px}.composer-input{padding:10px 14px;border:1px solid var(--border);border-radius:22px;background:var(--bg-card);min-height:42px;display:flex;align-items:center}.composer-input :deep(.van-field__control){line-height:22px;min-height:22px}.composer-input:after{border:0}.composer>.van-button{height:40px;min-width:58px;border-radius:20px;flex:none}.composer-plus{display:grid;place-items:center;width:36px;height:42px;padding:0;flex:none}.composer-wrap{padding-top:2px}.composer-input :deep(textarea){max-height:110px}
 </style>

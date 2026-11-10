@@ -300,6 +300,7 @@ export function hasToken() {
 
 // 退出登录：解绑设备密钥 + 清本地状态
 export async function logout() {
+  try { localStorage.setItem('ws_ding_auto_disabled', '1') } catch { /* Explicit logout still completes without storage. */ }
   sessionRevision++
   const device = getDeviceSecret()
   try {
@@ -324,7 +325,7 @@ export async function logout() {
 }
 
 // 发起钉钉登录：拿授权地址并跳转
-export async function startDingLogin() {
+export async function startDingLogin({ canRedirect = () => true } = {}) {
   const device = getDeviceSecret()
   let res
   try { res = await fetch(BASE + '/api/dingtalk/login-url?device=' + encodeURIComponent(device), {signal: AbortSignal.timeout(10000), cache:'no-store'}) } catch { throw apiError('登录请求网络异常，请重试', { code: 'network_error' }) }
@@ -332,7 +333,9 @@ export async function startDingLogin() {
   if (!res.ok || !data?.url) {
     throw apiError(data?.error?.message || '无法发起钉钉登录（应用未配置？）', { status: res.status, eventId: res.headers.get('X-Event-ID') || data?.error?.eventId, code: data?.error?.code || 'invalid_response' })
   }
+  if (!canRedirect()) return false
   window.location.href = data.url
+  return true
 }
 
 export { BASE }

@@ -596,6 +596,7 @@ export function createDingTalk(env = {}) {
     if (!conversationId) return { ok: false, err: 'missing_conversation' }
     const token = await getToken()
     if (!token) return { ok: false, err: 'token' }
+    const rich = text && typeof text === 'object' && typeof text.markdown === 'string'
     try {
       const r = await boundedFetch('https://api.dingtalk.com/v1.0/robot/groupMessages/send', {
         method: 'POST',
@@ -607,8 +608,8 @@ export function createDingTalk(env = {}) {
           robotCode: env.DINGTALK_ROBOT_CODE || env.DINGTALK_APP_KEY,
           openConversationId: conversationId,
           // msgParam 必须是**字符串化的 JSON**（钉钉要求），不是对象
-          msgParam: JSON.stringify({ content: String(text) }),
-          msgKey: 'sampleText',
+          msgParam: JSON.stringify(rich ? { title: String(text.title || '等衣').slice(0, 32), text: text.markdown } : { content: typeof text === 'object' ? String(text?.text || '') : String(text) }),
+          msgKey: rich ? 'sampleMarkdown' : 'sampleText',
           atUserIds: Array.isArray(atUserIds) ? atUserIds.slice(0, 20) : [],
           atAll: Boolean(isAtAll),
         }),
