@@ -15,6 +15,40 @@ const COOLDOWN = 10 * 60000
 const json = (data, status = 200, headers = {}) => baseJson(data, status, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers })
 const validId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value)
 const photoKey = (id) => 'inspections:photo:' + id
+export const INSPECTION_REASONS = Object.freeze({ offline: '离线', damaged: '损坏', power_off: '断电', abnormal_occupation: '异常占用', other: '其他异常' })
+const validNote = (value) => typeof value === 'string' && value.length <= 500 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)
+
+// Only trusted machine labels and controlled reason labels leave the inspection
+// screen. Notes/photos stay in the scoped management API, never in group text.
+export function buildInspectionGroupNotice(inspection) {
+  const label = (value) => String(value || '').replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 48)
+  const escape = (value) => label(value).replace(/[\\`*_{}\[\]()<>#+.!|~-]/g, '\\$&')
+  const issues = inspection.type === 'round' ? inspection.issues || [] : [{ machineName: inspection.machineName, reasons: ['other'] }]
+  const building = escape(inspection.buildingName || '本楼')
+  const shown = issues.slice(0, 10)
+  const reasonText = (item) => (item.reasons || []).map((reason) => INSPECTION_REASONS[reason]).filter(Boolean).join('、') || '待现场确认'
+  const rows = shown.map((item) => `${escape(item.machineName)}：${reasonText(item)}`)
+  const more = issues.length > shown.length ? `另有 ${issues.length - shown.length} 台异常，请在巡检记录查看完整情况。` : ''
+  const title = '楼栋巡检异常'
+  const text = [`【WeShirt · ${title}】`, `${label(inspection.buildingName || '本楼')}：${issues.length} 台机器有异常`, ...shown.map((item) => `${label(item.machineName)}：${reasonText(item)}`), more, '管理人员已现场上报，请前往洗衣房确认。巡检照片和备注请在管理页面查看。'].filter(Boolean).join('\n')
+  return { title, text, markdown: [`### ${title}`, `**${building} · ${issues.length} 台异常**`, ...rows.map((row) => `- ${row}`), more, '管理人员已现场上报，请前往洗衣房确认。', '巡检照片和备注请在管理页面查看。'].filter(Boolean).join('\n\n') }
+}
+
+function inspectionSubmission(body) {
+  const round = Object.hasOwn(body, 'issues') || Object.hasOwn(body, 'dormBuilding')
+  if (!round) {
+    if (Object.keys(body).some((key) => !['machineId', 'status', 'note', 'photoData', 'dorm'].includes(key)) || !validId(body.machineId) || !['normal', 'issue'].includes(body.status) || !validNote(body.note) || !body.note.trim()) throw new Error('请填写有效机器、巡检结果和 1–500 字备注或异常说明')
+    return { type: 'single', machineId: body.machineId, status: body.status, note: body.note.trim() }
+  }
+  if (Object.keys(body).some((key) => !['dormBuilding', 'issues', 'note', 'photoData'].includes(key)) || typeof body.dormBuilding !== 'string' || !Array.isArray(body.issues) || body.issues.length > 200 || !validNote(body.note ?? '')) throw new Error('请选择巡检楼栋，并仅填写异常机器；备注最多 500 字')
+  const ids = new Set()
+  const issues = body.issues.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some((key) => !['machineId', 'reasons', 'note'].includes(key)) || !validId(item.machineId) || ids.has(item.machineId) || !Array.isArray(item.reasons) || item.reasons.length < 1 || item.reasons.length > 5 || item.reasons.some((reason) => !Object.hasOwn(INSPECTION_REASONS, reason)) || new Set(item.reasons).size !== item.reasons.length || !validNote(item.note ?? '')) throw new Error('每台异常机器须选择 1–5 项具体情况，机器不能重复，备注最多 500 字')
+    ids.add(item.machineId)
+    return { machineId: item.machineId, reasons: [...item.reasons].sort(), note: (item.note || '').trim() }
+  })
+  return { type: 'round', dormBuilding: body.dormBuilding, issues, note: (body.note || '').trim(), status: issues.length ? 'issue' : 'normal' }
+}
 
 async function readBody(c) {
   const advertised = Number(c.req.header('content-length'))
@@ -184,7 +218,7 @@ export function registerInspectionRoutes(app, { store, env = {}, authenticate, g
     await store.put(historyKey, alive)
     return alive
   }
-  const publicInspection = (entry) => ({ id: entry.id, machineId: entry.machineId, machineName: entry.machineName, dormBuilding: entry.dormBuilding, status: entry.status, note: entry.note, at: entry.at, inspector: entry.inspector, hasPhoto: true, notification: entry.notification })
+  const publicInspection = (entry) => ({ id: entry.id, type: entry.type || 'single', machineId: entry.machineId ?? null, machineName: entry.machineName, dormBuilding: entry.dormBuilding, buildingName: entry.buildingName, inspectedMachineCount: entry.inspectedMachineCount ?? 1, issueCount: entry.issueCount ?? (entry.status === 'issue' ? 1 : 0), issues: entry.issues || (entry.status === 'issue' ? [{ machineId: entry.machineId, machineName: entry.machineName, reasons: ['other'], note: entry.note }] : []), status: entry.status, note: entry.note, at: entry.at, inspector: entry.inspector, hasPhoto: entry.hasPhoto !== false, notification: entry.notification })
 
   app.get('/api/user/identity', async (c) => {
     const actor = await access(c)
@@ -206,7 +240,7 @@ export function registerInspectionRoutes(app, { store, env = {}, authenticate, g
     const scoped = (code) => allowedCodes.has(code) && (!dorm || code === dorm) && canInspect(actor.identity, code)
     const rows = await withOperationLock(store, historyKey, () => cleanHistory())
     c.header('Cache-Control', 'no-store')
-    return json({ identity: actor.identity, buildings: allowed, machines: machines.filter((m) => scoped(m.dormBuilding)), inspections: rows.filter((entry) => scoped(entry.dormBuilding)).slice().reverse().map(publicInspection) })
+    return json({ identity: actor.identity, buildings: allowed, machines: machines.filter((m) => scoped(m.dormBuilding)), reasons: INSPECTION_REASONS, inspections: rows.filter((entry) => scoped(entry.dormBuilding)).slice().reverse().map(publicInspection) })
   })
 
   app.get('/api/inspections/:id/photo', async (c) => {
@@ -231,37 +265,50 @@ export function registerInspectionRoutes(app, { store, env = {}, authenticate, g
     if (!canModerate(actor.identity) && actor.identity.role !== 'volunteer') return apiErr('forbidden', '没有巡检权限', 403)
     const { body, error } = await readBody(c)
     if (error) return error
-    if (Object.keys(body).some((key) => !['machineId', 'status', 'note', 'photoData', 'dorm'].includes(key)) || !validId(body.machineId) || !['normal', 'issue'].includes(body.status) || typeof body.note !== 'string' || !body.note.trim() || body.note.length > 500 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body.note)) return apiErr('bad_param', '请填写有效机器、巡检结果和 1–500 字备注或异常说明')
-    let photo
-    try { photo = validateInspectionPhoto(body.photoData) } catch (e) { return apiErr('bad_param', e.message) }
+    let submission, photo = null
+    try {
+      submission = inspectionSubmission(body)
+      if (submission.type === 'single' || body.photoData !== undefined && body.photoData !== '') photo = validateInspectionPhoto(body.photoData)
+    } catch (e) { return apiErr('bad_param', e.message) }
     // Share the site mutation lock only during the short authorization/save phase.
     // An upload that started before revocation must not retain its old scope.
     const prepared = await withOperationLock(store, 'site-config', () => withOperationLock(store, historyKey, async () => {
       const currentActor = await access(c)
       const { machines, buildings } = await context(c)
-      const machine = machines.find((m) => m.id === body.machineId)
-      if (!machine) return apiErr('not_found', '机器已下线，请刷新', 404)
-      if (!normalizeDormBuilding(machine.dormBuilding, buildings)) return apiErr('unavailable', '机器楼栋尚未确认，不能提交巡检', 409)
-      if (!currentActor || !canInspect(currentActor.identity, machine.dormBuilding)) return apiErr('forbidden', '未获该机器所在楼栋的巡检权限', 403)
+      const machine = submission.type === 'single' ? machines.find((m) => m.id === submission.machineId) : null
+      if (submission.type === 'single' && !machine) return apiErr('not_found', '机器已下线，请刷新', 404)
+      const dormBuilding = submission.type === 'round' ? submission.dormBuilding : machine.dormBuilding
+      if (!normalizeDormBuilding(dormBuilding, buildings)) return apiErr('unavailable', '巡检楼栋未启用或机器归属尚未确认，请刷新', 409)
+      if (!currentActor || !canInspect(currentActor.identity, dormBuilding)) return apiErr('forbidden', '未获该楼栋的巡检权限', 403)
+      const buildingMachines = machines.filter((item) => item.dormBuilding === dormBuilding)
+      if (submission.type === 'round' && !buildingMachines.length) return apiErr('unavailable', '本楼暂无机器，不能提交全检', 409)
+      const issues = submission.type === 'round' ? submission.issues.map((issue) => {
+        const target = buildingMachines.find((item) => item.id === issue.machineId)
+        return target ? { ...issue, machineName: target.name } : null
+      }) : submission.status === 'issue' ? [{ machineId: machine.id, machineName: machine.name, reasons: ['other'], note: submission.note }] : []
+      if (issues.some((issue) => !issue)) return apiErr('bad_param', '异常机器不属于本次巡检楼栋或已下线，请刷新', 400)
       const list = await cleanHistory()
       const clock = now()
-      const entry = { id: 'inspection_' + crypto.randomUUID(), machineId: machine.id, machineName: machine.name, dormBuilding: machine.dormBuilding, status: body.status, note: body.note.trim(), at: new Date(clock).toISOString(), inspector: { userId: currentActor.user?.id || null, nick: String(currentActor.user?.nick || '最高管理员').slice(0, 30) }, notification: { status: body.status === 'normal' ? 'not_required' : 'unconfigured' } }
+      const buildingName = buildings.find((item) => item.code === dormBuilding)?.name || dormBuilding
+      const entry = { id: 'inspection_' + crypto.randomUUID(), type: submission.type, machineId: machine?.id ?? null, machineName: machine?.name || `${buildingName}全检`, dormBuilding, buildingName, inspectedMachineCount: submission.type === 'round' ? buildingMachines.length : 1, issueCount: issues.length, issues, status: submission.status, note: submission.note, hasPhoto: Boolean(photo), at: new Date(clock).toISOString(), inspector: { userId: currentActor.user?.id || null, nick: String(currentActor.user?.nick || '总管').slice(0, 30) }, notification: { status: submission.status === 'normal' ? 'not_required' : 'unconfigured' } }
       let delivery = null
-      if (body.status === 'issue') {
+      if (submission.status === 'issue') {
         const groups = await getBuildingGroups(store, buildings)
-        const conversationId = groups[machine.dormBuilding]
-        const cooldownKey = 'inspections:cooldown:' + bid + ':' + machine.id
-        const previous = Number(await store.get(cooldownKey, 0))
+        const conversationId = groups[dormBuilding]
+        const cooldownKey = 'inspections:cooldown:' + bid + ':' + (machine?.id || 'round:' + dormBuilding)
+        const saved = await store.get(cooldownKey, 0)
+        const signature = JSON.stringify(issues.map((issue) => [issue.machineId, issue.reasons]).sort((a, b) => a[0].localeCompare(b[0])))
+        const previous = submission.type === 'round' ? saved?.signature === signature ? Number(saved.at) : 0 : Number(saved)
         if (conversationId && typeof notifyBuilding === 'function') {
           if (previous > 0 && clock - previous < COOLDOWN) entry.notification = { status: 'cooldown', retryAt: new Date(previous + COOLDOWN).toISOString() }
           else {
-            await store.put(cooldownKey, clock)
+            await store.put(cooldownKey, submission.type === 'round' ? { at: clock, signature } : clock)
             entry.notification = { status: 'sending', at: entry.at }
-            delivery = { buildingCode: machine.dormBuilding, conversationId, inspection: publicInspection(entry) }
+            delivery = { buildingCode: dormBuilding, conversationId, inspection: publicInspection(entry) }
           }
         }
       }
-      await store.put(photoKey(entry.id), photo)
+      if (photo) await store.put(photoKey(entry.id), photo)
       await store.put(historyKey, [...list, entry])
       await cleanHistory(0)
       return { entry, delivery }

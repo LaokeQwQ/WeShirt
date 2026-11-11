@@ -18,6 +18,7 @@
     </div>
 
     <div v-if="error" class="d-status">{{ sourceBoard ? '刷新失败，暂时显示上次数据' : '暂时无法读取机器数据' }} <button @click="load(true)">重试</button></div>
+    <div v-else-if="sourceBoard?.freshness?.syncFailed" class="d-status">最近一次同步未成功，显示上次有效数据 <button @click="load(true)">重新检查</button></div>
     <div v-else-if="staleMinutes >= 3" class="d-status">数据已 {{ staleMinutes }} 分钟未更新，请以现场为准</div>
     <div v-else-if="sourceBoard && !floors.length" class="d-status">这栋楼暂无机器数据</div>
     <!-- 各楼层机器大色块 -->
@@ -43,13 +44,13 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { filterDormFloors } from '../boardQuery'
+import { filterDormFloors, boardAgeMinutes } from '../boardQuery'
 import { useDormBoard } from '../useDormBoard'
 import { useDormStore } from '../stores/dorm'
 
 const dorm = useDormStore()
 const { sourceBoard, error, now, load } = useDormBoard(dorm)
-const staleMinutes = computed(() => Math.max(0, Math.floor((now.value - new Date(sourceBoard.value?.updatedAt || now.value).getTime()) / 60000)))
+const staleMinutes = computed(() => boardAgeMinutes(sourceBoard.value, now.value))
 const floors = computed(() => filterDormFloors(sourceBoard.value, dorm.code, dorm.buildings).map((f) => ({ ...f, machines: (f.machines || []).map((m) => {
   const end = m.finishAt ? new Date(m.finishAt).getTime() : NaN
   return Number.isFinite(end) ? { ...m, leftMin: Math.max(0, Math.ceil((end - now.value) / 60000)) } : m

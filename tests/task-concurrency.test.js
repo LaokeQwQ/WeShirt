@@ -3,6 +3,11 @@ import assert from 'node:assert/strict'
 import { createApp, runSync } from '../server/app.js'
 import { createMemoryStore } from '../packages/core/store.js'
 import { issueToken } from '../packages/core/auth.js'
+import { createSocialService } from '../packages/core/social.js'
+import { buildEncryptedResponse } from '../packages/core/dingtalk.js'
+import { retainedTasks } from '../packages/core/task-retention.js'
+import { pruneUserTasks } from '../server/task-retention.js'
+import { withTaskMutation } from '../server/task-mutation-lock.js'
 
 const SECRET = 'task-concurrency-jwt-test-secret'
 async function fixture(t) {
@@ -131,4 +136,98 @@ test('runSync慢通知不挡任务写入，最终短锁合并不覆盖新任务�
   assert.equal(latest.length, 1)
   assert.equal(latest[0].machineId, 'two')
   assert.equal(latest.some((task) => task.id === old.data.task.id), false)
+})
+
+test('代取完成晚读必须在任务锁内重读，不覆盖新登记或复活刚清理的336小时记录', async (t) => {
+  const { store, memory, register, env } = await fixture(t)
+  const original = await register('one')
+  const expired = { id: 'expired', machineId: 'three', startAt: new Date(Date.now() - 337 * 3600000).toISOString(), endAt: new Date(Date.now() - 336 * 3600000).toISOString() }
+  await store.put('tasks:a', [expired, original.data.task])
+  await store.put('social:pickup:fixture', { id: 'fixture', ownerId: 'a', friendId: 'b', taskId: original.data.task.id, state: 'accepted' })
+  const service = createSocialService({ store, env, notify: async () => ({ ok: true }) })
+  const baseGet = store.get
+  let entered, release, held = false
+  const started = new Promise(resolve => { entered = resolve }), gate = new Promise(resolve => { release = resolve })
+  store.get = async (key, fallback) => {
+    if (key === 'tasks:a' && !held) { held = true; const value = structuredClone(await memory.get(key, fallback)); entered(); await gate; return value }
+    return baseGet(key, fallback)
+  }
+  const completing = service.respondPickup('b', 'fixture', 'complete')
+  await started
+  let saved
+  try { await pruneUserTasks(store, 'b1', 'a'); saved = await register('two') }
+  finally { release() }
+  assert.equal((await completing).changed, true)
+  const tasks = await store.get('tasks:a')
+  assert.equal(tasks.some(task => task.id === 'expired'), false)
+  assert.equal(tasks.find(task => task.id === original.data.task.id).done, true)
+  assert.equal(tasks.some(task => task.id === saved.data.task.id), true)
+  assert.equal((await store.get('occupancy:b1')).two.taskId, saved.data.task.id)
+})
+
+test('代取通知慢时释放任务与社交锁；已过336小时的任务不能再完成', async (t) => {
+  const { store, register, env } = await fixture(t)
+  const original = await register('one')
+  await store.put('social:pickup:fixture', { id: 'fixture', ownerId: 'a', friendId: 'b', taskId: original.data.task.id, state: 'accepted' })
+  let entered, release
+  const started = new Promise(resolve => { entered = resolve }), gate = new Promise(resolve => { release = resolve })
+  const service = createSocialService({ store, env, notify: async () => { entered(); await gate; return { ok: true } } })
+  const completing = service.respondPickup('b', 'fixture', 'complete')
+  await started
+  let timeout
+  try {
+    const result = await Promise.race([register('two'), new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('slow pickup notification held task lock')), 500) })])
+    assert.equal(result.status, 200)
+  } finally { clearTimeout(timeout); release() }
+  await completing
+  const expired = { id: 'expired', machineId: 'three', startAt: new Date(Date.now() - 337 * 3600000).toISOString(), endAt: new Date(Date.now() - 336 * 3600000).toISOString() }
+  await store.put('tasks:a', [expired])
+  await store.put('social:pickup:expired', { id: 'expired', ownerId: 'a', friendId: 'b', taskId: 'expired', state: 'accepted' })
+  await assert.rejects(service.respondPickup('b', 'expired', 'complete'), { code: 'not_found', status: 404 })
+  assert.equal((await store.get('tasks:a'))[0].done, undefined)
+})
+
+test('验签钉钉已取命令与登记/清理共用任务锁，保留新登记且不改变72小时归档记录', async (t) => {
+  const { store, memory, env } = await fixture(t)
+  const clock = Date.now(), stamp = hours => new Date(clock - hours * 3600000).toISOString()
+  const current = { id: 'current', machineId: 'one', startAt: stamp(2), endAt: stamp(1), done: false }
+  const history = { id: 'history', machineId: 'two', startAt: stamp(74), endAt: stamp(73), done: false }
+  const expired = { id: 'expired', machineId: 'three', startAt: stamp(337), endAt: stamp(336), done: false }
+  const fresh = { id: 'fresh', machineId: 'three', startAt: stamp(0), endAt: new Date(clock + 3600000).toISOString(), done: false }
+  await store.put('tasks:a', [expired, history, current])
+  await store.put('occupancy:b1', { one: { userId: 'a', taskId: 'current' }, three: { userId: 'a', taskId: 'fresh' } })
+  await store.put('userByDing:synthetic-staff', 'a')
+  const aesKey = btoa('x'.repeat(32)).replace(/=+$/, ''), token = 'synthetic-callback-token'
+  const signed = await buildEncryptedResponse({ plainText: JSON.stringify({ msgtype: 'text', text: { content: '已取' }, senderStaffId: 'synthetic-staff', conversationType: '1' }), aesKey, ownerKey: '', token, timestamp: String(Date.now()), nonce: 'task-lock-regression' })
+  const app = createApp({ store, env: { ...env, DINGTALK_AES_KEY: aesKey, DINGTALK_TOKEN: token } })
+  let entered, release, userRead, taskReads = 0
+  const started = new Promise(resolve => { entered = resolve }), gate = new Promise(resolve => { release = resolve }), callbackReady = new Promise(resolve => { userRead = resolve })
+  const baseGet = store.get
+  store.get = async (key, fallback) => {
+    if (key === 'tasks:a') taskReads++
+    const result = await baseGet(key, fallback)
+    if (key === 'user:a') userRead()
+    return result
+  }
+  const writing = withTaskMutation(store, 'b1', async () => {
+    const original = await store.get('tasks:a'); entered(); await gate
+    await store.put('tasks:a', [...retainedTasks(original), fresh])
+  })
+  await started
+  const callback = app.request('/api/dingtalk/callback?' + new URLSearchParams({ msg_signature: signed.msg_signature, timestamp: signed.timeStamp, nonce: signed.nonce }), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ encrypt: signed.encrypt }) })
+  try {
+    await callbackReady
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(taskReads, 1, 'callback cannot read stale tasks outside the held registration lock')
+  } finally { release() }
+  await writing
+  assert.equal((await callback).status, 200)
+  const tasks = await memory.get('tasks:a')
+  assert.equal(tasks.some(task => task.id === 'expired'), false)
+  assert.equal(tasks.find(task => task.id === 'current').done, true)
+  assert.equal(tasks.find(task => task.id === 'history').done, false)
+  assert.equal(tasks.find(task => task.id === 'fresh').done, false)
+  const occupancy = await memory.get('occupancy:b1')
+  assert.equal(occupancy.one, undefined)
+  assert.equal(occupancy.three.taskId, 'fresh')
 })

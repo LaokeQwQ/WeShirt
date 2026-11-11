@@ -15,6 +15,7 @@ export function useDormBoard(dorm) {
     const code = dorm.code
     if (!code || disposed) return
     if (pending.has(code)) return pending.get(code)
+    refreshing.value = true
     const job = (async () => {
       try {
         const data = await loadBoard({ dorm: code, force })
@@ -38,10 +39,11 @@ export function useDormBoard(dorm) {
   }
   function onVisibility() {
     stop()
-    if (!document.hidden) { now.value = Date.now(); load(); clock = setInterval(() => { now.value = Date.now() }, 1000); schedule() }
+    if (!document.hidden) { now.value = Date.now(); load(true); clock = setInterval(() => { now.value = Date.now() }, 1000); schedule() }
   }
+  function onResume() { if (!document.hidden) { load(true); schedule() } }
   watch(() => dorm.code, () => { sourceBoard.value = null; error.value = ''; failures = 0; load() }, { immediate: true })
-  onMounted(() => { onVisibility(); document.addEventListener('visibilitychange', onVisibility) })
-  onUnmounted(() => { disposed = true; stop(); document.removeEventListener('visibilitychange', onVisibility) })
+  onMounted(() => { onVisibility(); document.addEventListener('visibilitychange', onVisibility); window.addEventListener('online', onResume); window.addEventListener('pageshow', onResume) })
+  onUnmounted(() => { disposed = true; stop(); document.removeEventListener('visibilitychange', onVisibility); window.removeEventListener('online', onResume); window.removeEventListener('pageshow', onResume) })
   return { sourceBoard, error, refreshing, now, load }
 }

@@ -51,8 +51,8 @@
     <!-- 任务列表 -->
     <div class="tasks">
       <div v-if="loading && !tasks.length" class="empty text-dim">加载中…</div>
-      <div v-else-if="!tasks.length" class="empty text-dim">还没有登记，洗衣服时记得点一下～</div>
-      <div v-for="t in tasks" :key="t.id" class="task-item card" :class="{ done: t.done }">
+      <div v-else-if="!activeTasks.length" class="empty text-dim">暂无近期洗衣登记</div>
+      <div v-for="t in activeTasks" :key="t.id" class="task-item card" :class="{ done: t.done }">
         <div class="ti-main">
           <div class="ti-name">{{ t.machineName || t.machineId }}</div>
           <div class="ti-time" :class="stateClass(t)">{{ stateTextOf(t) }}</div>
@@ -75,6 +75,15 @@
     </div>
 
     <section v-if="pickups.length" class="tasks"><h2>朋友请我代取</h2><div v-for="p in pickups" :key="p.id" class="task-item card"><div><strong>{{ p.task?.machineName || p.task?.machineId }}</strong><p>{{ p.task?.leftMin > 0 ? `剩余 ${p.task.leftMin} 分钟` : '计时已结束，请现场确认' }}</p></div><van-button size="small" to="/social">处理</van-button></div></section>
+    <section class="tasks history-tasks" aria-labelledby="history-title">
+      <h2 id="history-title">历史洗衣记录</h2>
+      <p class="form-tip">登记满 72 小时自动归档，满 336 小时自动清除。</p>
+      <p v-if="!taskHistory.length" class="form-tip">暂无历史记录</p>
+      <article v-for="t in taskHistory" :key="t.id" class="task-item card history-item">
+        <div class="ti-main"><strong>{{ t.machineName || t.machineId }}</strong><p class="task-details">{{ formatTime(t.createdAt || t.startAt) }} · {{ t.done ? '已取衣' : '已归档 · 取衣情况未确认' }}</p><p v-if="t.note" class="task-note">备注：{{ t.note }}</p><p v-if="t.kind !== 'dryer'" class="task-details">消毒液：{{ t.useDisinfectant ? '使用' : '未使用' }} · 自清洁：{{ t.selfCleaned ? '已记录' : '未记录' }}</p></div>
+        <van-button size="small" type="danger" plain @click="remove(t)">删除</van-button>
+      </article>
+    </section>
     <!-- 机器选择弹窗 -->
     <van-popup v-model:show="showPicker" position="bottom" round>
       <van-picker
@@ -99,6 +108,7 @@ import { loadBoard, filterDormFloors } from '../boardQuery'
 import TaskDetailsForm from '../components/TaskDetailsForm.vue'
 import { WASHER_PROGRAMS, machineRemainingMinutes, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } from '../taskRegistration'
 import '../userActionConfirm.css'
+import { splitTaskHistory } from '../../../packages/core/task-retention.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -125,6 +135,10 @@ const takingId = ref('')
 let timer = null
 let clockTimer = null
 const now = ref(Date.now())
+const partition = computed(() => splitTaskHistory(tasks.value, now.value))
+const activeTasks = computed(() => partition.value.activeTasks)
+const taskHistory = computed(() => partition.value.history)
+function formatTime(value) { const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN') : '登记时间未知' }
 let tasksPending = null
 let machinesPending = null
 let disposed = false
@@ -196,7 +210,7 @@ function reminderSource(task) {
 }
 
 function canTake(t) {
-  if (t.done || t.takeState === 'taken') return false
+  if (t.archived || t.done || t.takeState === 'taken') return false
   const end = t.endAt ? new Date(t.endAt).getTime() : NaN
   return t.takeState === 'pending' || (Number.isFinite(end) && end <= now.value)
 }
@@ -275,6 +289,8 @@ async function take(t) {
     if (result.status !== 'submitted') return
     t.done = true
     t.takenAt = new Date().toISOString()
+    const source = tasks.value.find(item => item.id === t.id)
+    if (source) Object.assign(source, { done: true, takenAt: t.takenAt, takeState: 'taken' })
     showToast('已标记完成')
   } catch (e) {
     showToast(e?.message || '操作失败')
@@ -371,7 +387,7 @@ onUnmounted(() => {
 
 <style scoped>
 .task-note{font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0;color:var(--text)}.task-details{font-size:11px;color:var(--text-dim);margin-top:5px}
-.task-links{display:flex;gap:10px;padding:12px 12px 0}.ti-ops{flex-wrap:wrap;max-width:185px}.tasks h2{font-size:18px}
+.task-links{display:flex;gap:10px;padding:12px 12px 0}.ti-ops{flex-wrap:wrap;max-width:185px}.tasks h2{font-size:18px}.history-tasks{margin-top:28px;padding-bottom:28px}.history-tasks h2,.history-tasks p{margin:0}.history-item{align-items:flex-start}
 .task-links .friend-link,.ti-ops .pickup-button{color:#bbf7d0;background:#17352c;border-color:#3f7657}.task-links .assistant-link{color:#bae6fd;background:#123348;border-color:#3c718d}
 .dorm-switch { border: 0; background: transparent; color: var(--primary); cursor: pointer; }
 .form-tip { font-size: 12px; color: var(--text-dim); }
@@ -405,4 +421,5 @@ onUnmounted(() => {
 .state-idle { color: #22c55e; }
 .state-faulty { color: #ef4444; }
 .ti-ops { display: flex; flex: none; gap: 6px; }
+@media(max-width:480px){.task-item{align-items:stretch;flex-direction:column}.ti-ops{max-width:none;justify-content:flex-end}.history-item>.van-button{align-self:flex-end}.quick{flex-wrap:wrap}.quick .van-button{flex:1 0 40%;min-height:44px}}
 </style>

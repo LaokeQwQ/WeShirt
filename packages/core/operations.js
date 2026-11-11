@@ -151,7 +151,7 @@ export function buildQueueSchedule(queue, machineList, now = Date.now()) {
   })
 }
 
-export async function runOperations({ store, board, env = {}, now = Date.now(), broadcast, broadcastTargets, notify }) {
+export async function runOperations({ store, board, env = {}, now = Date.now(), broadcast, broadcastTargets, notify, beforeNotify }) {
   const bid = env.BUILDING_ID || board?.buildingId || 'b1'
   return withOperationLock(store, `run:${bid}`, async () => {
     const previous = await store.get(`operations:health:${bid}`, {})
@@ -169,6 +169,8 @@ export async function runOperations({ store, board, env = {}, now = Date.now(), 
       return { ...machine, suspectedUncollected }
     })
     projected = applyRegisteredAvailability(projected, { occupancy, tasksByUser, now })
+    // The projected state is ready now; external delivery must not delay its commit.
+    if (typeof beforeNotify === 'function') await beforeNotify(projected)
     const alerts = []
     for (const m of machines(projected)) {
       if (m.health?.confirmedFault && !previous.machines?.[String(m.id)]?.confirmedFault) {

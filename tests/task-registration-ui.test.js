@@ -176,16 +176,39 @@ test('真实Task选中可信6分钟运行机默认跟随余时，POST不标成�
   assert.equal(bodies[0].program, undefined)
 })
 
-test('现场异常巡检取消二次确认时不会上报，照片和备注都保留', async () => {
+test('整轮异常巡检取消二次确认时不会上报，异常机器、照片和备注都保留', async () => {
   let calls = 0
-  const panel = evaluate(sources.Inspection, { createUserActionConfirmation, ref, computed, watch, onMounted() {}, onUnmounted() {}, useDormStore: () => ({ code: 'example' }), showToast() {}, showImagePreview() {}, showConfirmDialog: async () => { throw 'cancel' }, api: async () => { calls++; return {} } }, '({ data, building, machineId, status, note, photoData, saving, submit })')
+  const panel = evaluate(sources.Inspection, { createUserActionConfirmation, ref, computed, watch, onMounted() {}, onUnmounted() {}, useDormStore: () => ({ code: 'example' }), showToast() {}, showImagePreview() {}, showConfirmDialog: async () => { throw 'cancel' }, api: async () => { calls++; return {} } }, '({ data, building, selections, toggleMachine, note, photoData, saving, submit })')
   panel.data.value = { buildings: [{ code: 'example', name: '示例楼' }], machines: [washer({ dormBuilding: 'example' })] }
   panel.building.value = 'example'
   await nextTick()
-  panel.machineId.value = 'washer'; panel.status.value = 'issue'; panel.note.value = '现场有积水'; panel.photoData.value = 'data:image/jpeg;base64,fixture'
+  panel.toggleMachine('washer', true)
+  panel.selections.value.washer.reasons.push('offline', 'power_off')
+  panel.selections.value.washer.note = '机器插头松动'
+  panel.note.value = '现场有积水'; panel.photoData.value = 'data:image/jpeg;base64,fixture'
   await panel.submit()
   assert.equal(calls, 0)
+  assert.deepEqual(panel.selections.value.washer.reasons, ['offline', 'power_off'])
+  assert.equal(panel.selections.value.washer.note, '机器插头松动')
   assert.equal(panel.note.value, '现场有积水')
   assert.equal(panel.photoData.value, 'data:image/jpeg;base64,fixture')
   assert.equal(panel.saving.value, false)
+})
+
+test('整轮巡检无图无备注正常提交仅发送空异常集合；勾机器未选原因则不允许提交', async () => {
+  const bodies = [], summaries = []
+  const listing = { buildings: [{ code: 'example', name: '示例楼' }], machines: [washer({ dormBuilding: 'example' })], inspections: [] }
+  const panel = evaluate(sources.Inspection, { createUserActionConfirmation, ref, computed, watch, onMounted() {}, onUnmounted() {}, useDormStore: () => ({ code: 'example' }), showToast() {}, showImagePreview() {}, showConfirmDialog: async (summary) => { summaries.push(summary) }, api: async (_path, options) => { if (!options) return listing; bodies.push(options.body); return { inspection: { notification: { status: 'not_required' } } } } }, '({ data, building, selections, toggleMachine, submit })')
+  panel.data.value = listing; panel.building.value = 'example'
+  await nextTick()
+  panel.toggleMachine('washer', true)
+  await panel.submit()
+  assert.equal(summaries.length, 0)
+  assert.equal(bodies.length, 0)
+  panel.toggleMachine('washer', false)
+  await panel.submit()
+  assert.equal(summaries.length, 1)
+  assert.match(summaries[0].message, /记录本轮全部正常/)
+  assert.match(summaries[0].message, /未上传（选填）/)
+  assert.deepEqual(bodies, [{ dormBuilding: 'example', issues: [], note: '' }])
 })

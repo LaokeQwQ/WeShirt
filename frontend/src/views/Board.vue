@@ -37,6 +37,7 @@
       </div>
     </van-pull-refresh>
     <div v-if="error && board" class="board-tip">刷新失败，显示上次数据：{{ error }}</div>
+    <div v-else-if="sourceBoard?.freshness?.syncFailed" class="board-tip">最近一次同步未成功，显示上次有效数据 <button @click="load(true)">重新检查</button></div>
     <div v-else-if="staleMinutes >= 3" class="board-tip">数据已 {{ staleMinutes }} 分钟未更新，请以现场为准</div>
   </div>
 </template>
@@ -49,7 +50,7 @@ import { useUserStore } from '../stores/user'
 import { useRouter } from 'vue-router'
 import { showToast } from 'vant'
 import { useDormStore } from '../stores/dorm'
-import { filterDormFloors } from '../boardQuery'
+import { filterDormFloors, boardAgeMinutes } from '../boardQuery'
 import { useDormBoard } from '../useDormBoard'
 import FloorTabs from '../components/FloorTabs.vue'
 import MachineCard from '../components/MachineCard.vue'
@@ -71,7 +72,7 @@ const board = computed(() => {
   const all = floors.value.flatMap((f) => f.machines || [])
   return { ...sourceBoard.value, total: all.length, idle: all.filter((m) => m.state === 'idle').length, occupied: all.filter((m) => ['occupied', 'abnormal'].includes(m.state)).length, faulty: all.filter((m) => m.state === 'faulty').length }
 })
-const staleMinutes = computed(() => Math.max(0, Math.floor((now.value - new Date(sourceBoard.value?.updatedAt || now.value).getTime()) / 60000)))
+const staleMinutes = computed(() => boardAgeMinutes(sourceBoard.value, now.value))
 const activeFloor = ref('all')
 const kind = ref('')
 const kinds = [{value:'',text:'全部类型'},{value:'washer',text:'洗衣机'},{value:'dryer',text:'烘干机'}]

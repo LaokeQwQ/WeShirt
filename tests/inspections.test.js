@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Hono } from 'hono'
 import { createMemoryStore } from '../packages/core/store.js'
-import { registerInspectionRoutes, validateInspectionPhoto } from '../server/inspections.js'
+import { registerInspectionRoutes, validateInspectionPhoto, buildInspectionGroupNotice } from '../server/inspections.js'
 
 const AT = Date.parse('2026-11-10T00:00:00Z')
 const PHOTO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8kQAAAAASUVORK5CYII='
@@ -80,6 +80,109 @@ test('照片不混入历史响应，专用接口只对当前授权楼栋开放�
   const roles = await store.get('meta:siteAdmins')
   await store.put('meta:siteAdmins', roles.filter((entry) => entry.userId !== 'gui'))
   assert.equal((await call(url, { user: 'gui' })).status, 403, 'revocation also blocks old report photos')
+})
+
+test('整轮巡检允许无照片无备注；未勾异常即覆盖本楼全部机器为正常记录', async () => {
+  const { call, store, board, sent } = await fixture()
+  board.floors[0].machines.push({ id: 'm-second', name: '本楼第二台', dormBuilding: 'guiyuan', state: 'occupied' })
+  const before = structuredClone(board)
+  const result = await call('/api/inspections', { user: 'gui', method: 'POST', body: { dormBuilding: 'guiyuan', issues: [] } })
+  assert.equal(result.status, 200)
+  const entry = result.data.inspection
+  assert.equal(entry.type, 'round')
+  assert.equal(entry.status, 'normal')
+  assert.equal(entry.inspectedMachineCount, 2)
+  assert.equal(entry.issueCount, 0)
+  assert.deepEqual(entry.issues, [])
+  assert.equal(entry.machineId, null)
+  assert.equal(entry.hasPhoto, false)
+  assert.equal(entry.notification.status, 'not_required')
+  assert.equal(sent.length, 0)
+  assert.deepEqual(board, before, 'normal inspection is a human record, never a false idle device snapshot')
+  assert.deepEqual(await store.list('inspections:photo:'), [])
+  assert.equal((await call('/api/inspections/' + entry.id + '/photo', { user: 'gui' })).status, 404)
+  const history = await call('/api/inspections', { user: 'gui' })
+  assert.equal(history.data.inspections[0].hasPhoto, false)
+  assert.equal(history.data.reasons.power_off, '断电')
+})
+
+test('全检异常多选原因，只汇总一次本楼通知；照片与备注不出现在通知正文', async () => {
+  const { call, store, board, sent, reboot } = await fixture()
+  board.floors[0].machines.push({ id: 'm-second', name: '本楼第二台', dormBuilding: 'guiyuan', state: 'idle' })
+  await store.put('operations:buildingGroups', { guiyuan: 'cid:round' })
+  const body = { dormBuilding: 'guiyuan', issues: [{ machineId: 'm-gui', reasons: ['damaged', 'power_off'], note: '私人维修说明' }, { machineId: 'm-second', reasons: ['abnormal_occupation'] }], note: '不要发群的私人全轮备注', photoData: PHOTO }
+  const result = await call('/api/inspections', { user: 'gui', method: 'POST', body })
+  assert.equal(result.status, 200)
+  const entry = result.data.inspection
+  assert.equal(entry.issueCount, 2)
+  assert.equal(entry.inspectedMachineCount, 2)
+  assert.equal(entry.hasPhoto, true)
+  assert.equal(entry.issues[0].machineName, '人工绑定设备')
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].buildingCode, 'guiyuan')
+  const notice = buildInspectionGroupNotice(sent[0].inspection)
+  assert.match(notice.markdown, /2 台异常/)
+  assert.match(notice.markdown, /人工绑定设备：损坏、断电/)
+  assert.match(notice.text, /本楼第二台：异常占用/)
+  assert.equal(JSON.stringify(notice).includes('私人'), false)
+  assert.equal(JSON.stringify(notice).includes('base64'), false)
+  assert.equal(JSON.stringify(result.data).includes('base64'), false)
+  const photo = await call('/api/inspections/' + entry.id + '/photo', { user: 'gui' })
+  assert.equal(photo.data.photoData, PHOTO)
+  reboot()
+  const retry = await call('/api/inspections', { user: 'gui', method: 'POST', body: { ...body, issues: body.issues.slice().reverse(), photoData: '' } })
+  assert.equal(retry.data.inspection.notification.status, 'cooldown', 'machine/reason order cannot bypass persistent duplicate suppression')
+  assert.equal(retry.data.inspection.hasPhoto, false)
+  assert.equal(sent.length, 1)
+})
+
+test('全检拒绝跨楼、失效机器、无原因、重复机器和非法原因；异常说明可省略', async () => {
+  const { call, store } = await fixture()
+  const submit = (body, user = 'gui') => call('/api/inspections', { user, method: 'POST', body })
+  const base = { dormBuilding: 'guiyuan', issues: [{ machineId: 'm-gui', reasons: ['offline'] }] }
+  for (const issues of [null, {}, [{ machineId: 'm-gui', reasons: [] }], [{ machineId: 'm-gui', reasons: ['invented'] }], [{ machineId: 'm-gui', reasons: ['offline', 'offline'] }], [base.issues[0], base.issues[0]], [{ machineId: 'm-gui', reasons: ['offline'], status: 'normal' }], [{ machineId: 'm-gui', reasons: ['offline'], note: '\u0001' }], [{ machineId: 'm-liu', reasons: ['offline'] }], [{ machineId: 'missing', reasons: ['damaged'] }]]) assert.equal((await submit({ ...base, issues })).status, 400)
+  assert.equal((await submit({ ...base, note: 123 })).status, 400)
+  assert.equal((await submit({ ...base, status: 'normal' })).status, 400)
+  assert.equal((await submit({ dormBuilding: 'liuyuan', issues: [] })).status, 403)
+  assert.equal((await submit(base, 'user')).status, 403)
+  assert.equal(await store.get('inspections:b1', null), null)
+  assert.equal((await submit(base)).status, 200)
+})
+
+test('全检楼栋禁用或无机器时不接受全部正常，旧历史与新照片布尔值兼容', async () => {
+  const { call, store } = await fixture()
+  await store.put('meta:site', { buildings: [{ code: 'guiyuan', name: '桂园', enabled: false }, { code: 'empty', name: '空楼' }] })
+  assert.equal((await call('/api/inspections', { user: 'super', method: 'POST', body: { dormBuilding: 'guiyuan', issues: [] } })).status, 409)
+  assert.equal((await call('/api/inspections', { user: 'super', method: 'POST', body: { dormBuilding: 'empty', issues: [] } })).status, 409)
+  await store.put('meta:site', { buildings: [{ code: 'guiyuan', name: '桂园' }] })
+  await store.put('inspections:b1', [{ id: 'legacy_record', machineId: 'm-gui', machineName: '旧机器', dormBuilding: 'guiyuan', status: 'issue', note: '旧情况', at: new Date(AT).toISOString() }])
+  const old = (await call('/api/inspections', { user: 'gui' })).data.inspections[0]
+  assert.equal(old.type, 'single')
+  assert.equal(old.hasPhoto, true)
+  assert.equal(old.issueCount, 1)
+  assert.deepEqual(old.issues[0].reasons, ['other'])
+})
+
+test('整轮全检并发保留每次记录，相同异常只尝试一次群通知', async () => {
+  const { call, store, sent } = await fixture()
+  await store.put('operations:buildingGroups', { guiyuan: 'cid:concurrent-round' })
+  const replies = await Promise.all(Array.from({ length: 6 }, () => call('/api/inspections', { user: 'gui', method: 'POST', body: { dormBuilding: 'guiyuan', issues: [{ machineId: 'm-gui', reasons: ['offline'] }] } })))
+  assert.equal(replies.every(reply => reply.status === 200), true)
+  assert.equal(sent.length, 1)
+  const stored = await store.get('inspections:b1')
+  assert.equal(stored.length, 6)
+  assert.equal(stored.filter(row => row.notification.status === 'sent').length, 1)
+  assert.equal(stored.filter(row => row.notification.status === 'cooldown').length, 5)
+})
+
+test('群异常摘要控制长度并转义机器标签，完整情况保留巡检记录', () => {
+  const notice = buildInspectionGroupNotice({ type: 'round', buildingName: '本楼', issues: Array.from({ length: 200 }, (_, index) => ({ machineName: `机器${index}[链接](https://invalid.example)\n` + '长'.repeat(1000), reasons: ['offline', 'damaged', 'power_off', 'abnormal_occupation', 'other'], note: '不应群发' })) })
+  assert.match(notice.markdown, /200 台异常/)
+  assert.match(notice.markdown, /另有 190 台异常/)
+  assert.equal(notice.markdown.includes('[链接](https://'), false)
+  assert.equal(notice.markdown.includes('不应群发'), false)
+  assert.ok(Buffer.byteLength(notice.markdown) < 4096)
+  assert.ok(Buffer.byteLength(notice.text) < 4096)
 })
 
 test('照片验证拒绝SVG、MIME伪造、超500KB与无备注；请求体流式上限700KB', async () => {

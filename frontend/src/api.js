@@ -255,7 +255,8 @@ async function performApi(path, opts, timing) {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
-      signal: ctrl ? ctrl.signal : undefined
+      signal: ctrl ? ctrl.signal : undefined,
+      cache: 'no-store'
     })
     timing.status = res.status
   } catch (e) {

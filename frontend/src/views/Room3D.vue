@@ -1,5 +1,5 @@
 <template>
-  <div class="room-page">
+  <div ref="pageRef" class="room-page" :class="{ 'compact-viewport': compactViewport, 'detail-open': selected || facility }" :style="roomViewportStyle">
     <van-nav-bar>
       <template #title><button class="dorm-switch" @click="dorm.showPicker = true">{{ dorm.name || '选择住宿楼' }} · 3D 洗衣房 ▾</button></template>
       <template #right>
@@ -29,6 +29,7 @@
       <div v-if="staleMin !== null" class="stale-chip">
         数据是 {{ staleMin }} 分钟前的，可能不是最新
       </div>
+      <div v-if="dataError" class="room-refresh-error" role="status"><span>{{ dataError }}</span><button type="button" @click="retrySync">重试刷新</button></div>
 
       <div class="orientation">站在门口向里看 · 右手边 D1·1–4 · 左手边 开水机·D2·5–7</div>
       <label class="quality-control">画质
@@ -42,261 +43,80 @@
       </div>
     </div>
 
-    <!-- 详情稳定停靠，拖动画面时操作位置保持不变；手机使用底部卡片。 -->
+    <!-- 标题与主要操作固定，只有内容滚动；避免小屏上关闭、登记按钮被长表单挤走。 -->
     <transition name="sheet">
-      <div
-        v-if="selected || facility"
-        class="machine-panel"
-        role="region"
-        aria-label="机位详情"
-      >
-        <template v-if="facility === 'boiler'">
-          <div class="mp-head">
-            <div class="mp-no boiler-no">水</div>
-            <div class="mp-meta">
-              <div class="mp-name">开水机</div>
-              <div class="mp-state">使用须知</div>
-            </div>
-            <van-icon name="cross" class="mp-close" @click="clearSelection" />
-          </div>
-          <ul class="mp-rules">
-            <li v-for="line in FACILITY_RULES.boiler" :key="line">{{ line }}</li>
-          </ul>
-        </template>
-        <template v-else-if="facility === 'washer' || facility === 'dryer'">
-          <div class="mp-head">
-            <div class="mp-no boiler-no">须</div>
-            <div class="mp-meta">
-              <div class="mp-name">{{ facility === 'washer' ? '洗衣机' : '烘干机' }}使用须知</div>
-              <div class="mp-state">放大查看</div>
-            </div>
-            <van-icon name="cross" class="mp-close" @click="clearSelection" />
-          </div>
-          <ul class="mp-rules">
-            <li v-for="line in FACILITY_RULES[facility]" :key="line">{{ line }}</li>
-          </ul>
-        </template>
-        <template v-else>
-        <div class="mp-head mp-machine-head">
-          <div class="mp-no" :style="{ borderColor: cssColor(selected.state) }">{{ selected.no }}</div>
+      <section v-if="selected || facility" class="machine-panel" role="region" aria-label="机位详情" @keydown.esc.stop="clearSelection">
+        <header class="mp-head" :class="{ 'mp-machine-head': selected }">
+          <div class="mp-no" :class="{ 'boiler-no': facility }" :style="selected ? { borderColor: cssColor(selected.state) } : {}">{{ selected?.no || (facility === 'boiler' ? '水' : '须') }}</div>
           <div class="mp-meta">
-            <div class="mp-name" :title="selected.rawName || selected.name">{{ selected.rawName || selected.name }}</div>
-            <div class="mp-state" :style="{ color: cssColor(selected.state) }">
-              {{ selected.availabilityLabel || stateText(selected.state) }}
-              <template v-if="selected.state === 'occupied' && selected.leftMin != null">
-                · {{ selected.leftMin > 0 ? (selected.estimated ? '估算剩余 ' : '剩余 ') + selected.leftMin + ' 分钟' : '结束时间待确认' }}
+            <h2 class="mp-name" :title="selected ? selected.rawName || selected.name : ''">{{ selected ? selected.rawName || selected.name : facility === 'boiler' ? '开水机' : `${facility === 'washer' ? '洗衣机' : '烘干机'}使用须知` }}</h2>
+            <div class="mp-state" :style="selected ? { color: cssColor(selected.state) } : {}">
+              <template v-if="selected">{{ selected.availabilityLabel || stateText(selected.state) }}<template v-if="selected.state === 'occupied' && selected.leftMin != null"> · {{ selected.leftMin > 0 ? (selected.estimated ? '估算剩余 ' : '剩余 ') + selected.leftMin + ' 分钟' : '结束时间待确认' }}</template></template>
+              <template v-else>使用须知</template>
+            </div>
+          </div>
+          <button type="button" class="mp-close" aria-label="关闭机位详情" @click="clearSelection"><van-icon name="cross" /></button>
+        </header>
+        <div v-if="selected" class="mp-machine-nav">
+          <button type="button" class="mp-nav" aria-label="上一台机器" @click="switchMachine(-1)">‹</button>
+          <div class="mp-tabs" role="tablist" aria-label="机位操作">
+            <button id="mp-register-tab" type="button" role="tab" :aria-selected="panelTab === 'register'" aria-controls="mp-register" @click="panelTab = 'register'">登记提醒</button>
+            <button id="mp-comments-tab" type="button" role="tab" :aria-selected="panelTab === 'comments'" aria-controls="mp-comments" @click="panelTab = 'comments'">本机留言<span v-if="machineMessages.length"> {{ machineMessages.length }}</span></button>
+          </div>
+          <button type="button" class="mp-nav" aria-label="下一台机器" @click="switchMachine(1)">›</button>
+        </div>
+        <div class="mp-body" :key="selected?.no || facility">
+          <ul v-if="facility" class="mp-rules"><li v-for="line in FACILITY_RULES[facility]" :key="line">{{ line }}</li></ul>
+          <template v-else-if="selected">
+            <div v-show="panelTab === 'register'" id="mp-register" role="tabpanel" aria-labelledby="mp-register-tab">
+              <p v-if="selected.state === 'unknown'" class="mp-hint-dim">此机位暂未匹配设备，请先确认现场情况。</p>
+              <p v-else-if="!selected.registrationPending && ['occupied','abnormal'].includes(selected.state)" class="mp-hint-dim">运行中，程序未提供</p>
+              <div v-if="selectedOccupier" class="mp-occupier"><Avatar :name="selectedOccupier.nick || '匿名'" :src="selectedOccupier.avatarUrl" :size="28" class="mp-occ-avatar" /><span class="mp-occ-text">{{ selectedOccupier.nick }} 于 {{ selectedOccupier.startMin }} 分钟前登记洗衣</span></div>
+              <CareRecord :record="selectedOccupier?.care" />
+              <van-button v-if="selected.state === 'abnormal'" block type="warning" class="mp-urge" :loading="urgeSending" @click="urgeOccupier">催 TA 一下（钉钉提醒）</van-button>
+              <div v-if="proofFor && proofFor === selected.machineId" class="mp-proof">
+                <div class="mp-proof-title">查看手机号前，请先上传现场凭证</div>
+                <label class="mp-proof-line"><input v-model="proofConfirm" type="checkbox" />我确认洗衣机<b>周围没有空桶</b>可以放衣物</label>
+                <div class="mp-proof-photos"><button type="button" class="mp-proof-btn" @click="pickProof('occ')">{{ proofOcc ? '已添加衣物占用照' : '拍衣物占用' }}</button><button type="button" class="mp-proof-btn" @click="pickProof('around')">{{ proofAround ? '已添加机器周围照' : '拍机器周围' }}</button></div>
+                <input ref="occInput" type="file" accept="image/*" class="mp-file" @change="onProofPick($event, 'occ')" /><input ref="aroundInput" type="file" accept="image/*" class="mp-file" @change="onProofPick($event, 'around')" />
+                <div v-if="proofSize" class="mp-proof-size">{{ proofSize }}</div>
+                <van-button block type="danger" :loading="proofSending" :disabled="!proofConfirm || !proofOcc || !proofAround" @click="submitProof">提交凭证并查看手机号</van-button>
+                <div class="mp-proof-tip">会记录你的账号与两张照片，并通知管理员，仅用于纠纷追溯。</div>
+              </div>
+              <template v-if="selected.kind === 'dryer' || selected.state !== 'faulty'">
+                <div class="mp-modes" role="group" aria-label="提醒方式">
+                  <button v-if="machineLeftMin" type="button" :class="{ on: registrationMode === 'machine' }" :aria-pressed="registrationMode === 'machine'" :disabled="submitting" @click="registrationMode = 'machine'">按机器剩余 {{ machineLeftMin }} 分钟</button>
+                  <button type="button" :class="{ on: registrationMode === 'duration' }" :aria-pressed="registrationMode === 'duration'" :disabled="submitting" @click="registrationMode = 'duration'">自己选{{ selected.kind === 'dryer' ? '时长' : '程序' }}</button>
+                </div>
+                <p v-if="selected.estimated" class="mp-hint-dim">剩余时间为系统估算；计时到点不表示机器已结束，请现场确认。</p>
+                <template v-if="selected.kind === 'dryer'">
+                  <div v-if="stuckMinFor(selected.machineId) >= 8" class="mp-dry-warn">剩余 {{ selected.leftMin }} 分钟，已 {{ stuckMinFor(selected.machineId) }} 分钟未变化。可能跳闸，请现场确认。</div>
+                  <div v-if="registrationMode === 'duration'" class="mp-dry-row"><label for="mp-dry-minutes" class="mp-dry-label">烘干时长</label><div class="mp-dry-stepper"><button type="button" class="mp-step" aria-label="减少10分钟" :disabled="submitting" @click="stepDry(-10)">−</button><input id="mp-dry-minutes" v-model.number="dryMinutes" type="number" inputmode="numeric" class="mp-dry-input" min="10" max="180" step="1" :disabled="submitting" @blur="clampDry" /><button type="button" class="mp-step" aria-label="增加10分钟" :disabled="submitting" @click="stepDry(10)">＋</button></div><span class="mp-dry-unit">分钟（10–180）</span></div>
+                </template>
+                <template v-else-if="registrationMode === 'duration'">
+                  <div class="mp-durations" role="group" aria-label="洗衣程序"><button v-for="d in DURATIONS" :key="d.minutes" type="button" class="mp-dur" :class="{ on: chosenMinutes === d.minutes && programLabel === d.label }" :aria-pressed="chosenMinutes === d.minutes && programLabel === d.label" :disabled="submitting" @click="selectWashProgram(d)">{{ d.label }}</button></div>
+                  <label class="mp-custom-duration">自定义时长<input v-model.number="chosenMinutes" type="number" min="1" max="180" step="1" inputmode="numeric" :disabled="submitting" @input="clearWashProgram" /><span>分钟（1–180）</span></label>
+                </template>
+                <TaskDetailsForm v-model:note="noteText" v-model:use-disinfectant="useDisinfectant" v-model:self-cleaned="selfCleaned" :show-disinfectant="selected.kind !== 'dryer'" :disabled="submitting" />
+                <p v-if="selected.kind !== 'dryer'" class="mp-reminder-preview">预计 {{ previewEndText }} 提醒；设备确认结束后再通知取衣。</p>
               </template>
+              <div v-if="selected.state === 'faulty'" class="mp-fault"><p class="mp-fault-hint">这台显示故障，请先现场确认。确认修好后可恢复正常。</p><van-button block type="primary" :loading="recovering" @click="recoverFault">现场已修好，恢复正常</van-button></div>
+              <p v-if="selectedQueueCount" class="mp-queue-n">已有 {{ selectedQueueCount }} 人排队<template v-if="myQueueEntry?.position"> · 你第 {{ myQueueEntry.position }} 位</template></p>
             </div>
-            <div v-if="!selected.registrationPending && ['occupied','abnormal'].includes(selected.state)" class="mp-hint-dim">运行中，程序未提供</div>
-            <!-- 对不上设备时说清楚原因：多半是后台机位绑了别的楼栋/已下线的机器 -->
-            <div v-if="selected.state === 'unknown'" class="mp-dev">
-              没对上设备（后台给这个机位绑的机器不在看板里）
+            <div v-show="panelTab === 'comments'" id="mp-comments" role="tabpanel" aria-labelledby="mp-comments-tab" class="mp-msgs">
+              <p v-if="!machineMessages.length" class="mp-msg-empty">还没有留言，可以留下这台机器的使用情况。</p>
+              <article v-for="msg in machineMessages" :key="msg.id" class="mp-msg"><span class="mp-msg-nick">{{ msg.nick }}</span><span class="mp-msg-text">{{ msg.text }}</span></article>
             </div>
-          </div>
-          <button class="mp-close" aria-label="关闭机位详情" @click="clearSelection"><van-icon name="cross" /></button>
-          <div class="mp-machine-nav">
-            <button class="mp-nav" aria-label="上一台机器" @click="switchMachine(-1)">‹ <span>上一台</span></button>
-            <span>机位 {{ selected.no }} · {{ selected.kind === 'dryer' ? '烘干机' : '洗衣机' }}</span>
-            <button class="mp-nav" aria-label="下一台机器" @click="switchMachine(1)"><span>下一台</span> ›</button>
-          </div>
+          </template>
         </div>
-
-        <!-- 占用者：头像 + 昵称（打码）+ 几分钟前登记 -->
-        <div v-if="selectedOccupier" class="mp-occupier">
-          <Avatar
-            :name="selectedOccupier.nick || '匿名'"
-            :src="selectedOccupier.avatarUrl"
-            :size="26"
-            class="mp-occ-avatar"
-          />
-          <span class="mp-occ-text">{{ selectedOccupier.nick }} 于 {{ selectedOccupier.startMin }} 分钟前登记洗衣</span>
-        </div>
-        <CareRecord :record="selectedOccupier?.care" />
-        <!-- 异常占用：可以催 TA（后端发钉钉 DING，5 分钟/台限频） -->
-        <van-button
-          v-if="selected.state === 'abnormal'"
-          block
-          size="small"
-          type="warning"
-          class="mp-urge"
-          :loading="urgeSending"
-          @click="urgeOccupier"
-        >
-          催 TA 一下（钉钉提醒）
-        </van-button>
-
-        <!-- 查看手机号前必须先交凭证：确认周围无空桶 + 两张照片，后台留档并通知管理员 -->
-        <div v-if="proofFor && proofFor === selected.machineId" class="mp-proof">
-          <div class="mp-proof-title">要看对方手机号，需先上传凭证</div>
-          <label class="mp-proof-line">
-            <input v-model="proofConfirm" type="checkbox" />
-            我确认洗衣机<b>周围没有空桶</b>可以放衣物
-          </label>
-          <div class="mp-proof-photos">
-            <button type="button" class="mp-proof-btn" @click="pickProof('occ')">
-              {{ proofOcc ? '✅ 衣物占用照' : '📷 拍衣物占用' }}
-            </button>
-            <button type="button" class="mp-proof-btn" @click="pickProof('around')">
-              {{ proofAround ? '✅ 机器周围照' : '📷 拍机器周围' }}
-            </button>
-          </div>
-          <input ref="occInput" type="file" accept="image/*" class="mp-file" @change="onProofPick($event, 'occ')" />
-          <input ref="aroundInput" type="file" accept="image/*" class="mp-file" @change="onProofPick($event, 'around')" />
-          <div v-if="proofSize" class="mp-proof-size">{{ proofSize }}</div>
-          <van-button
-            block
-            size="small"
-            type="danger"
-            :loading="proofSending"
-            :disabled="!proofConfirm || !proofOcc || !proofAround"
-            @click="submitProof"
-          >
-            提交凭证并查看手机号
-          </van-button>
-          <div class="mp-proof-tip">提交会记录你的账号 ID 与两张照片，并通知管理员，仅用于纠纷追溯。</div>
-        </div>
-
-        <div class="mp-modes">
-          <button v-if="machineLeftMin" type="button" :class="{on:registrationMode==='machine'}" :disabled="submitting" @click="registrationMode='machine'">按机器剩余 {{ machineLeftMin }} 分钟提醒</button>
-          <button type="button" :class="{on:registrationMode==='duration'}" :disabled="submitting" @click="registrationMode='duration'">自己选{{ selected.kind === 'dryer' ? '时长' : '程序' }}</button>
-        </div>
-        <p v-if="selected.estimated" class="mp-hint-dim">剩余时间为系统估算，请自己确认程序；估算到点不表示机器已结束。</p>
-        <!-- 烘干机专用面板：烘干时间（带加减） + 登记烘干 -->
-        <!-- 故障/未知也允许登记：面板状态可能滞后，前端还有二次确认，
-             强行拦住反而把人挡在门外。登记后按「使用中」算。 -->
-        <template v-if="selected.kind === 'dryer'">
-          <div v-if="stuckMinFor(selected.machineId) >= 8" class="mp-dry-warn">
-            <div>剩余 {{ selected.leftMin }} 分钟</div>
-            <div>已经 {{ stuckMinFor(selected.machineId) }} 分钟时间未变化</div>
-            <div class="mp-dry-warn-sub">可能跳闸，注意确认</div>
-          </div>
-          <div class="mp-dry">
-            <div v-if="registrationMode === 'duration'" class="mp-dry-row">
-              <span class="mp-dry-label">烘干时间</span>
-              <button type="button" class="mp-step" @click="stepDry(-10)">−</button>
-              <input
-                v-model.number="dryMinutes"
-                type="number"
-                inputmode="numeric"
-                class="mp-dry-input"
-                min="10"
-                max="180"
-                step="1"
-                @blur="clampDry"
-              />
-              <button type="button" class="mp-step" @click="stepDry(10)">＋</button>
-              <span class="mp-dry-unit">分钟</span>
-            </div>
-            <TaskDetailsForm v-model:note="noteText" :show-disinfectant="false" :disabled="submitting" />
-            <van-button
-              block
-              type="primary"
-              size="small"
-              :loading="submitting"
-              :disabled="!selected.machineId"
-              @click="quickStartDryer"
-            >
-              登记烘干（{{ registrationMode === 'machine' ? '按机器余时' : dryMinutes + ' 分钟' }}）
-            </van-button>
-          </div>
-          <div class="mp-queue">
-            <van-button
-              size="small"
-              :type="myQueueEntry ? 'warning' : 'default'"
-              :loading="queueSubmitting"
-              :disabled="!selected.machineId"
-              @click="toggleQueue"
-            >
-              {{ myQueueEntry ? '取消排队' : '排队等这台' }}
-            </van-button>
-            <span v-if="selectedQueueCount" class="mp-queue-n">
-              排 {{ selectedQueueCount }} 人<template v-if="myQueueEntry && myQueueEntry.position">
-                · 你第 {{ myQueueEntry.position }} 位</template
-              >
-            </span>
-          </div>
-        </template>
-
-        <template v-if="selected.state !== 'faulty' && selected.kind !== 'dryer'">
-          <div v-if="registrationMode === 'duration'" class="mp-durations">
-            <button
-              v-for="d in DURATIONS"
-              :key="d.minutes"
-              type="button"
-              class="mp-dur"
-              :class="{ on: chosenMinutes === d.minutes && programLabel === d.label }"
-              :disabled="submitting"
-              @click="selectWashProgram(d)"
-              >{{ d.label }}</button
-            >
-          </div>
-          <label v-if="registrationMode === 'duration'" class="mp-custom-duration">自定义分钟 <input v-model.number="chosenMinutes" type="number" min="1" max="180" step="1" inputmode="numeric" :disabled="submitting" @input="clearWashProgram" />（1–180 整数）</label>
-          <TaskDetailsForm v-model:note="noteText" v-model:use-disinfectant="useDisinfectant" v-model:self-cleaned="selfCleaned" :disabled="submitting" />
-          <van-button
-            block
-            type="primary"
-            size="small"
-            :loading="submitting"
-              :disabled="!selected.machineId"
-            @click="quickStart"
-          >
-            登记洗衣（{{ registrationMode === 'machine' ? '按机器余时' : chosenMinutes + ' 分钟' }}，{{ previewEndText }} 提醒）
-          </van-button>
-          <div class="mp-queue">
-            <van-button
-              size="small"
-              :type="myQueueEntry ? 'warning' : 'default'"
-              :loading="queueSubmitting"
-              :disabled="!selected.machineId"
-              @click="toggleQueue"
-            >
-              {{ myQueueEntry ? '取消排队' : '排队等这台' }}
-            </van-button>
-            <span v-if="selectedQueueCount" class="mp-queue-n">
-              排 {{ selectedQueueCount }} 人<template v-if="myQueueEntry && myQueueEntry.position">
-                · 你第 {{ myQueueEntry.position }} 位</template
-              >
-            </span>
-          </div>
-        </template>
-        <!-- 故障面板必须自己判断，不能挂 v-else：
-             它跟的是「洗衣机 && 非故障」那个 v-if，烘干机永远进不去那个分支，
-             结果正常的烘干机也会多出一块「这台显示故障 / 恢复正常」，
-             误点还会把它标成已修复、之后真故障反而显示空闲。 -->
-        <div v-if="selected.state === 'faulty'" class="mp-fault">
-          <div class="mp-fault-hint">这台显示故障。现场确认修好后，点下面按钮。</div>
-          <van-button
-            block
-            size="small"
-            type="primary"
-            :loading="recovering"
-            @click="recoverFault"
-          >
-            恢复正常
-          </van-button>
-        </div>
-
-        <!-- 这台机器的留言板 -->
-        <div class="mp-msgs">
-          <div class="mp-msgs-title">本机留言</div>
-          <div v-if="!machineMessages.length" class="mp-msg-empty">还没有留言</div>
-          <div v-for="msg in machineMessages" :key="msg.id" class="mp-msg">
-            <span class="mp-msg-nick">{{ msg.nick }}</span>
-            <span class="mp-msg-text">{{ msg.text }}</span>
-          </div>
-          <div class="mp-msg-post">
-            <input
-              v-model="msgText"
-              class="mp-note"
-              maxlength="50"
-              placeholder="给这台机器留言…"
-              @keyup.enter="postMachineMessage"
-            />
-            <span class="mp-send" @click="postMachineMessage">发送</span>
-          </div>
-        </div>
-        </template>
-      </div>
+        <footer v-if="selected" class="mp-actions">
+          <template v-if="panelTab === 'register'">
+            <van-button v-if="selected.kind === 'dryer' || selected.state !== 'faulty'" class="mp-register" type="primary" :loading="submitting" :disabled="!selected.machineId" @click="selected.kind === 'dryer' ? quickStartDryer() : quickStart()">登记{{ selected.kind === 'dryer' ? '烘干' : '洗衣' }}<span class="mp-register-detail">{{ registrationMode === 'machine' ? '按机器余时' : (selected.kind === 'dryer' ? dryMinutes : chosenMinutes) + ' 分钟' }}</span></van-button>
+            <van-button class="mp-queue-button" :type="myQueueEntry ? 'warning' : 'default'" :loading="queueSubmitting" :disabled="!selected.machineId" @click="toggleQueue">{{ myQueueEntry ? '取消排队' : '排队等这台' }}</van-button>
+          </template>
+          <form v-else class="mp-msg-post" @submit.prevent="postMachineMessage"><input v-model="msgText" class="mp-note" maxlength="50" aria-label="本机留言" placeholder="给这台机器留言…" /><button type="submit" class="mp-send" :disabled="!msgText.trim()">发送</button></form>
+        </footer>
+      </section>
     </transition>
     <!-- 昵称/头像默认由钉钉资料生成（钉钉昵称 + 「同学」、钉钉头像），
          不再在开屏弹「起个名字、选个头像」——多一步就会被跳过，
@@ -323,6 +143,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import Avatar from '../components/Avatar.vue'
 import TaskDetailsForm from '../components/TaskDetailsForm.vue'
 import CareRecord from '../components/CareRecord.vue'
+import { availableRoomHeight } from '../room/panelViewport'
 import { loadBoard } from '../boardQuery'
 import { useDormStore } from '../stores/dorm'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
@@ -344,9 +165,31 @@ const dorm = useDormStore()
 const router = useRouter()
 const route = useRoute()
 const stageRef = ref(null)
+const pageRef = ref(null)
+const roomViewportStyle = ref({})
+const panelTab = ref('register')
+const compactViewport = ref(false)
+let viewportFrame = 0
+function updateRoomViewport() {
+  cancelAnimationFrame(viewportFrame)
+  viewportFrame = requestAnimationFrame(() => {
+    if (!pageRef.value || disposed) return
+    const viewport = window.visualViewport
+    const tabbarTop = document.querySelector('.van-tabbar')?.getBoundingClientRect().top
+    const height = availableRoomHeight({ pageTop: pageRef.value.getBoundingClientRect().top, viewportHeight: viewport?.height || window.innerHeight, viewportTop: viewport?.offsetTop || 0, tabbarTop })
+    roomViewportStyle.value = { '--room-available-height': height + 'px' }
+    compactViewport.value = height <= 480
+  })
+}
+async function retrySync() {
+  try { await syncData(true) } catch { /* The refresh wrapper preserves the scene and displays dataError. */ }
+}
+watch(() => [userStore.isLoggedIn, dorm.code], () => nextTick(updateRoomViewport))
 const loading = ref(true)
 const error = ref('')
 const staleMin = ref(null) // 看板数据过期多少分钟（≥3 才提示）
+const dataError = ref('')
+let boardClockOffset = 0
 const clockNow = ref(Date.now())
 let lastBoardUpdated = 0
 let disposed = false
@@ -2697,7 +2540,7 @@ function initThree() {
     performanceWindow = { at: 0, frames: 0, sent: performanceWindow.sent }
     qualityMonitor.reset(performance.now())
     if (document.visibilityState === 'visible' && !contextFailed) {
-      syncData().catch(() => {})
+      syncData(true).catch(e => { dataError.value = e?.message || '刷新失败，保留上次有效状态' })
       lastRafTs = 0
       rafAccMs = 0
       timer?.reset()
@@ -3007,6 +2850,7 @@ function focusMachine(m) {
   selected.value = { no: m.no, kind: m.kind || 'washer', ...m.data }
   // 换机器就重置登记方式：有剩余时间默认「跟着机器」
   resetRegisterMode()
+  panelTab.value = 'register'
   const facing = m.slotFacing
   cameraGoal = {
     pos: new THREE.Vector3(m.group.position.x + facing * 1.55, 0.95, m.group.position.z + 0.12),
@@ -3152,32 +2996,45 @@ function updateQueueVisuals() {
 
 // 拉取看板数据（机器状态 + 留言 + 排队），把 1F 的机器按物理编号映射到场景
 let syncPending = null
+let supplementPending = null
 async function syncData(force = false) {
   if (syncPending) return syncPending
   syncPending = performSyncData(force)
-  try { return await syncPending } finally { syncPending = null }
+  try { return await syncPending }
+  catch (e) { dataError.value = e?.message || '刷新失败，保留上次有效状态'; throw e }
+  finally { syncPending = null }
 }
 
 async function performSyncData(force) {
-  const [data, msgData, queueData, occData] = await Promise.all([
-    loadBoard({ force, dorm: 'guiyuan' }),
-    api('/api/messages?dorm=guiyuan', { auth: false }).catch(() => null),
-    // 排队要带上 token 才能算 mine（这条是不是我的）；但**不能强制登录**，
-    // 看板是公开的，匿名访客也要能看。所以用 optional。
-    api('/api/queue?dorm=guiyuan', { auth: 'optional' }).catch(() => null),
-    api('/api/occupancy?building=b1', { auth: false }).catch(() => null)
-  ])
+  // Slow comments/queue responses must never delay a fresh device snapshot.
+  if (!supplementPending) {
+    const owner = userStore.user?.id || ''
+    supplementPending = Promise.all([
+      owner ? api('/api/messages?dorm=guiyuan', { auth: 'optional', timeout: 6000 }).catch(() => null) : Promise.resolve(null),
+      api('/api/queue?dorm=guiyuan', { auth: 'optional', timeout: 6000 }).catch(() => null),
+      api('/api/occupancy?building=b1', { auth: false, timeout: 6000 }).catch(() => null),
+    ]).then(([msgData, queueData, occData]) => {
+      if (disposed || dorm.code !== 'guiyuan' || (userStore.user?.id || '') !== owner) return
+      if (msgData) allMessages.value = msgData.messages || []
+      if (queueData) queueList.value = queueData.queue || []
+      if (occData) occupancyMap.value = occData.occupancy || {}
+      updateQueueVisuals()
+    }).catch(() => {}).finally(() => { supplementPending = null })
+  }
+  const data = await loadBoard({ force, dorm: 'guiyuan' })
   if (disposed) return
   const slotMap = data.mapping || {}
-  if (msgData) allMessages.value = msgData.messages || []
-  if (queueData) queueList.value = queueData.queue || []
-  if (occData) occupancyMap.value = occData.occupancy || {}
+  dataError.value = data.freshness?.syncFailed ? '最近一次同步未成功，当前显示上次有效状态' : ''
+  const serverNow = Date.parse(data.freshness?.serverNow || '')
+  const receivedAt = data.board.freshness?.receivedAt
+  boardClockOffset = Number.isFinite(serverNow) && Number.isFinite(receivedAt) ? serverNow - receivedAt : 0
+  clockNow.value = Date.now() + boardClockOffset
 
   // 上游抓取失败时服务端会继续返回上一次的看板，界面必须提示「这不是最新」，
   // 否则用户会照着旧状态白跑一趟。
   const updatedMs = data?.board?.updatedAt ? new Date(data.board.updatedAt).getTime() : 0
   lastBoardUpdated = updatedMs
-  const ageMin = updatedMs ? Math.floor((Date.now() - updatedMs) / 60000) : -1
+  const ageMin = updatedMs ? Math.floor((Date.now() + boardClockOffset - updatedMs) / 60000) : -1
   staleMin.value = ageMin >= 3 ? ageMin : null
 
   const floors = data?.board?.floors || []
@@ -3372,7 +3229,7 @@ function startPoll() {
     try {
       await syncData()
     } catch (e) {
-      /* 下一轮再试 */
+      dataError.value = e?.message || '刷新失败，保留上次有效状态'
     } finally {
       pollBusy = false
     }
@@ -3385,6 +3242,10 @@ function stopPoll() {
 }
 
 onMounted(() => {
+  updateRoomViewport()
+  window.addEventListener('resize', updateRoomViewport)
+  window.visualViewport?.addEventListener('resize', updateRoomViewport)
+  window.visualViewport?.addEventListener('scroll', updateRoomViewport)
   if (dorm.code && dorm.code !== 'guiyuan') { router.replace('/list'); return }
   if (dorm.code) { bootstrap(); startPoll() }
 })
@@ -3398,7 +3259,7 @@ watch(() => dorm.code, (code) => {
 
 const countdownTimer = setInterval(() => {
   if (document.visibilityState === 'hidden' || disposed) return
-  clockNow.value = Date.now()
+  clockNow.value = Date.now() + boardClockOffset
   const age = lastBoardUpdated ? Math.floor((clockNow.value - lastBoardUpdated) / 60000) : 0
   staleMin.value = age >= 3 ? age : null
   for (const m of machines) {
@@ -3475,6 +3336,10 @@ function releaseThree() {
 
 onUnmounted(() => {
   disposed = true
+  cancelAnimationFrame(viewportFrame)
+  window.removeEventListener('resize', updateRoomViewport)
+  window.visualViewport?.removeEventListener('resize', updateRoomViewport)
+  window.visualViewport?.removeEventListener('scroll', updateRoomViewport)
   clearInterval(countdownTimer)
   stopPoll()
   releaseThree()
@@ -3485,7 +3350,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.dorm-switch { border: 0; background: transparent; color: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+.dorm-switch { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: transparent; color: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+.room-page :deep(.van-nav-bar__title) { max-width: calc(100% - 132px); margin-left: 12px; margin-right: auto; text-align: left; }
 .nav-actions {
   display: flex;
   align-items: center;
@@ -3521,7 +3387,9 @@ onUnmounted(() => {
   flex-direction: column;
   /* 默认首页：底部有 tabbar（50px） */
   height: calc(100vh - 50px);
-  height: calc(100dvh - 50px);
+  height: var(--room-available-height, calc(100dvh - 50px - env(safe-area-inset-bottom)));
+  min-height: 0;
+  overflow: hidden;
   background: #0a1119;
 }
 
@@ -3542,6 +3410,9 @@ onUnmounted(() => {
 .room-page button:focus-visible, .stage:focus-visible { outline: 2px solid #7dd3fc; outline-offset: -2px; }
 .legend, .orientation { pointer-events: none; }
 .stale-chip { max-width: calc(100% - 165px); }
+.room-refresh-error { position: absolute; z-index: 4; top: 88px; left: 12px; right: 12px; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid #a36a21; border-radius: 10px; background: #322416ed; color: #fcdba0; font-size: 12px; line-height: 1.5; }
+.room-refresh-error span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.room-refresh-error button { flex: none; min-height: 44px; border: 0; border-radius: 8px; padding: 6px 10px; color: #ffe4b2; background: #674515; cursor: pointer; }
 
 .stage-mask {
   position: absolute;
@@ -3644,58 +3515,78 @@ onUnmounted(() => {
   backdrop-filter: blur(6px);
 }
 
-/* 操作面板保持稳定，避免每帧投影造成重排和移动靶。 */
+/* 只有内容区滚动，标题、切换机位与主操作始终可见。 */
 .machine-panel {
-  position: absolute;
-  z-index: 6;
-  background: rgba(10, 17, 27, 0.92);
-  backdrop-filter: blur(8px);
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  border-radius: 14px;
-  padding: 10px 12px 12px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  box-sizing: border-box;
+  position: relative;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
   min-width: 0;
+  min-height: 0;
+  max-height: min(74%, 610px);
+  margin: 0 8px 8px;
+  overflow: hidden;
+  background: #101b29;
+  color: #e8f0fb;
+  border: 1px solid #34465b;
+  border-radius: 18px;
+  box-shadow: 0 8px 28px #0006;
+  box-sizing: border-box;
   overflow-wrap: anywhere;
-  scrollbar-gutter: stable;
+  touch-action: pan-y;
 }
-
-/* 窄屏：底部卡片，好按、不挡场景 */
-@media (max-width: 719px) {
-  .machine-panel {
-    position: relative;
-    flex: 0 1 auto;
-    left: auto;
-    right: auto;
-    bottom: auto;
-    margin: 0 10px 10px;
-    width: auto;
-    max-height: 46dvh;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    touch-action: pan-y;
-  }
+.mp-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 16px;
+  -webkit-overflow-scrolling: touch;
+}
+.mp-head, .mp-machine-nav, .mp-actions { flex: none; }
+.mp-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid #2b3c50;
+  background: #142233;
+}
+.mp-actions :deep(.van-button) { height: auto; min-height: 48px; padding: 8px 12px; font-size: 14px; line-height: 1.4; }
+.mp-actions :deep(.van-button__text) { white-space: normal; overflow-wrap: anywhere; }
+.mp-register { flex: 1; min-width: 0; }
+.mp-register-detail { display: block; margin-top: 2px; opacity: .85; font-size: 11px; }
+.mp-queue-button { flex: 0 1 112px; min-width: 0; }
+.mp-machine-nav { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 10px; padding: 0 14px 10px; border-bottom: 1px solid #2b3c50; }
+.mp-tabs { display: flex; min-width: 0; gap: 2px; background: #0a1420; border-radius: 10px; padding: 3px; }
+.mp-tabs button { flex: 1; min-width: 0; min-height: 44px; border: 0; border-radius: 8px; background: transparent; color: #a5b6ca; font: inherit; font-size: 13px; padding: 5px; cursor: pointer; }
+.mp-tabs button[aria-selected="true"] { color: #e7f5ff; background: #244566; font-weight: 600; }
+.mp-tabs span { font-size: 11px; }
+.mp-nav, button.mp-close { width: 44px; min-width: 44px; height: 44px; border: 1px solid #34506a; background: #142a40; color: #b5defc; border-radius: 10px; cursor: pointer; }
+.mp-body :deep(.van-button) { height: auto; min-height: 44px; padding: 9px 12px; line-height: 1.4; font-size: 13px; }
+.mp-body :deep(.note-field > span) { flex-wrap: wrap; }
+.mp-body :deep(.note-field textarea) { font-size: 16px; }
+.mp-body :deep(.disinfectant-field) { min-height: 52px; }
+.mp-body :deep(.disinfectant-field input) { flex: none; }
+.mp-body :deep(.care-record) { margin-bottom: 12px; }
+.mp-reminder-preview { font-size: 12px; color: #a5b6ca; line-height: 1.6; margin: 12px 0; }
+@media (max-width: 899px), (max-height: 519px) {
   .legend { gap: 8px; }
   .stage.has-panel .orientation { display: none; }
+  .stage.has-panel .legend, .stage.has-panel .quality-control { display: none; }
+  .stage.has-panel .stale-chip { top: 8px; max-width: calc(100% - 24px); }
   .stage.has-panel .machine-shortcuts { bottom: 8px; }
-  .mp-head { position: sticky; top: -10px; background: #101b29; z-index: 1; padding: 8px 0; }
 }
-
-.mp-nav, button.mp-close { min-width: 36px; min-height: 36px; border: 1px solid #34506a; background: #142a40; color: #b5defc; border-radius: 8px; cursor: pointer; }
+/* 宽屏停靠右侧，场景仍可操作。 */
+@media (min-width: 900px) and (min-height: 520px) {
+  .stage.has-panel { margin-right: 400px; }
+  .machine-panel { position: absolute; top: 58px; right: 14px; width: 370px; max-height: calc(100% - 72px); margin: 0; }
+}
 @media (prefers-reduced-motion: reduce) { .sheet-enter-active, .sheet-leave-active { transition: none; } }
-
-/* 宽屏：停靠右侧，不追随相机移动。 */
-@media (min-width: 720px) {
-  .stage.has-panel { margin-right: min(calc(40vw + 32px), 392px); }
-  .machine-panel {
-    top: 102px;
-    right: 16px;
-    width: min(40vw, 360px);
-    max-height: calc(100% - 118px);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-}
 
 .mp-fault {
   margin-bottom: 8px;
@@ -3724,10 +3615,11 @@ onUnmounted(() => {
 }
 
 .mp-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 44px;
   align-items: center;
   gap: 10px;
-  margin-bottom: 10px;
+  padding: 12px 14px;
 }
 
 .mp-no {
@@ -3750,29 +3642,17 @@ onUnmounted(() => {
 }
 
 .mp-name {
-  font-size: 14px;
+  margin: 0 0 3px;
+  font-size: 15px;
   font-weight: 600;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   overflow: hidden;
   color: #e8f0fb;
-  margin-bottom: 2px;
 }
-
-.mp-state {
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.mp-machine-head { display:grid; grid-template-columns:38px minmax(0,1fr) 36px; align-items:start; gap:10px; }
-.mp-machine-head > .mp-close { padding:0; }
-.mp-machine-nav { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:8px; border-top:1px solid #26394d; color:#8fa4bb; font-size:11px; }
-.mp-machine-nav .mp-nav { display:flex; align-items:center; gap:5px; padding:5px 9px; flex:none; }
-.mp-machine-nav .mp-nav span { font-size:12px; }
-.mp-machine-nav > span { min-width:0; text-align:center; }
+.mp-state { font-size: 12px; line-height: 1.5; }
+.mp-machine-head > .mp-close { padding: 0; }
 
 .mp-dev {
   margin-top: 2px;
@@ -3800,7 +3680,7 @@ onUnmounted(() => {
 }
 
 .mp-hint-dim {
-  margin: -4px 0 8px;
+  margin: 0 0 10px;
   font-size: 11px;
   color: #8fa2b8;
 }
@@ -3826,8 +3706,8 @@ onUnmounted(() => {
 
 .mp-dur {
   background: #152438;
-  min-height: 34px;
-  font-size: 11px;
+  min-height: 44px;
+  font-size: 13px;
   padding: 6px 4px;
   border-radius: 999px;
   border: 1px solid rgba(148, 163, 184, 0.3);
@@ -3875,9 +3755,7 @@ onUnmounted(() => {
 }
 
 .mp-msgs {
-  margin-top: 10px;
-  border-top: 1px dashed rgba(148, 163, 184, 0.2);
-  padding-top: 8px;
+  min-height: 100px;
 }
 
 .mp-msgs-title {
@@ -3895,10 +3773,12 @@ onUnmounted(() => {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  font-size: 12px;
+  flex-direction: column;
+  font-size: 13px;
   color: #cdd8e5;
-  line-height: 1.5;
-  margin-bottom: 4px;
+  line-height: 1.6;
+  padding: 10px 0;
+  border-bottom: 1px solid #2b3c50;
 }
 
 .mp-msg-nick {
@@ -3917,17 +3797,19 @@ onUnmounted(() => {
 }
 
 .mp-dry { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
-.mp-dry-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.mp-dry-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.mp-dry-label { flex-basis: 100%; }
+.mp-dry-stepper { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .mp-dry-label { font-size: 13px; color: #cdd8e5; }
 .mp-dry-input {
-  width: 84px; height: 34px; text-align: center;
+  width: 78px; height: 44px; text-align: center;
   font-size: 17px; font-weight: 700; color: #eaf2fb;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 8px; outline: none;
 }
 .mp-step {
-  width: 34px; height: 34px; border-radius: 8px;
+  width: 44px; height: 44px; border-radius: 8px;
   border: 1px solid rgba(125, 211, 252, 0.45);
   background: rgba(125, 211, 252, 0.14);
   color: #9fd7ff; font-size: 18px; line-height: 1; cursor: pointer;
@@ -3958,7 +3840,8 @@ onUnmounted(() => {
 .mp-proof-photos { display: flex; gap: 8px; }
 .mp-proof-btn {
   flex: 1;
-  height: 34px;
+  min-height: 44px;
+  padding: 8px;
   border-radius: 8px;
   font-size: 12px;
   color: #cfe3f7;
@@ -3974,7 +3857,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 6px;
+  width: 100%;
+  margin: 0;
 }
 
 .mp-msg-post .mp-note {
@@ -3984,12 +3868,19 @@ onUnmounted(() => {
 }
 
 .mp-send {
-  font-size: 12px;
-  color: #3b82f6;
-  padding: 6px 8px;
+  flex: none;
+  min-height: 44px;
+  min-width: 56px;
+  border: 1px solid #39628a;
+  border-radius: 10px;
+  background: #244566;
+  font-size: 14px;
+  color: #e7f5ff;
+  padding: 8px;
   cursor: pointer;
-  white-space: nowrap;
 }
+.mp-send:disabled { opacity: .5; cursor: default; }
+.mp-msg-post .mp-note { min-height: 44px; font-size: 16px; }
 
 .mp-occupier {
   display: flex;
@@ -4022,5 +3913,26 @@ onUnmounted(() => {
   transform: translateY(8px);
 }
 @media(prefers-reduced-motion:reduce){.sheet-enter-active,.sheet-leave-active{transition:none}.sheet-enter-from,.sheet-leave-to{transform:none}}
-.mp-modes{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.mp-modes button{padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text-dim);font-size:12px}.mp-modes button.on{border-color:#60a5fa;color:#93c5fd}.mp-custom-duration{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--text-dim);margin:10px 0}.mp-custom-duration input{width:72px;padding:6px;border:1px solid var(--border);border-radius:6px;color:var(--text);background:var(--bg);font:inherit;color-scheme:dark}
+.mp-modes { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.mp-modes button { flex: 1 1 120px; min-height: 44px; padding: 8px 10px; border: 1px solid #34506a; border-radius: 10px; background: #142333; color: #a5b6ca; font-size: 13px; line-height: 1.4; white-space: normal; }
+.mp-modes button.on { border-color: #60a5fa; color: #c9e8ff; background: #1c3855; }
+.mp-custom-duration { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; color: #b6c2d2; margin: 12px 0; }
+.mp-custom-duration input { width: 78px; min-height: 44px; padding: 8px; border: 1px solid #34506a; border-radius: 8px; color: #e8f0fb; background: #0b1420; font-size: 16px; color-scheme: dark; }
+.mp-body input, .mp-body textarea, .mp-actions input { scroll-margin-block: 12px; }
+@media (max-width: 359px) {
+  .mp-head { padding-inline: 10px; gap: 8px; }
+  .mp-machine-nav { gap: 6px; padding-inline: 10px; }
+  .mp-actions, .mp-body { padding-inline: 10px; }
+  .mp-tabs button { font-size: 12px; }
+  .mp-actions { gap: 8px; }
+}
+/* 依据可见视口而不是输入焦点改变布局，避免点页签时 blur 触发跳动吞掉点击。 */
+.room-page.compact-viewport.detail-open > :deep(.van-nav-bar) { display: none; }
+.compact-viewport .stage.has-panel { margin-right: 0; }
+.compact-viewport .machine-panel { position: relative; top: auto; right: auto; max-height: calc(100% - 8px); width: min(100% - 16px, 640px); margin: 0 8px 8px; align-self: center; }
+.compact-viewport .mp-head { padding-block: 6px; }
+.compact-viewport .mp-machine-nav { padding-bottom: 6px; }
+.compact-viewport .mp-actions { padding-block: 8px; }
+.compact-viewport .mp-register-detail { display: inline; margin-left: 6px; }
+.compact-viewport .mp-body { padding-block: 8px; }
 </style>
