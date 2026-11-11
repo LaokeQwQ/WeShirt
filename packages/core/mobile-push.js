@@ -79,11 +79,7 @@ export function createMobilePushTransports(env = {}, { fetcher = fetch, now = Da
   if (upush) transports.upush = async (token, data) => {
     const url = 'https://msgapi.umeng.com/api/send'
     const payload = { display_type: 'message', body: { custom: data } }
-    // Optional official custom-message -> OEM notification conversion. The
-    // U-Push SDK handles OEM clicks; channel_activity must be registered there.
-    if (env.UMENG_PUSH_OEM_NOTIFICATIONS === 'true') payload.message_3rd_notification = { title: data.title, text: data.body }
     const request = { appkey: env.UMENG_PUSH_APP_KEY, timestamp: String(now()), type: 'unicast', device_tokens: token, payload, production_mode: env.UMENG_PUSH_PRODUCTION === 'false' ? 'false' : 'true', category: 1 }
-    if (env.UMENG_PUSH_OEM_NOTIFICATIONS === 'true') request.channel_properties = { channel_activity: 'com.laoke.weshirt.MainActivity', channel_fcm: '0', ...(env.UMENG_PUSH_XIAOMI_CHANNEL_ID ? { xiaomi_channel_id: clean(env.UMENG_PUSH_XIAOMI_CHANNEL_ID, 80) } : {}), ...(env.UMENG_PUSH_OPPO_CHANNEL_ID ? { oppo_channel_id: clean(env.UMENG_PUSH_OPPO_CHANNEL_ID, 80) } : {}) }
     const body = JSON.stringify(request), signature = umengMD5('POST' + url + body + env.UMENG_PUSH_MASTER_SECRET)
     const result = await jsonFetch(fetcher, url + '?sign=' + signature, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
     // Generic INVALID_ARGUMENT is not proof of uninstall; never delete a token

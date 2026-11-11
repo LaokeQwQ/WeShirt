@@ -79,9 +79,9 @@ Android 包名为 `com.laoke.weshirt`。界面、3D、通知和小组件均由�
 {"provider":"fcm","token":"provider-issued-device-token","notificationsEnabled":true,"appVersion":"0.1.1"}
 ```
 
-服务器支持 `fcm` 与 `upush` 两个互斥的主通道；小米、华为等经友盟聚合通道时不重复登记成 FCM。服务端按私有环境变量配置自动发现可用发送器，能力发现只公布已配置的通道。未接入返回 `503 mobile_push_not_configured`。关闭请求为 `{notificationsEnabled:false,appVersion:"0.1.1"}`，会删除推送令牌并取消该安装的待发消息。
+服务器支持 `fcm` 与基础 `upush` 两个互斥的主通道，不登记独立手机厂商通道。服务端按私有环境变量配置自动发现可用发送器，能力发现只公布已配置的通道。未接入返回 `503 mobile_push_not_configured`。关闭请求为 `{notificationsEnabled:false,appVersion:"0.1.1"}`，会删除推送令牌并取消该安装的待发消息。
 
-响应不包含令牌：`{installation:{installationId,provider,notificationsEnabled,appVersion,updatedAt}}`。原生会话只能操作登录时绑定的安装；访问其他安装返回 403，同时修改发生冲突返回 409。消息使用数据载荷 `{eventId,revision,kind,title,body,taskId,finishAt,serverConfirmed}`，由客户端按 `eventId` 及递增 `revision` 去重。登记接口不发送测试通知；没有厂商凭据时不能宣称投递链路已经验收。
+响应不包含令牌：`{installation:{installationId,provider,notificationsEnabled,appVersion,updatedAt}}`。原生会话只能操作登录时绑定的安装；访问其他安装返回 403，同时修改发生冲突返回 409。消息使用数据载荷 `{eventId,revision,kind,title,body,taskId,finishAt,serverConfirmed}`，由客户端按 `eventId` 及递增 `revision` 去重。登记接口不发送测试通知；没有发送端凭据时不能宣称投递链路已经验收。
 
 ## 小组件与刷新
 
@@ -97,18 +97,18 @@ Android 包名为 `com.laoke.weshirt`。界面、3D、通知和小组件均由�
 
 ## CloudBase 原子存储部署
 
-后端源码仓库提供 `packages/core/mobile-store.js` 和 `tools/cloudbase-fn/weshirt-mobile-store/index.mjs`。EdgeOne KV 只有最终一致性，进程内锁不能解决多节点授权码重放，因此不能用它保存/轮换移动会话。
+后端默认使用 `packages/core/mobile-store-postgres.js` 和 `tools/cloudbase-fn/weshirt-mobile-store/index.mjs`。EdgeOne KV 只有最终一致性，进程内锁不能解决多节点授权码重放，因此不能用它保存/轮换移动会话。
 
-1. 管理员在 CloudBase 创建私有集合 `weshirt_mobile_sessions`，客户端读写权限全部拒绝，仅云函数服务角色访问。为 `expireAt` 增加 TTL 清理索引；鉴权本身在事务内检查毫秒时间，不依赖 TTL 删除时机。
-2. 后端仓库运行 `npm ci`、`node tools/cloudbase-fn/build-mobile-store.mjs`，在输出目录 `.cloudbase-build/weshirt-mobile-store` 执行 `npm install --omit=dev`，上传为 Node 22+ HTTP 云函数，入口 `index.main`。构建产物含精确版本的 `@cloudbase/node-sdk` 依赖。
-3. 云函数配置 `CLOUDBASE_ENV_ID`、`MOBILE_SESSION_COLLECTION`（可省略）、`MOBILE_ATOMIC_STORE_SECRET`（至少 32 个随机字符）。使用 HTTPS 路由；禁止记录 Authorization 或请求体。内部端点只接受服务端凭据和限定的 `mobile:*` 命名空间，不向 App 开放密钥。
-4. EdgeOne 服务端配置相同 `MOBILE_ATOMIC_STORE_SECRET` 和该函数的完整 `MOBILE_ATOMIC_STORE_URL`。可用时自动接入远程原子适配器。Node 直接部署也可通过 `createApp({store,env,mobile:{atomicStore:createCloudBaseMobileAtomicStore(db)}})` 注入 SDK 数据库实例。
+1. 管理员先审查并应用 `cloudbase/migrations/20261111030000_mobile_atomic_store.sql`，创建 PostgreSQL 私有表、RPC、ACL 与强制 RLS。确认服务凭据映射为 `service_role`；客户端读写全部拒绝。部署和真实并发验收步骤见 [PostgreSQL 原子存储](mobile-postgres-store.md)。
+2. 后端仓库运行 `npm ci`、`node tools/cloudbase-fn/build-mobile-store.mjs`，在输出目录 `.cloudbase-build/weshirt-mobile-store` 执行 `npm install --omit=dev`，上传为 Node 22 Event 云函数，入口 `index.main`，HTTPS 路由上游类型为 `SCF`。构建产物含精确版本的 `@cloudbase/node-sdk` 依赖。
+3. 云函数只配置 `CLOUDBASE_ENV_ID` 与 `MOBILE_ATOMIC_STORE_SECRET`（至少 32 个随机字符）。表与 RPC 名称固定。禁止记录 Authorization 或请求体；内部端点只接受服务端凭据和限定的 `mobile:*` 命名空间，不向 App 开放密钥。
+4. EdgeOne 服务端配置相同 `MOBILE_ATOMIC_STORE_SECRET` 和该函数的完整 `MOBILE_ATOMIC_STORE_URL`。可用时自动接入远程原子适配器。Node 直接部署也可通过 `createApp({store,env,mobile:{atomicStore:createCloudBasePostgresAtomicStore(app.rdb())}})` 注入适配器。
 5. 服务端另设 `MOBILE_AUTH_ENABLED=true`、`DINGTALK_MOBILE_CLIENT_ID`、`DINGTALK_MOBILE_CLIENT_SECRET`、`DINGTALK_MOBILE_REDIRECT_URI`。在钉钉后台登记正式包名、实际自签证书指纹和回调 URI。密钥仅保留在云环境变量中。
 6. 配置下面的真实推送发送器；仅设置 `MOBILE_PUSH_ENABLED=true` 不会启用通道，还须配置对应凭据。无需额外修改 `mobile.pushProviders`，默认服务会自动接线。实际投递仍须凭据和真机验收。
 
-事务适配器采用 SDK 的 `runTransaction`，同一事务内读取当前版本、比对版本、写入随机新版本。不存在或已过期文档只允许 `expectedVersion=null` 创建。数据库/桥接故障直接拒绝授权，不回退最终一致 KV。桥接不自动重试不确定结果；客户端重新登录或重新读取设备设置。
+PostgreSQL 适配器通过 SDK `app.rdb().rpc()` 调用数据库函数，在同一事务内锁定键、检查数据库时间与当前版本、写入随机新版本。不存在或已过期记录只允许 `expectedVersion=null` 创建。数据库/桥接故障直接拒绝授权，不回退最终一致 KV。桥接不自动重试不确定结果；客户端重新登录或重新读取设备设置。保留的文档数据库 `runTransaction` 适配器仅供另有文档数据库的 Node 部署选用，不与默认 PostgreSQL 云函数混用。
 
-参考：[CloudBase 事务说明](https://docs.cloudbase.net/database/transaction)、[官方 Node SDK 数据库接口](https://github.com/TencentCloudBase/node-sdk/blob/master/docs/database/database.md)。本轮代码交付没有创建数据库、部署云函数或更改线上配置；上述配置完成前能力发现会如实显示未配置。
+参考：[CloudBase RPC 与权限边界](https://docs.cloudbase.net/database/postgresql/rpc)、[PostgreSQL 原子存储](mobile-postgres-store.md)。上述配置完成前能力发现会如实显示未配置。
 
 ## 推送发送器配置与验收
 
@@ -120,13 +120,10 @@ Android 包名为 `com.laoke.weshirt`。界面、3D、通知和小组件均由�
 | `UMENG_PUSH_APP_KEY` | 与 Android 发行配置相同的友盟 AppKey |
 | `UMENG_PUSH_MASTER_SECRET` | 友盟后台的服务端 Master Secret，不能使用客户端 Message Secret 代替，也不能打包到 APK |
 | `UMENG_PUSH_PRODUCTION` | 默认 `true`；调试可设 `false`，单播不受测试设备名单限制 |
-| `UMENG_PUSH_OEM_NOTIFICATIONS` | 可选，设 `true` 后按友盟官方 `message_3rd_notification` 协议把离线透传转换为厂商通知 |
-| `UMENG_PUSH_XIAOMI_CHANNEL_ID` | 可选，小米已申请的通知通道 |
-| `UMENG_PUSH_OPPO_CHANNEL_ID` | 可选，OPPO 已申请的通知通道 |
 
 FCM 使用 RS256 服务账号 JWT 换取一小时 OAuth 访问令牌，权限范围仅为 `firebase.messaging`，再调用 HTTP v1 `projects.messages:send`。仅发送 data payload，由原生客户端统一展示和去重。服务账号须获目标 Firebase 项目的 Cloud Messaging 发送权限，Android 使用同一项目的配置。
 
-友盟使用 `POST https://msgapi.umeng.com/api/send`，对实际发送的 `POST + URL + JSON字节 + MasterSecret` 计算官方规定的 MD5 校验。正常使用 `display_type=message` 自定义数据。若开启厂商离线转通知，需在友盟后台同时配置小米、华为等应用凭据及通知分类，`channel_activity` 为 `com.laoke.weshirt.MainActivity`，U-Push 的 FCM 通道固定关闭，防止同一安装双通道投递。厂商离线通知的展示与点击由厂商及友盟 SDK 处理，须逐机型验证，不能视为所有厂商已经验收。
+友盟使用 `POST https://msgapi.umeng.com/api/send`，对实际发送的 `POST + URL + JSON字节 + MasterSecret` 计算官方规定的 MD5 校验。仅使用 `display_type=message`、`body.custom` 标准数据消息，由 Android 客户端校验、去重并显示通知。不使用厂商通知转换、独立厂商通道或渠道参数，同一安装只登记 FCM 或基础 U-Push 中的一种。
 
 社区 @、取衣、排队和代取提醒会加入原生独立待发队列；即使钉钉先成功，也不会取消原生通道自己的重试。每次同步开始会继续处理原生队列：同一安装和事件只由一个短期租约发送，失败最多四次并递增退避。每次同步最多并行发送八条，避免厂商串行超时拖慢上游状态查询。`eventId` 来自稳定业务事件标识，`revision` 默认 1；新版本会抑制旧版本重试，客户端继续去重，网络结果不确定时仍可能收到重复数据。消息过期一天后丢弃。排队取消、频道权限变化、任务取衣、账号禁用、关闭通知或退出登录都会阻止相关后续投递。
 
@@ -136,6 +133,6 @@ FCM 明确返回 `UNREGISTERED` 时会原子删除该安装令牌并移除用户
 
 待发队列只在私有服务端保存短期通知内容；操作日志不记录消息正文、手机号、设备令牌、OAuth 返回正文或服务端私钥。桥接仅允许 `mobile:*` 内部命名空间，所有发送端点固定为厂商官方 HTTPS 地址并禁止重定向。
 
-单元测试使用本地产生的 RSA 测试密钥、模拟厂商响应和测试原子存储，验证 JWT 签名、U-Push 字节校验、跨工作节点防重、失败重试、失效令牌清理和频道权限撤回。本轮没有向真实设备或群聊发送测试消息。提供凭据后还需验证一台 Google 设备及各厂商设备的前后台接收、通知点击、关闭提醒和卸载重装行为。
+单元测试使用本地产生的 RSA 测试密钥、模拟发送端响应和测试原子存储，验证 JWT 签名、U-Push 字节校验、跨工作节点防重、失败重试、失效令牌清理和频道权限撤回。本轮没有向真实设备或群聊发送测试消息。提供凭据后还需验证 FCM 与基础 U-Push 测试设备的前后台接收、通知点击、关闭提醒和卸载重装行为。
 
 参考：[FCM HTTP v1](https://firebase.google.com/docs/cloud-messaging/send/v1-api)、[Google 服务账号 OAuth](https://developers.google.com/identity/protocols/oauth2/service-account)、[友盟服务端消息格式](https://devs.umeng.com/docs/67966/detail/68343)、[友盟签名示例](https://devs.umeng.com/docs/67966/detail/149296)。

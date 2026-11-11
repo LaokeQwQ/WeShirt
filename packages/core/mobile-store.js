@@ -5,6 +5,7 @@ import { readStreamBytes } from './stream-bytes.js'
 const keyOK = key => typeof key === 'string' && /^mobile:(?:challenge|session|limit|installation|installation-index|push-users):[A-Za-z0-9_:-]{1,180}$/.test(key)
 const error = () => new Error('mobile_store_unavailable')
 const assertKey = key => { if (!keyOK(key)) throw error() }
+export { assertKey as assertMobileAtomicKey }
 const unwrap = result => result && Object.hasOwn(result, 'result') ? result.result : result
 
 /** CloudBase Node SDK 3.x database instance; no SDK imports in Edge bundles. */
