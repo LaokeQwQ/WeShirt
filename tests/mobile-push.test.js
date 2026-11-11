@@ -36,11 +36,11 @@ test('FCM uses signed service-account OAuth and HTTPv1 data payload, and removes
   code='INVALID_ARGUMENT';assert.equal((await transports.fcm('device-token',data)).gone,false)
   assert.equal(calls.filter(call=>call.url.includes('oauth2')).length,1)
 })
-test('U-Push checksums exact HTTPS request bytes and supports OEM conversion without secondary FCM delivery', async () => {
+test('U-Push checksums exact HTTPS request bytes and sends only standard custom data', async () => {
   for(const input of ['', 'abc', '中文消息', 'A'.repeat(1000)])assert.equal(umengMD5(input),createHash('md5').update(input).digest('hex'))
   // Public fixture only. MD5 here independently checks the provider's mandated wire format.
   const checksumFixture='b'.repeat(32)
-  const env={UMENG_PUSH_APP_KEY:'a'.repeat(24),UMENG_PUSH_MASTER_SECRET:checksumFixture,UMENG_PUSH_OEM_NOTIFICATIONS:'true'}
+  const env={UMENG_PUSH_APP_KEY:'a'.repeat(24),UMENG_PUSH_MASTER_SECRET:checksumFixture}
   let posted
   const transports=createMobilePushTransports(env,{fetcher:async(url,options)=>{
     const parsed=new URL(url);assert.equal(parsed.origin,'https://msgapi.umeng.com')
@@ -50,8 +50,8 @@ test('U-Push checksums exact HTTPS request bytes and supports OEM conversion wit
   }})
   const data=await mobileNoticeData({type:'pickup',nativeEventKey:'pickup_one',title:'好友代取',text:'打开应用查看'})
   assert.equal((await transports.upush('umeng-device-token',data)).ok,true)
-  assert.equal(posted.payload.display_type,'message');assert.equal(posted.payload.body.custom.eventId,data.eventId)
-  assert.equal(posted.payload.message_3rd_notification.title,'好友代取');assert.equal(posted.channel_properties.channel_fcm,'0')
+  assert.deepEqual(posted.payload,{display_type:'message',body:{custom:data}})
+  assert.deepEqual(Object.keys(posted).sort(),['appkey','category','device_tokens','payload','production_mode','timestamp','type'])
   assert.equal(posted.device_tokens,'umeng-device-token');assert.equal(posted.type,'unicast')
   assert.deepEqual(Object.keys(createMobilePushTransports({})),[])
 })
