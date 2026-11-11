@@ -159,7 +159,7 @@ export function createSocialService({ store, env = {}, notify = async () => ({ o
       const thread = { id: id('c'), members: [uid, toUserId], recipientId: toUserId, state: 'pending', template, createdAt: iso(), updatedAt: iso(), messages: [] }
       await store.put(`social:thread:${thread.id}`, thread)
       await Promise.all([appendIndex(`social:threads:${uid}`, thread.id), appendIndex(`social:threads:${toUserId}`, thread.id), store.put(`social:pair:${pair}`, thread.id), store.put(`social:contactcool:${pair}`, Date.now())])
-      const notified = await deliver(toUserId, card('收到一条衣物联系请求', `${CONTACT_TEMPLATES[template]}\n接受后才会开启双向聊天，也可以直接拒绝或屏蔽。`))
+      const notified = await deliver(toUserId, {...card('收到一条衣物联系请求', `${CONTACT_TEMPLATES[template]}\n接受后才会开启双向聊天，也可以直接拒绝或屏蔽。`),nativeKind:'CHAT_MENTION',nativeEventKey:'social:contact:'+thread.id})
       return { thread: await threadView(uid, thread), notified }
     })
   }
@@ -201,7 +201,7 @@ export function createSocialService({ store, env = {}, notify = async () => ({ o
       const notifyKey = `social:chatnotify:${other}:${threadId}`
       const lastNotice = Number(await read(notifyKey, 0))
       if (!lastNotice || Date.now() - lastNotice >= 5 * 60000) {
-        const sent = await deliver(other, card('好友协作有新消息', '你的衣物联系会话收到新消息。'))
+        const sent = await deliver(other, {...card('好友协作有新消息', '你的衣物联系会话收到新消息。'),nativeKind:'CHAT_MENTION',nativeEventKey:'social:message:'+entry.id})
         if (sent) await store.put(notifyKey, Date.now())
       }
       return { message: { id: entry.id, sender: 'me', text: entry.text, at: entry.at } }
@@ -252,7 +252,7 @@ export function createSocialService({ store, env = {}, notify = async () => ({ o
       await Promise.all([appendIndex(`social:pickups:${uid}`, request.id), appendIndex(`social:pickups:${friendId}`, request.id), store.put(`social:pickuptask:${uid}:${taskId}`, request.id), store.put(coolKey, Date.now())])
       const snapshot = await taskView(uid, taskId)
       const name = textLine(snapshot.machineName, 80)
-      const notified = await deliver(friendId, card('好友请你帮忙取衣', `${name}\n请先查看机器剩余时间，确认方便后再接受；不方便可拒绝。`))
+      const notified = await deliver(friendId, {...card('好友请你帮忙取衣', `${name}\n请先查看机器剩余时间，确认方便后再接受；不方便可拒绝。`),type:'pickup',nativeEventKey:'social:pickup:'+request.id})
       return { request: await pickupView(uid, request), notified }
     })
   }
@@ -292,7 +292,7 @@ export function createSocialService({ store, env = {}, notify = async () => ({ o
       request.updatedAt = iso()
       await store.put(`social:pickup:${request.id}`, request)
       const title = { accept: '好友已接受代取', reject: '好友这次不方便代取', complete: '好友已确认代取完成' }[action]
-      await deliver(request.ownerId, card(title, action === 'complete' ? '对应任务已标记已取，请和好友确认衣物交接。' : '打开代取请求可查看最新状态。'))
+      await deliver(request.ownerId, {...card(title, action === 'complete' ? '对应任务已标记已取，请和好友确认衣物交接。' : '打开代取请求可查看最新状态。'),type:'pickup',nativeEventKey:'social:pickup:'+request.id+':'+action})
       return { request: await pickupView(uid, request), changed: true }
     })
   }

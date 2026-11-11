@@ -10,7 +10,7 @@ import { deleteAssistantUserData } from './assistant.js'
 
 import { json, apiErr, nowISO, safeErrorCategory } from '../packages/core/util.js'
 import { normalizeAvatar, normalizeAvatarUrl } from '../packages/core/profile.js'
-import { verifyAdminSession, issueAdminSession, verifyToken } from '../packages/core/auth.js'
+import { verifyAdminSession, issueAdminSession, verifyRequestUser } from '../packages/core/auth.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { withOperationLock } from '../packages/core/operations.js'
 import { resolveBroadcastTargets } from '../packages/core/group-broadcast.js'
@@ -78,8 +78,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
     const members = Array.isArray(saved) ? saved : []
     const target = members.find((row) => row?.userId === id)
     if (!bootstrap) {
-      const bearer = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i)
-      const uid = bearer ? await verifyToken(bearer[1], env.AUTH_SECRET || '').catch(() => null) : null
+      const uid = await verifyRequestUser(c, env.AUTH_SECRET).catch(() => null)
       const identity = await getUserIdentity(store, uid)
       if (!['super', 'admin'].includes(identity.role)) return apiErr('forbidden', '需要总管或管理员权限', 403)
       // 失效/停用的高权限成员也须保护，不能利用账号状态绕过授权表。

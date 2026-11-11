@@ -10,7 +10,7 @@ const CACHE_TTL = 120000
 const CACHE_LIMIT = 12
 const flights = new WeakMap()
 const writes = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
-const excluded = /^\/api\/(?:auth(?:\/|$)|dingtalk(?:\/|$)|cron(?:\/|$)|telemetry(?:\/|$)|inspections(?:\/|$)|urge\/reveal(?:\/|$))|\/(?:photos?|uploads?)(?:\/|$)/
+const excluded = /^\/api\/(?:auth(?:\/|$)|mobile(?:\/|$)|dingtalk(?:\/|$)|cron(?:\/|$)|telemetry(?:\/|$)|inspections(?:\/|$)|urge\/reveal(?:\/|$))|\/(?:photos?|uploads?)(?:\/|$)/
 const eventId = () => 'evt_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24)
 const digest = async (value) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', typeof value === 'string' ? new TextEncoder().encode(value) : value))].map((b) => b.toString(16).padStart(2, '0')).join('')
 

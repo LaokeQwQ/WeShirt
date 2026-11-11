@@ -1,5 +1,5 @@
 import { json, apiErr } from '../packages/core/util.js'
-import { verifyToken } from '../packages/core/auth.js'
+import { verifyRequestUser } from '../packages/core/auth.js'
 import { DORM_BUILDINGS } from '../packages/core/buildings.js'
 import { withOperationLock } from '../packages/core/operations.js'
 import { getUserIdentity } from '../packages/core/identity.js'
@@ -58,9 +58,7 @@ function publicSite(site) { return { name: site.name, iconUrl: site.iconUrl, sch
 export async function checkSiteAdmin(c, store, secret) {
   const key = String(secret || '').trim()
   if (key.length < 16) return false
-  const bearer = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i)
-  if (!bearer) return false
-  const userId = await verifyToken(bearer[1], key).catch(() => null)
+  const userId = await verifyRequestUser(c, key).catch(() => null)
   if (!userId) return false
   const identity = await getUserIdentity(store, userId)
   return ['super', 'admin'].includes(identity.role) || identity.role === 'operator' && ['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)
@@ -70,8 +68,7 @@ export async function isSiteAdmin(c, { store, env = {}, superAdminCheck }) {
   return await superAllowed(c, superAdminCheck) || checkSiteAdmin(c, store, env.AUTH_SECRET)
 }
 async function siteAccess(c, { store, env, checkSuperAdmin, checkAdmin }) {
-  const bearer = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i)
-  const userId = bearer && String(env.AUTH_SECRET || '').length >= 16 ? await verifyToken(bearer[1], env.AUTH_SECRET).catch(() => null) : null
+  const userId = await verifyRequestUser(c, env.AUTH_SECRET).catch(() => null)
   const identity = userId ? await getUserIdentity(store, userId) : { role: 'user' }
   if (await superAllowed(c, checkSuperAdmin)) return { allowed: true, superAdmin: true, bootstrap: identity.role !== 'super', role: 'super', userId }
   if (userId && await store.get('user:' + userId, null)) {
