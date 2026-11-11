@@ -4,6 +4,7 @@ import { scopedFavoriteMachines } from '../packages/core/favorites.js'
 import { DORM_BUILDINGS, normalizeDormBuilding } from '../packages/core/buildings.js'
 import { getUserPermissions } from '../packages/core/permissions.js'
 import { applyRegisteredAvailability } from '../packages/core/availability.js'
+import { taskLifecycle } from '../packages/core/task-retention.js'
 
 export { createMobileAuth }
 const idOK = value => typeof value === 'string' && /^[A-Za-z0-9_-]{16,80}$/.test(value)
@@ -78,7 +79,7 @@ export function registerMobileRoutes(app, { store, env = {}, authenticate, getBo
     const machines = result ? scopedFavoriteMachines(result, user, catalog).map(machine => ({ ...machine, status: machine.state })) : []
     const ids = new Set(machines.map(machine => machine.id))
     const rows = allowed('tasks') ? await store.get('tasks:' + user.id, []) : []
-    const tasks = (Array.isArray(rows) ? rows : []).filter(task => !task.done && !task.cancelled && !task.cancelledAt && (allowed('board') ? ids.has(String(task.machineId)) : false)).slice(0, 20).map(task => ({ id: task.id, machineId: String(task.machineId), kind: task.kind === 'dryer' ? 'dryer' : 'washer', status: Date.parse(task.endAt) <= Date.now() ? 'pending' : 'waiting', finishAt: task.endAt || null, note: typeof task.note === 'string' ? task.note.slice(0, 200) : '', useDisinfectant: task.useDisinfectant === true, selfCleaned: task.selfCleaned === true }))
+    const tasks = (Array.isArray(rows) ? rows : []).filter(task => !taskLifecycle(task).archived && !task.done && !task.cancelled && !task.cancelledAt && (allowed('board') ? ids.has(String(task.machineId)) : false)).slice(0, 20).map(task => ({ id: task.id, machineId: String(task.machineId), kind: task.kind === 'dryer' ? 'dryer' : 'washer', status: Date.parse(task.endAt) <= Date.now() ? 'pending' : 'waiting', finishAt: task.endAt || null, note: typeof task.note === 'string' ? task.note.slice(0, 200) : '', useDisinfectant: task.useDisinfectant === true, selfCleaned: task.selfCleaned === true }))
     return { generatedAt: new Date().toISOString(), dormBuilding, tasks, machines, nextRefreshAfterSeconds: 300 }
   }))
 }

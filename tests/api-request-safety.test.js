@@ -12,6 +12,11 @@ async function frontend(fetch, track = () => {}) {
 }
 const reply = (data, status = 200, eventId = 'evt_1234567890abcdef12345678') => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'X-Event-ID': eventId } })
 
+test('dynamic API reads bypass browser response storage even when the old endpoint advertised stale caching', async () => {
+  const client = await frontend(async (_url, options) => { assert.equal(options.cache, 'no-store'); return reply({ board: { floors: [] } }) })
+  await client.api('/api/machines', { auth: false })
+})
+
 test('被页面捕获的网络错误仍将同一事件ID传给遥测；非法服务端标识不会回显', async () => {
   const records = []
   const client = await frontend(async () => { throw new Error('private network configuration') }, (name, fields) => records.push({ name, fields }))

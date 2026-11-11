@@ -38,7 +38,9 @@ import { registerSocialRoutes } from './social.js'
 import { registerOperationsRoutes } from './operations.js'
 import { registerFavoriteRoutes } from './favorites.js'
 import { registerQueueNoticeRoutes } from './queue-reminders.js'
-import { registerInspectionRoutes } from './inspections.js'
+import { registerInspectionRoutes, buildInspectionGroupNotice } from './inspections.js'
+import { taskLifecycle, retainedTasks } from '../packages/core/task-retention.js'
+import { pruneUserTasks } from './task-retention.js'
 import { createMobileAuth, registerMobileRoutes } from './mobile.js'
 import { createRemoteMobileAtomicStore } from '../packages/core/mobile-store.js'
 import { createMobilePush } from '../packages/core/mobile-push.js'
@@ -653,6 +655,8 @@ async function runSyncOnce(env, store, opts = {}) {
   let pool = null
   let poolState = null
   let picked = null
+  let stage = 'configuration'
+  let snapshotCommitted = false
 
   try {
     const haierMod = await import('../packages/core/haier.js').catch(() => null)
@@ -694,32 +698,49 @@ async function runSyncOnce(env, store, opts = {}) {
     }
     const clientEnv = picked ? { ...env, HAIER_HEADERS: JSON.stringify(picked.headers) } : env
 
+    stage = 'upstream_fetch'
     const raws = injected || (await haierMod.createHaierClient(clientEnv).fetchStatus())
+    stage = 'normalize'
     const normalized = haierMod.normalizeMachines(raws, haierMod.resolveStateMap(env))
-    const cleanupAt=Number(await store.get('assistant:lastPrune',0))
-    if(Date.now()-cleanupAt>86400000){await pruneAssistantStorage(store);await store.put('assistant:lastPrune',Date.now())}
+    stage = 'mapping'
     const savedMapping = await store.get(`mapping:${buildingId}`, null)
     for (const machine of normalized) machine.kind = machineKind(machine, savedMapping?.mapping || {})
     // 未提供结束时间时保留未知，清除旧版本按典型程序生成的估时。
+    stage = 'timing'
     await estimateFinishAt(store, buildingId, normalized)
     let board = machinesMod.buildBoard(normalized, { buildingId, buildingName })
     for (const m of board.floors.flatMap((f)=>f.machines)) m.dormBuilding=resolveMachineDorm(m,savedMapping?.mapping||{},env.SITE_BUILDINGS)
     board.slotMapping = savedMapping?.mapping || {}
-    const operations = await runOperations({store,board,env,broadcastTargets:()=>resolveBroadcastTargets(store,env),notify:async(alert)=>{const uid=env.ADMIN_DING_USERID||env.DINGTALK_ADMIN_USERID;if(!uid)return {dm:{ok:false,error:'not_configured'}};const mod=await import('../packages/core/dingtalk.js');const r=await mod.createDingTalk(env).sendSingle(uid,{title:alert.title,text:alert.message});return {dm:{ok:!!r?.ok,error:r?.err||null}}},broadcast:async({board:summary,hourKey,target})=>{
+    stage = 'health'
+    out.fetched = Array.isArray(raws) ? raws.length : 0
+    const operations = await runOperations({store,board,env,beforeNotify:async projected=>{
+      stage = 'snapshot_write'
+      const prev = await store.get(`machines:${buildingId}`, null)
+      out.events = machinesMod.diffEvents(prev?.board?.floors?.flatMap(f => f.machines) || [], projected.floors.flatMap(f => f.machines)) || []
+      await store.put(`machines:${buildingId}`, { board: projected, rawUpdatedAt: nowISO() })
+      await store.put('meta:sync', {
+        lastFetchAt: projected.updatedAt || nowISO(), lastAttemptAt: Date.now(),
+        failCount: 0, lastError: null, lastErrorStage: null, lastErrorEventId: null, cooldownUntil: 0,
+      })
+      snapshotCommitted = true
+      stage = 'notifications'
+    },broadcastTargets:()=>resolveBroadcastTargets(store,env),notify:async(alert)=>{const uid=env.ADMIN_DING_USERID||env.DINGTALK_ADMIN_USERID;if(!uid)return {dm:{ok:false,error:'not_configured'}};const mod=await import('../packages/core/dingtalk.js');const r=await mod.createDingTalk(env).sendSingle(uid,{title:alert.title,text:alert.message});return {dm:{ok:!!r?.ok,error:r?.err||null}}},broadcast:async({board:summary,hourKey,target})=>{
       const mod=await import('../packages/core/dingtalk.js'); const dt=mod.createDingTalk(env)
       const notice=buildHourlyGroupNotice(summary,{name:target.name,hourKey})
       return target.via==='webhook' ? dt.broadcastMarkdown(notice.title,notice.markdown) : dt.sendGroup(target.conversationId,notice)
     }})
     board=operations.board
     out.operations=operations.broadcast
-    out.fetched = Array.isArray(raws) ? raws.length : 0
-
-    const prev = await store.get(`machines:${buildingId}`, null)
-    const prevMachines = prev?.board?.floors?.flatMap((f) => f.machines) || []
     const nextMachines = board.floors.flatMap((f) => f.machines)
-    out.events = machinesMod.diffEvents(prevMachines, nextMachines) || []
-
-    await store.put(`machines:${buildingId}`, { board, rawUpdatedAt: nowISO() })
+    stage = 'maintenance'
+    // Housekeeping must never prevent a fresh device snapshot from being saved.
+    try {
+      const cleanupAt = Number(await store.get('assistant:lastPrune', 0))
+      if (Date.now() - cleanupAt > 86400000) { await pruneAssistantStorage(store); await store.put('assistant:lastPrune', Date.now()) }
+    } catch (error) {
+      out.maintenance = { error: safeErrorCategory(error), stage: 'assistant_cleanup' }
+    }
+    stage = 'reminders'
 
     // 预约与收藏共用新鲜快照；各自保存去重和投递状态，不影响主同步。
     const notifyUser = async (uid, notice) => {
@@ -759,14 +780,6 @@ async function runSyncOnce(env, store, opts = {}) {
     }
     // lastAttemptAt：不管成败都记「最近一次尝试」，页面刷新按它判断要不要再打上游。
     // 只用 lastFetchAt（成功时间）会让失败时每次刷新都重试 → 越刷越被 WAF 拦。
-    await store.put('meta:sync', {
-      lastFetchAt: nowISO(),
-      lastAttemptAt: Date.now(),
-      failCount: 0,
-      lastError: null,
-      cooldownUntil: 0,
-    })
-
     out.groupNotices = operations.broadcast?.sent ? 1 : 0
 
     // 故障不主动私信：状态只跟着看板更新，别拿故障去打扰人。
@@ -789,8 +802,9 @@ async function runSyncOnce(env, store, opts = {}) {
     const taskEntries = await store.list('tasks:')
     let notified = 0
 
-    for (const { key, value } of taskEntries) {
+    for (const { key } of taskEntries) {
       const userId = key.slice('tasks:'.length)
+      const value = await pruneUserTasks(store, buildingId, userId)
       const user = await store.get(`user:${userId}`, null)
       // 取衣提醒关闭时不推；旧用户没有这个字段，默认开启
       if (user && (user.disabled || user.blocked || user.notifyOn === false)) continue
@@ -798,7 +812,7 @@ async function runSyncOnce(env, store, opts = {}) {
       const notificationUpdates = new Map()
       for (const original of value) {
         const t = { ...original }
-        if (t.done || t.notified || (t.notifyFailed && Date.now() - Date.parse(t.notifyAttemptAt || 0) < 1800000)) continue
+        if (taskLifecycle(t).archived || t.done || t.notified || (t.notifyFailed && Date.now() - Date.parse(t.notifyAttemptAt || 0) < 1800000)) continue
         t.notifyAttemptAt = nowISO()
         const left = machinesMod.computeLeftMin(t.endAt, now)
         if (left === null || left > lead) continue
@@ -913,7 +927,16 @@ async function runSyncOnce(env, store, opts = {}) {
       out.dryerAlerts = 0
     }
   } catch (e) {
-    out.error = safeErrorCategory(e)
+    const category = safeErrorCategory(e)
+    const eventId = 'evt_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24)
+    if (snapshotCommitted) {
+      // A failed notification/cleanup is not an upstream capture failure.
+      out.maintenance = { error: category, stage, eventId }
+      await audit(store, { type: 'sync', action: '同步附加处理失败', level: 'warn', detail: out.maintenance }).catch(() => {})
+    } else {
+    out.error = category
+    out.errorStage = stage
+    out.eventId = eventId
 
     // 账号池：如果是鉴权/限流类失败，把这次用的账号冷却 10 分钟，
     // 下次自动换下一个。WAF 是按 IP 封的，轮账号救不了，但「按账号限流」能救；
@@ -949,17 +972,20 @@ async function runSyncOnce(env, store, opts = {}) {
         lastAttemptAt: Date.now(),
         failCount,
         lastError: out.error,
+        lastErrorStage: stage,
+        lastErrorEventId: eventId,
         cooldownUntil: Date.now() + cooldownMs,
       })
       .catch(() => {})
     // 同步失败是「看板变旧」的唯一原因，必须留痕（含具体端点，见 requestJson 的错误文案）
     await audit(store, {
       type: 'sync',
-      action: '上游同步失败',
+      action: '看板同步失败',
       level: 'error',
       target: '海乐上游',
-      detail: { error: out.error, failCount, cooldownSec: Math.round(cooldownMs / 1000) },
+      detail: { error: out.error, stage, eventId, failCount, cooldownSec: Math.round(cooldownMs / 1000) },
     })
+    }
   }
   // 每次同步顺带自检：系统报错/账号异常/看板空 → 私信管理员。
   // 放在最后、且包住异常：自检本身出问题不能影响同步结果。
@@ -989,7 +1015,7 @@ export function createApp({ store, env, mobile = {} }) {
     cors({
       origin: (origin) => origin || '*',
       allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization', 'X-Admin-Token', 'Idempotency-Key'],
+      allowHeaders: ['Content-Type', 'Authorization', 'X-Admin-Token', 'Idempotency-Key', 'Cache-Control'],
       exposeHeaders: ['X-Event-ID', 'Idempotency-Replayed'],
       maxAge: 86400,
     })
@@ -1627,13 +1653,18 @@ export function createApp({ store, env, mobile = {} }) {
       board.occupied = visible.filter((m) => ['occupied', 'abnormal'].includes(m.state)).length
       board.faulty = visible.filter((m) => m.state === 'faulty').length
       board.unknown = visible.filter((m) => m.state === 'unknown').length
-      // 公开数据，允许浏览器/边缘短暂缓存：
-      // 多个用户同时打开看板时，5s 内只有一个人真的打到我们这套函数上。
-      // stale-while-revalidate 让过期后先给旧数据、后台再刷，避免用户等着转圈。
+      const sync = await store.get('meta:sync', {})
+      const serverNow = nowISO()
+      const ageMs = Math.max(0, Date.parse(serverNow) - Date.parse(board.updatedAt || ''))
+      // Device state must not pass through a second browser/CDN stale cache.
+      // Clients already coalesce requests for 5s; hashed static assets keep long caching.
       return json(
-        { board, mapping: dorm && dorm !== 'guiyuan' ? {} : slotMap },
+        { board, mapping: dorm && dorm !== 'guiyuan' ? {} : slotMap,
+          freshness: { serverNow, updatedAt: board.updatedAt || null, ageSeconds: Number.isFinite(ageMs) ? Math.floor(ageMs / 1000) : null,
+            stale: !Number.isFinite(ageMs) || ageMs >= 180000, syncFailed: Number(sync.failCount) > 0,
+            ...(Number(sync.failCount) > 0 ? { errorStage: sync.lastErrorStage || 'unknown', eventId: sync.lastErrorEventId || null } : {}) } },
         200,
-        { 'Cache-Control': 'public, max-age=5, stale-while-revalidate=25' }
+        { 'Cache-Control': 'no-store' }
       )
     } catch (e) {
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
@@ -1649,7 +1680,7 @@ export function createApp({ store, env, mobile = {} }) {
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
       kickSync(c)
       const [list, savedMapping, cachedBoard] = await Promise.all([
-        store.get(`tasks:${userId}`, []),
+        pruneUserTasks(store, env.BUILDING_ID, userId),
         store.get(`mapping:${env.BUILDING_ID || 'b1'}`, null),
         store.get(`machines:${env.BUILDING_ID || 'b1'}`, null),
       ])
@@ -1669,6 +1700,7 @@ export function createApp({ store, env, mobile = {} }) {
             mode:t.mode||'duration', minutes:t.minutes, timingSource:t.timingSource||(t.mode==='machine'?'upstream':'user'), estimated:t.estimated===true,
             ...(t.program==='self_clean'?{program:'self_clean'}:{}),
             startAt: t.startAt,
+            ...taskLifecycle(t, nowMs),
             endAt: t.endAt,
             leftMin: await computeLeftMin(t.endAt, now),
             // 结束后过了多少分钟（>=0）。前端靠它区分「即将完成」和「早就洗完了」，
@@ -1681,7 +1713,8 @@ export function createApp({ store, env, mobile = {} }) {
           }
         })
       )
-      return json({ tasks })
+      const byDate = (a, b) => Date.parse(b.createdAt || b.startAt || '') - Date.parse(a.createdAt || a.startAt || '')
+      return json({ tasks, activeTasks: tasks.filter(t => !t.archived).sort(byDate), history: tasks.filter(t => t.archived).sort(byDate), retention: { archiveHours: 72, deleteHours: 336, basis: 'createdAt' } })
     } catch (e) {
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
@@ -1816,6 +1849,7 @@ export function createApp({ store, env, mobile = {} }) {
         // 楼层留着给通知文案用（「桂园1楼7号机 · 1 楼」比只写机器名清楚）
         floorCode: found?.floorCode || '',
         startAt,
+        createdAt: startAt,
         endAt,
         // 登记方式：machine=跟着机器剩余时间，duration=用户自己选的时长
         mode: mode === 'machine' ? 'machine' : 'duration',
@@ -1830,7 +1864,7 @@ export function createApp({ store, env, mobile = {} }) {
         notified: false,
       }
       const list = await store.get(`tasks:${userId}`, [])
-      const tasks = Array.isArray(list) ? list : []
+      const tasks = retainedTasks(list)
       tasks.push(task)
       await store.put(`tasks:${userId}`, tasks)
 
@@ -1883,6 +1917,7 @@ export function createApp({ store, env, mobile = {} }) {
           kind: task.kind,
           mode:task.mode, minutes:task.minutes, timingSource:task.timingSource, estimated:task.estimated,
           startAt: task.startAt,
+          ...taskLifecycle(task),
           endAt: task.endAt,
           leftMin: await computeLeftMin(task.endAt, startAt),
           done: false,
@@ -3193,44 +3228,48 @@ export function createApp({ store, env, mobile = {} }) {
         if (!user) {
           reply = '先在「等衣」网页用钉钉登录一次，我才能知道这是你的衣服。'
         } else {
-          const list = (await store.get(`tasks:${user.id}`, [])) || []
-          const nowMs = Date.now()
-          // 挑「已经洗完但还没确认」的任务；有多条就都确认掉
-          const pending = list.filter((t) => {
-            if (!t || t.done) return false
-            const endMs = t.endAt ? new Date(t.endAt).getTime() : NaN
-            return Number.isFinite(endMs) && endMs <= nowMs
-          })
-          if (!pending.length) {
-            reply = '你这边没有待取的洗衣机。'
-          } else {
+          const buildingId = env.BUILDING_ID || 'b1'
+          const names = await withTaskMutation(store, buildingId, async () => {
+            const original = (await store.get(`tasks:${user.id}`, [])) || []
+            const nowMs = Date.now()
+            const list = retainedTasks(original, nowMs)
+            // A generic “已取” only acknowledges recent tasks in this partition;
+            // archived history must never become a fresh pickup request.
+            const pending = list.filter((t) => {
+              if (!t || t.done || taskLifecycle(t, nowMs).archived || (t.buildingId || buildingId) !== buildingId) return false
+              const endMs = t.endAt ? new Date(t.endAt).getTime() : NaN
+              return Number.isFinite(endMs) && endMs <= nowMs
+            })
             const names = []
             for (const t of pending) {
               t.done = true
               t.takenAt = nowISO()
               names.push(t.machineName || t.machineId)
             }
-            await store.put(`tasks:${user.id}`, list)
-
-            // 清占用：只清自己占的那台
-            const buildingId = env.BUILDING_ID || 'b1'
+            if (pending.length || list.length !== original.length) await store.put(`tasks:${user.id}`, list)
+            // Also clear exact expired ownership while the original records are
+            // still available for comparison; replacement registrations survive.
+            const removed = (Array.isArray(original) ? original : []).filter(task => task && !list.includes(task))
             const occ = (await store.get(`occupancy:${buildingId}`, {})) || {}
             let changed = false
-            for (const t of pending) {
+            for (const t of [...pending, ...removed]) {
               if (t.machineId && ownsTaskOccupancy(occ[t.machineId], t, user.id)) {
                 delete occ[t.machineId]
                 changed = true
               }
             }
             if (changed) await store.put(`occupancy:${buildingId}`, occ)
-
+            return names
+          })
+          if (!names.length) reply = '你这边没有待取的洗衣机。'
+          else {
             await audit(store, {
               type: 'task',
               action: '确认取衣（钉钉）',
               actorId: user.id,
               actorNick: user.nick,
               target: names.join('、'),
-              detail: { count: pending.length, via: String(plain?.conversationType || '') === '2' ? 'group' : 'dm' },
+              detail: { count: names.length, via: String(plain?.conversationType || '') === '2' ? 'group' : 'dm' },
             })
             reply = `记上了：${names.join('、')}。`
           }
@@ -3642,7 +3681,7 @@ export function createApp({ store, env, mobile = {} }) {
   registerOperationsRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env),notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,mobilePush)})
   registerInspectionRoutes(app,{store,env,authenticate,getBoard,checkSuperAdmin:c=>checkSuperAdmin(c,env),notifyBuilding:async({conversationId,inspection})=>{
     const mod=await import('../packages/core/dingtalk.js')
-    const notice=['【等衣 · 楼栋巡检异常】',inspection.machineName,'志愿管理已现场上报异常，请前往洗衣房确认并协助处理。','巡检照片和备注请在管理页面查看。'].join('\n')
+    const notice=buildInspectionGroupNotice(inspection)
     return mod.createDingTalk(env).sendGroup(conversationId,notice)
   }})
   registerAnnouncementRoutes(app,{store,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store)})

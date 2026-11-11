@@ -1,9 +1,30 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createBoardQuery } from '../frontend/src/boardQueryCore.js'
+import { createBoardQuery, boardAgeMinutes } from '../frontend/src/boardQueryCore.js'
 import { filterDormFloors, normalizeDormBuilding } from '../packages/core/buildings.js'
 
 const response = () => ({ board: { floors: [{ code: '1', machines: [{ id: 'm1', name: '桂园1号机' }] }] }, mapping: { D1: 'alias' } })
+
+test('a stale edge read cannot replace a newer snapshot after a forced refresh', async () => {
+  let revision = 2
+  const load = createBoardQuery(async (_path, options) => {
+    assert.equal(options.headers['Cache-Control'], 'no-cache')
+    return { ...response(), board: { ...response().board, updatedAt: `2026-01-01T00:0${revision}:00Z` } }
+  })
+  const fresh = await load(); revision = 1
+  assert.equal(await load({ force: true }), fresh)
+  revision = 3
+  assert.notEqual(await load({ force: true }), fresh)
+})
+
+test('freshness ages using server age plus elapsed time even if the phone clock has a large offset', async () => {
+  let now = 10000
+  const load = createBoardQuery(async () => ({ ...response(), freshness: { ageSeconds: 119, serverNow: '2026-01-01T00:00:00Z' } }), { now: () => now })
+  const result = await load()
+  assert.equal(boardAgeMinutes(result.board, now), 1)
+  now += 62000
+  assert.equal(boardAgeMinutes(result.board, now), 3)
+})
 
 test('并发看板查询和强制刷新共用在途请求，短期路由切换复用缓存', async () => {
   let calls = 0

@@ -50,7 +50,7 @@ const EDGE_CACHE_TTL_MS = 5000
 const EDGE_CACHE_ENTRIES = 128
 const EDGE_CACHE_BYTES = 2 * 1024 * 1024
 const EDGE_CACHE_ENTRY_BYTES = 256 * 1024
-const freshKey = (key) => key === 'subs' || /^(?:meta:|user:|userBy|access:|mobile:|auth:|session:|token:|takeCode:|oauthstate:|oauthcallbacks:|claim:|usedclaim:|bind:|bindcode:|moderation:|social:|community:|assistant:|request:|mapping:|machines:|messages:)/.test(key)
+const freshKey = (key) => key === 'subs' || /^(?:meta:|user:|userBy|access:|mobile:|auth:|session:|token:|takeCode:|oauthstate:|oauthcallbacks:|claim:|usedclaim:|bind:|bindcode:|moderation:|social:|community:|assistant:|request:|mapping:|machines:|messages:|tasks:|occupancy:|queue:|faults:)/.test(key)
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 function storedValue(key, raw) {

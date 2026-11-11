@@ -1,4 +1,6 @@
 import { issueTicket, verifyTicket } from './auth.js'
+import { withOperationLock } from './operations.js'
+import { retainedTasks } from './task-retention.js'
 
 export const CONTACT_TEMPLATES = Object.freeze({
   forgot: '你好，机器里似乎还有你的衣物，方便时请来确认并取走。',
@@ -264,37 +266,47 @@ export function createSocialService({ store, env = {}, notify = async () => ({ o
     return { received: views.filter((v) => v.direction === 'received'), sent: views.filter((v) => v.direction === 'sent') }
   }
   async function respondPickup(uid, pickupId, action) {
-    return mutate(store, async () => {
+    const changed = await mutate(store, async () => {
       await user(uid); rate(uid, 'pickup_respond', 30, 60000)
       const request = await read(`social:pickup:${pickupId}`)
       if (!request || request.friendId !== uid) fail('not_found', '代取请求不存在', 404)
       if (!['accept', 'reject', 'complete'].includes(action)) fail('bad_param', '无效操作')
-      if (request.state === 'completed' && action === 'complete') return { request: await pickupView(uid, request), changed: false }
+      if (request.state === 'completed' && action === 'complete') return { request, changed: false }
       if (action === 'complete' ? request.state !== 'accepted' : request.state !== 'pending') fail('invalid_state', '代取请求状态已变更，请刷新后重试', 409)
       if (action !== 'reject' && await blocked(uid, request.ownerId)) fail('blocked', '暂时无法处理这位用户的请求', 403)
       if (action === 'complete') {
-        const tasks = array(await read(`tasks:${request.ownerId}`, []))
-        const task = tasks.find((t) => t.id === request.taskId)
-        if (!task) fail('not_found', '对方的任务已删除', 404)
-        if (task.done || task.takenAt) fail('task_taken', '对方已确认取衣，请刷新任务', 409)
-        task.done = true; task.takenAt = iso(); task.pickedUpBy = uid
-        await store.put(`tasks:${request.ownerId}`, tasks)
-        const bid = task.buildingId || building
-        const occupancy = await read(`occupancy:${bid}`, {})
-        const current = occupancy?.[task.machineId]
-        // 必须精确对应本次任务，绝不清除同一用户后来再次登记的衣物。
-        if (current?.userId === request.ownerId && (current.taskId === task.id || !current.taskId && current.startAt && current.startAt === task.startAt && current.endAt === task.endAt)) {
-          delete occupancy[task.machineId]
-          await store.put(`occupancy:${bid}`, occupancy)
-        }
+        // Select the partition using stored task data, then reread under the
+        // same short task-state lock used by registration and retention.
+        const candidate = array(await read(`tasks:${request.ownerId}`, [])).find((task) => task.id === request.taskId)
+        const bid = candidate?.buildingId || building
+        await withOperationLock(store, 'task-state:' + bid, async () => {
+          const tasks = retainedTasks(await read(`tasks:${request.ownerId}`, []))
+          const task = tasks.find((t) => t.id === request.taskId)
+          if (!task) fail('not_found', '对方的任务已删除或已过期', 404)
+          if ((task.buildingId || building) !== bid) fail('task_changed', '任务已变化，请刷新后重试', 409)
+          if (task.done || task.takenAt) fail('task_taken', '对方已确认取衣，请刷新任务', 409)
+          task.done = true; task.takenAt = iso(); task.pickedUpBy = uid
+          await store.put(`tasks:${request.ownerId}`, tasks)
+          const occupancy = await read(`occupancy:${bid}`, {})
+          const current = occupancy?.[task.machineId]
+          // 必须精确对应本次任务，绝不清除同一用户后来再次登记的衣物。
+          if (current?.userId === request.ownerId && (current.taskId === task.id || !current.taskId && current.startAt && current.startAt === task.startAt && current.endAt === task.endAt)) {
+            delete occupancy[task.machineId]
+            await store.put(`occupancy:${bid}`, occupancy)
+          }
+        })
       }
       request.state = { accept: 'accepted', reject: 'rejected', complete: 'completed' }[action]
       request.updatedAt = iso()
       await store.put(`social:pickup:${request.id}`, request)
-      const title = { accept: '好友已接受代取', reject: '好友这次不方便代取', complete: '好友已确认代取完成' }[action]
-      await deliver(request.ownerId, {...card(title, action === 'complete' ? '对应任务已标记已取，请和好友确认衣物交接。' : '打开代取请求可查看最新状态。'),type:'pickup',nativeEventKey:'social:pickup:'+request.id+':'+action})
-      return { request: await pickupView(uid, request), changed: true }
+      return { request, changed: true }
     })
+    // No task-state or social mutation lock is held during network delivery.
+    if (changed.changed) {
+      const title = { accept: '好友已接受代取', reject: '好友这次不方便代取', complete: '好友已确认代取完成' }[action]
+      await deliver(changed.request.ownerId, {...card(title, action === 'complete' ? '对应任务已标记已取，请和好友确认衣物交接。' : '打开代取请求可查看最新状态。'),type:'pickup',nativeEventKey:'social:pickup:'+changed.request.id+':'+action})
+    }
+    return { request: await pickupView(uid, changed.request), changed: changed.changed }
   }
   async function dashboard(uid) {
     await user(uid)
