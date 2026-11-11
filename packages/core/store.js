@@ -138,13 +138,20 @@ export function createEdgeKVStore(kv) {
       let cursor
       do {
         const page = await kv.list({ prefix, limit: 256, ...(cursor === undefined ? {} : { cursor }) })
-        if (!page || !Array.isArray(page.keys)) throw new Error('Invalid KV listing')
-        for (const entry of page.keys) {
+        if (!record(page) || page instanceof Error || page.error || page.errors || page.Error) throw new Error('Invalid KV listing')
+        // Empty terminal pages may omit keys. Only an explicit completion flag
+        // or terminal cursor proves absence; an ambiguous/error response cannot.
+        const terminalCursor = Object.hasOwn(page, 'cursor') && (page.cursor === null || page.cursor === '')
+        const complete = page.complete === true || page.complete !== false &&
+          (terminalCursor || page.cursor === undefined && Array.isArray(page.keys))
+        const emptyTerminal = page.keys === undefined && complete && (page.complete === true || terminalCursor)
+        if (!Array.isArray(page.keys) && !emptyTerminal) throw new Error('Invalid KV listing')
+        for (const entry of page.keys || []) {
           const key = typeof entry === 'string' ? entry : entry?.key ?? entry?.name
           if (typeof key !== 'string') throw new Error('Invalid KV listing key')
           if (key.startsWith(prefix)) keys.add(key)
         }
-        if (page.complete === true || page.complete !== false && page.cursor == null) break
+        if (complete) break
         cursor = page.cursor
         if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) throw new Error('Invalid KV listing cursor')
         cursors.add(cursor)

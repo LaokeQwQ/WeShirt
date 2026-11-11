@@ -262,6 +262,57 @@ test('list traverses real pages, de-duplicates keys and cannot resurrect deleted
   await assert.rejects(reader.list('item:'), /binding read failed/)
 })
 
+test('empty terminal listing variants allow a complete cron ingest and an empty audit list', async () => {
+  for (const terminal of [{ complete: true }, { cursor: null }, { cursor: '' }, { keys: [], cursor: '' }]) {
+    const kv = backend(), binding = kv.binding(), originalList = binding.list
+    binding.list = async options => {
+      const page = await originalList(options)
+      return page.keys.length ? page : { ...terminal }
+    }
+    const store = createEdgeKVStore(binding)
+    const env = { AUTH_SECRET: 'edge-kv-test-auth-secret-at-least-32', ADMIN_TOKEN: 'edge-kv-test-bootstrap', HAIER_MODE: 'mock', BUILDING_ID: 'b1' }
+    const app = createApp({ store, env })
+    const headers = { 'x-admin-token': env.ADMIN_TOKEN, 'content-type': 'application/json' }
+    const response = await app.request('https://laundry.example/api/cron/ingest', {
+      method: 'POST', headers,
+      body: JSON.stringify({ source: 'cloudbase', raws: [{ id: 'test-machine', name: 'Test machine', floorCode: '1', state: 1 }] }),
+    })
+    assert.equal(response.status, 200)
+    const result = await response.json()
+    assert.equal(result.ok, true, JSON.stringify({ terminal, error: result.error }))
+    assert.equal(result.fetched, 1)
+    assert.equal((await store.get('meta:sync')).failCount, 0)
+    assert.equal((await store.get('machines:b1')).board.total, 1)
+    const audits = await app.request('https://laundry.example/api/admin/urge-audits', { headers })
+    assert.equal(audits.status, 200)
+    assert.deepEqual(await audits.json(), { total: 0, items: [] })
+    assert.equal(kv.values.get('assistant:lastPrune') !== undefined, true)
+    assert.equal(await store.get('meta:estimateCleanup:b1'), true)
+  }
+})
+
+test('empty listing compatibility rejects ambiguous, erroneous and unfinished responses', async () => {
+  const kv = backend(), binding = kv.binding(), store = createEdgeKVStore(binding)
+  for (const page of [
+    null, {}, { error: 'unavailable' }, { error: 'unavailable', complete: true },
+    { Error: { code: 'unavailable' }, cursor: null }, new Error('unavailable'),
+    { keys: null, complete: true }, { keys: 'invalid', cursor: null },
+    { complete: false }, { complete: false, cursor: null }, { complete: false, cursor: '' },
+    { keys: [], complete: false, cursor: null }, { keys: [], complete: false, cursor: '' },
+    { cursor: 'unproven-next-page' },
+  ]) {
+    binding.list = async () => page
+    await assert.rejects(store.list('assistant:history:'), /Invalid KV listing/)
+  }
+  binding.list = async () => { throw new Error('binding list failed') }
+  await assert.rejects(store.list('assistant:history:'), /binding list failed/)
+  let calls = 0
+  binding.list = async () => ++calls === 1 ? { keys: ['item:one'], complete: false, cursor: 'next' } : { complete: true }
+  kv.values.set('item:one', '1')
+  assert.deepEqual(await store.list('item:'), [{ key: 'item:one', value: 1 }])
+  assert.equal(calls, 2)
+})
+
 test('minimal legacy bindings support remove and one-page key formats without inventing successful lists', async () => {
   const values = new Map([['one', '1'], ['two', '2'], ['three', '3']])
   const binding = {
