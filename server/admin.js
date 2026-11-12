@@ -1011,8 +1011,8 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         store.get(`machines:${bid}`, null), store.get(`occupancy:${bid}`, {}),
         store.get(`queue:${bid}`, []), store.get(`mapping:${bid}`, null),
       ])
-      const board = entry?.board ? projectCalibratedBoard(entry.board, await readCalibrationSettings(store,bid)) : null
       const slotMap = mapping?.mapping || {}
+      const board = entry?.board ? projectCalibratedBoard(entry.board, await readCalibrationSettings(store,bid), { mapping: slotMap }) : null
       const slotsById = new Map()
       for (const [slot, id] of Object.entries(slotMap)) {
         if (!id) continue

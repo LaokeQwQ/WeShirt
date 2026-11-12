@@ -10,6 +10,8 @@ import { enqueueCommunityNotices, ensureCommunityNoticeCapacity, readCommunityNo
 import { createCommunityMedia, publicMedia } from './community-media.js'
 import { readStreamBytes } from '../packages/core/stream-bytes.js'
 import { registerCommunityReportRoutes } from './community-reports.js'
+import { communitySnapshot } from './community-snapshot.js'
+import { communityMessageDigest, readCommunityReadState, acknowledgeCommunityMessages } from '../packages/core/community-reads.js'
 
 const MINUTE = 60000
 const MUTES_KEY = 'moderation:mutes'
@@ -47,21 +49,24 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     return value
   }
   async function actor(c, required = false, moderator = false, freshRules = false) {
+    const source = freshRules ? store : communitySnapshot(c, store).store
     const authenticated = await authenticate?.(c)
     const uid = typeof authenticated === 'string' ? authenticated : authenticated?.id
-    const found = uid ? await store.get('user:' + uid, null) : null
+    const found = uid ? await source.get('user:' + uid, null) : null
     const user = found?.disabled || found?.blocked ? null : found
     const temporary=c.get('temporaryAdminAccess')
-    const identity = temporary?.identity || (await checkSuperAdmin?.(c) ? { role: 'super', label: '总管', buildings: [] } : await getUserIdentity(store, user?.id))
-    const rules = temporary?.permissions || (!freshRules && c.get('userAccess')?.permissions) || (user ? (await getUserPermissions(store, user, (await getSiteConfig(store)).buildings)).permissions : undefined)
+    const identity = temporary?.identity || (await checkSuperAdmin?.(c) ? { role: 'super', label: '总管', buildings: [] } : await getUserIdentity(source, user?.id))
+    const site = !freshRules && c.get('communitySiteSnapshot') || await getSiteConfig(source)
+    const rules = temporary?.permissions || (!freshRules && c.get('userAccess')?.permissions) || (user ? (await getUserPermissions(source, user, site.buildings)).permissions : undefined)
     const moderationRules = rules?.adminMessages
     const canManage = canModerate(identity) && (!moderationRules || moderationRules.operate && (moderationRules.operateBuildings === null || moderationRules.operateBuildings?.length > 0))
     if (required && !user?.id) fail('unauthorized', '请先登录', 401)
     if (moderator && !canManage) fail(user?.id ? 'forbidden' : 'unauthorized', '需要总管或管理员权限', user?.id ? 403 : 401)
     return { user, identity, moderator: canManage, rules }
   }
-  async function context() {
-    const [site, cached, mapping] = await Promise.all([getSiteConfig(store), store.get(`machines:${bid}`, null), store.get(`mapping:${bid}`, null)])
+  async function context(c) {
+    const source=c?communitySnapshot(c,store).store:store
+    const [site, cached, mapping] = await Promise.all([c?.get('communitySiteSnapshot') || getSiteConfig(source), source.get(`machines:${bid}`, null), source.get(`mapping:${bid}`, null)])
     const buildings = site.buildings.filter((building) => building.code !== 'public' && building.enabled !== false)
     const historyCatalog = site.buildings.map((building) => ({ ...building, enabled: true }))
     const machines = (cached?.board?.floors || []).flatMap((floor) => floor.machines || []).map((machine) => ({ ...machine, id: String(machine.id), dormBuilding: resolveMachineDorm(machine, mapping?.mapping || {}, historyCatalog) }))
@@ -115,6 +120,12 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
       return ref
     })
   }
+  function cachedMentionReference(c,uid,channel) {
+    if(!c)return mentionReference(uid,channel)
+    const cache=communitySnapshot(c,store).references,key=channel+'|'+uid
+    if(!cache.has(key))cache.set(key,mentionReference(uid,channel))
+    return cache.get(key)
+  }
   async function recipients(input, requester, channel) {
     if (input.mentionAll != null && typeof input.mentionAll !== 'boolean') fail('bad_param', '@全体状态无效')
     if (input.mentions != null && (!Array.isArray(input.mentions) || input.mentions.length > 5 || input.mentions.some((ref) => typeof ref !== 'string' || !/^mention_[a-f0-9-]{36}$/.test(ref)))) fail('bad_param', '每条最多@五位频道成员，请从成员列表选择')
@@ -160,10 +171,11 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
   function canMuteTarget(requester, identity, targetId) {
     return requester.moderator && targetId !== requester.user?.id && identity.role !== 'super' && (requester.identity.role === 'super' || identity.role !== 'admin')
   }
-  async function enrich(messages, all, ctx, requester) {
-    const parents = messages.map((message) => all.find((entry) => !entry.deleted && entry.id === message.replyTo && messageChannel(entry, ctx) === messageChannel(message, ctx))).filter(Boolean)
+  async function enrich(messages, all, ctx, requester, c) {
+    const source=c?communitySnapshot(c,store).store:store, byId=new Map(all.filter(entry=>!entry.deleted).map(entry=>[entry.id,entry]))
+    const parents = messages.map((message) => byId.get(message.replyTo)).filter((entry,index)=>entry&&messageChannel(entry,ctx)===messageChannel(messages[index],ctx))
     const ids = [...new Set([...messages, ...parents].map((message) => message.userId).filter(Boolean))]
-    const authors = new Map(await Promise.all(ids.map(async (uid) => [uid, { user: await store.get('user:' + uid, null), identity: await getUserIdentity(store, uid) }])))
+    const authors = new Map(await limitedMap(ids,async uid=>[uid,{user:await source.get('user:'+uid,null),identity:await getUserIdentity(source,uid)}]))
     function authorFields(message) {
       const current = authors.get(message.userId)
       const user = current?.user
@@ -180,7 +192,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
       const parentAuthor = parent && authorFields(parent)
       return { id: message.id, ...publicAuthor, text: message.text, at: message.at, channel, dormBuilding: channel === 'public' ? null : channel,
         type: message.type === 'announcement' ? 'announcement' : 'message', media: message.media ? publicMedia(message.media) : null,
-        mentionRef: requester.user?.id && message.userId ? await mentionReference(message.userId, channel) : null,
+        mentionRef: requester.user?.id && message.userId ? await cachedMentionReference(c,message.userId,channel) : null,
         mentionAll: message.mentionAll === true, mentionedMe: Boolean(requester.user?.id && array(message.mentionUserIds).includes(requester.user.id)),
         machineId: message.machineId || null, machineName: ctx.byId.get(String(message.machineId))?.name || message.machineName || null,
         mine, pinned: message.pinned === true, pinnedAt: message.pinnedAt || null,
@@ -193,15 +205,59 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
   registerCommunityReportRoutes(app, { store, bid, actor, context, messageChannel, requireChannel, now })
 
   app.get('/api/messages/channels', wrap(async (c) => {
-    const [requester, ctx] = await Promise.all([actor(c), context()])
+    const [requester, ctx] = await Promise.all([actor(c), context(c)]),source=communitySnapshot(c,store).store
     const current = ctx.buildings.find((building) => building.code === requester.user?.dormBuilding)
     const rows = [{ code: 'public', name: '公共频道' }, ...(current ? [current] : []), ...ctx.buildings.filter((building) => building.code !== current?.code)]
-    const channels = await Promise.all(rows.filter((channel) => allowed(requester, channel.code)).map(async ({ code, name }) => ({ code, name,
-      avatarData: await store.get('community:avatar:' + code, null), permissions: { canAnnounce: channelManager(requester, code), canMentionAll: channelManager(requester, code), canManageAvatar: channelManager(requester, code) } })))
+    const visible=rows.filter(channel=>allowed(requester,channel.code)),codes=new Set(visible.map(row=>row.code))
+    const [all,seen]=await Promise.all([source.get(`messages:${bid}`,[]),requester.user?.id?readCommunityReadState(store,bid,requester.user.id):new Set()])
+    const summaries=new Map(),unread=new Map()
+    // Read the collection once. Neither pins nor timestamp collisions change
+    // chronological insertion order, and unauthorized channels are never enriched.
+    const readable=array(all).filter(message=>!message.deleted&&codes.has(messageChannel(message,ctx)))
+    const digests=requester.user?.id?await limitedMap(readable,message=>communityMessageDigest(messageChannel(message,ctx),message.id),32):[]
+    for(const [index,message] of readable.entries()){
+      const channel=messageChannel(message,ctx)
+      summaries.set(channel,message)
+      if(requester.user?.id&&message.userId!==requester.user.id&&!seen.has(digests[index]))unread.set(channel,(unread.get(channel)||0)+1)
+    }
+    const profiles=new Map(await limitedMap([...new Set([...summaries.values()].map(row=>row.userId).filter(Boolean))],async uid=>[uid,await source.get('user:'+uid,null)]))
+    const channels = await limitedMap(visible,async ({ code, name }) => {
+      const message=summaries.get(code),media=message?.media?.kind
+      const summary=message?{messageId:message.id,nick:maskNick(profiles.get(message.userId)?.nick||message.nick)+'同学',
+        text:media==='image'?'[图片]':media==='video'?'[视频]':Array.from(text(String(message.text||''))).slice(0,80).join(''),
+        kind:media==='image'?'image':media==='video'?'video':message.type==='announcement'?'announcement':'text',at:message.at||null}:null
+      return {code,name,summary,unreadCount:unread.get(code)||0,avatarData:await source.get('community:avatar:'+code,null),
+        permissions:{canAnnounce:channelManager(requester,code),canMentionAll:channelManager(requester,code),canManageAvatar:channelManager(requester,code)}}
+    })
     return { channels, currentBuilding: current?.code || null, ...await metadata(requester) }
   }))
+  app.post('/api/messages/read',wrap(async c=>{
+    const input=await body(c)
+    if(Object.keys(input).some(key=>!['channel','messageIds','throughMessageId'].includes(key))||typeof input.channel!=='string')fail('bad_param','请选择频道及实际显示的消息')
+    if(input.messageIds!=null&&input.throughMessageId!=null)fail('bad_param','请只提交一种消息标识')
+    const ids=input.messageIds??(input.throughMessageId!=null?[input.throughMessageId]:null)
+    if(!Array.isArray(ids)||ids.length<1||ids.length>50||ids.some(id=>!validId(id)))fail('bad_param','每次可确认1至50条已显示消息')
+    const uid=(await actor(c,true,false,true)).user.id
+    let latest
+    // Every retry checks current view rights, building enablement and message
+    // existence again. Muted and read-only members may acknowledge what they see.
+    const seen=await acknowledgeCommunityMessages({store,buildingId:bid,userId:uid,validate:async()=>{
+      const [requester,ctx,all]=await Promise.all([actor(c,true,false,true),context(),store.get(`messages:${bid}`,[])])
+      if(requester.user.id!==uid)fail('unauthorized','账号已变化，请重新打开频道',401)
+      requireChannel(requester,input.channel,ctx)
+      const messages=array(all),byId=new Map(messages.filter(row=>!row.deleted&&messageChannel(row,ctx)===input.channel).map(row=>[row.id,row]))
+      if(ids.some(id=>!byId.has(id)))fail('not_found','消息已删除、已移出当前频道或不可见，请刷新后重试',404)
+      latest={requester,ctx,messages}
+      return {acknowledged:await limitedMap([...new Set(ids)],id=>communityMessageDigest(input.channel,id),32),retained:new Set(await limitedMap(messages.filter(row=>!row.deleted),row=>communityMessageDigest(messageChannel(row,ctx),row.id),32))}
+    }})
+    const unread=latest.messages.filter(message=>!message.deleted&&message.userId!==uid&&messageChannel(message,latest.ctx)===input.channel)
+    const unreadCount=(await limitedMap(unread,message=>communityMessageDigest(input.channel,message.id),32)).filter(id=>!seen.has(id)).length
+    const acknowledged=new Set(ids)
+    await markCommunityNoticesRead(store,uid,entry=>entry.channel===input.channel&&acknowledged.has(entry.messageId),now())
+    return {ok:true,channel:input.channel,unreadCount}
+  }))
   app.get('/api/messages', wrap(async (c) => {
-    const [requester, ctx] = await Promise.all([actor(c), context()])
+    const [requester, ctx] = await Promise.all([actor(c), context(c)])
     const machineId = c.req.query('machineId') || ''
     let channel = selectChannel(c.req.query('channel'), c.req.query('dorm'), ctx)
     if (channel) requireChannel(requester, channel, ctx)
@@ -213,23 +269,24 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     const count = Number(c.req.query('limit') || 20), pageValue = Number(c.req.query('page') || 1)
     const limit = Number.isFinite(count) ? Math.min(50, Math.max(1, Math.floor(count))) : 20
     const page = Number.isFinite(pageValue) ? Math.min(100, Math.max(1, Math.floor(pageValue))) : 1
-    const all = array(await store.get(`messages:${bid}`, []))
+    const all = array(await communitySnapshot(c,store).store.get(`messages:${bid}`, []))
     const filtered = all.filter((message) => !message.deleted && ctx.codes.has(messageChannel(message, ctx)) && allowed(requester, messageChannel(message, ctx)) && (!channel || messageChannel(message, ctx) === channel) && (!machineId || String(message.machineId) === machineId))
       .map((message, order) => ({ message, order })).sort((a, b) => Number(b.message.pinned === true) - Number(a.message.pinned === true) || b.order - a.order).map(({ message }) => message)
-    return { messages: await enrich(filtered.slice((page - 1) * limit, page * limit), all, ctx, requester), pagination: { page, limit, total: filtered.length, hasMore: page * limit < filtered.length }, channel, ...await metadata(requester) }
+    return { messages: await enrich(filtered.slice((page - 1) * limit, page * limit), all, ctx, requester,c), pagination: { page, limit, total: filtered.length, hasMore: page * limit < filtered.length }, channel, ...await metadata(requester) }
   }))
   app.get('/api/messages/participants', wrap(async (c) => {
-    const [requester, ctx] = await Promise.all([actor(c, true), context()]), channel = c.req.query('channel')
+    const [requester, ctx] = await Promise.all([actor(c, true), context(c)]), channel = c.req.query('channel'),source=communitySnapshot(c,store).store
     requireChannel(requester, channel, ctx)
-    const rows = array(await store.get(`messages:${bid}`, [])).filter((entry) => !entry.deleted && messageChannel(entry, ctx) === channel)
+    const rows = array(await source.get(`messages:${bid}`, [])).filter((entry) => !entry.deleted && messageChannel(entry, ctx) === channel)
     const ids = [...new Set(rows.slice().reverse().map((entry) => entry.userId))].slice(0, 30)
-    const participants = []
-    for (const uid of ids) {
-      const user = await store.get('user:' + uid, null)
-      if (!user || user.disabled || user.blocked || !allowed(await requesterForUser(user), channel)) continue
-      const identity = await getUserIdentity(store, uid)
-      participants.push({ ref: await mentionReference(uid, channel), nick: maskNick(user.nick), avatarUrl: normalizeAvatarUrl(user.avatarUrl), identity: { role: identity.role, label: identity.label } })
-    }
+    const site=c.get('communitySiteSnapshot')||await getSiteConfig(source),snapshot={site,store:source}
+    const participants = (await limitedMap(ids,async uid=>{
+      const user=await source.get('user:'+uid,null)
+      if(!user||user.disabled||user.blocked)return null
+      const member=await requesterForUser(user,snapshot)
+      if(!allowed(member,channel))return null
+      return {ref:await cachedMentionReference(c,uid,channel),nick:maskNick(user.nick),avatarUrl:normalizeAvatarUrl(user.avatarUrl),identity:{role:member.identity.role,label:member.identity.label}}
+    })).filter(Boolean)
     return { participants, canMentionAll: channelManager(requester, channel) }
   }))
   app.post('/api/messages/media', wrap(async (c) => {
@@ -240,7 +297,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
   }))
   app.get('/api/messages/media/:id', async (c) => {
     try {
-      const [requester, ctx] = await Promise.all([actor(c, true), context()])
+      const [requester, ctx] = await Promise.all([actor(c, true), context(c)])
       const entry = await mediaService.get(c.req.param('id'))
       if (!entry) fail('not_found', '附件不存在或已过期', 404)
       requireChannel(requester, entry.channel, ctx)
@@ -260,7 +317,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     return { ok: true, avatarData: avatar.dataUrl }
   }))
   app.get('/api/messages/notices', wrap(async (c) => {
-    const [requester, ctx] = await Promise.all([actor(c, true), context()])
+    const [requester, ctx] = await Promise.all([actor(c, true), context(c)])
     const rows = await readCommunityNotices(store, requester.user.id)
     const notices = rows.filter((entry) => ctx.codes.has(entry.channel) && allowed(requester, entry.channel)).map(({ id, messageId, channel, title, text, url, at, readAt }) => ({ id, messageId, channel, title, text, url, at, readAt }))
     return { notices, unread: notices.filter((entry) => !entry.readAt).length }
@@ -288,7 +345,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     return { claim, connection }
   }
   app.get('/api/messages/realtime', wrap(async (c) => {
-    const [requester, ctx] = await Promise.all([actor(c, true), context()]), channel = c.req.query('channel')
+    const [requester, ctx] = await Promise.all([actor(c, true), context(c)]), channel = c.req.query('channel')
     requireChannel(requester, channel, ctx)
     let url
     try { url = new URL(env.COMMUNITY_WS_GATEWAY_URL); if (url.protocol !== 'wss:' || url.username || url.password || url.search || url.hash || wsSecret().length < 32) throw new Error() } catch { return { enabled: false, fallbackIntervalMs: 45000 } }

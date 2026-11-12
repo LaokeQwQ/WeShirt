@@ -401,6 +401,7 @@ onUnmounted(() => {
 .task-note{font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0;color:var(--text)}.task-details{font-size:11px;color:var(--text-dim);margin-top:5px}
 .task-links{display:flex;gap:10px;padding:12px 12px 0}.ti-ops{flex-wrap:wrap;max-width:185px}.tasks h2{font-size:18px}.history-tasks{margin-top:28px;padding-bottom:28px}.history-tasks h2,.history-tasks p{margin:0}.history-item{align-items:flex-start}
 .task-links .friend-link,.ti-ops .pickup-button{color:#bbf7d0;background:#17352c;border-color:#3f7657}.task-links .assistant-link{color:#bae6fd;background:#123348;border-color:#3c718d}
+.task-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.task-links>.van-button{width:100%;height:auto;min-height:44px;padding:10px 8px;white-space:normal;border-radius:12px}.quick{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.quick .van-button{height:auto;min-height:44px;padding:9px 6px;line-height:1.5;white-space:normal;min-width:0}.ti-ops>.van-button{min-height:38px}
 .dorm-switch { border: 0; background: transparent; color: var(--primary); cursor: pointer; }
 .form-tip { font-size: 12px; color: var(--text-dim); }
 .form-tip button { border: 0; background: transparent; color: var(--primary); cursor: pointer; }

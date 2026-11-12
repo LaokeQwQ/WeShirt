@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { ref, computed, watch, nextTick, reactive } from 'vue'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
 import { createMessageHold } from '../frontend/src/messageHold.js'
+import { createChannelReadTracker, visibleChannelMessageIds } from '../frontend/src/channelReadTracker.js'
 
 const sources = Object.fromEntries(await Promise.all([
   ['admin', '../frontend/src/components/AdminOperations.vue'],
@@ -19,7 +20,7 @@ const base = { ref, computed, watch, onMounted() {}, onUnmounted() {}, showToast
 // Transport has its own tests. Keep this view harness free of sockets, timers
 // and background refreshes so request ordering remains under each test's control.
 const messageBase = {
-  ...base, nextTick, createMessageHold,
+  ...base, nextTick, createMessageHold,createChannelReadTracker,visibleChannelMessageIds,
   document: { visibilityState: 'visible', querySelector: () => null, getElementById: () => null },
   createChannelTransport: ({ onState }) => ({
     start() { onState('polling') }, stop() { onState('stopped') }, visibilityChanged() {},
@@ -31,6 +32,52 @@ const loggedInUser = (id = 'a') => reactive({ user: { id }, get isLoggedIn() { r
 const channelDirectory = (dorm) => ({ channels: [{ code: 'public', name: '公共频道' }, ...dorm.buildings], currentBuilding: 'guiyuan' })
 const config = (endHour = 22) => ({ broadcast: { enabled: true, startHour: 8, endHour, hours: [] } })
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
+
+test('图片/视频预览阻止刷新后背后消息已读，关闭后完整等待450ms且旧组件不会清新预览', async () => {
+  let now=0, sequence=0, serverId='first'
+  const timers=new Map(), receipts=[]
+  const document={visibilityState:'visible',hasFocus:()=>true,querySelector:selector=>({getBoundingClientRect:()=>selector.includes('composer')?{top:700}:{bottom:80}}),getElementById:()=>null}
+  const setTimer=(fn,delay)=>{const id=++sequence;timers.set(id,{fn,at:now+delay});return id}
+  const clearTimer=id=>timers.delete(id)
+  const advance=async ms=>{now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now&&timers.delete(id))await timer.fn();await nextTick()}
+  const dorm=reactive({code:'guiyuan',buildings:[]}),route=reactive({query:{channel:'public'}}),user=loggedInUser()
+  const panel=evaluate(sources.messages,{...messageBase,document,
+    createChannelReadTracker:options=>createChannelReadTracker({...options,setTimer,clearTimer}),
+    useRoute:()=>route,useRouter:()=>({replace(){},push(){}}),useDormStore:()=>dorm,useUserStore:()=>user,
+    loadBoard:async()=>({board:{floors:[]}}),api:async(path,opts)=>{
+      if(path==='/api/messages/read'){receipts.push(opts.body);return {ok:true}}
+      if(path==='/api/messages/channels')return channelDirectory(dorm)
+      if(path==='/api/messages/notices')return {notices:[]}
+      return {messages:[{id:serverId}],pagination:{}}
+    },
+  },'({reader,load,loadChannels,messageList,messages,setMediaPreview,mediaPreviews,draftVideoFullscreen,onFullscreenChange})')
+  panel.messageList.value={querySelectorAll:()=>panel.messages.value.map(row=>({dataset:{messageId:row.id},getBoundingClientRect:()=>({top:120,bottom:240,width:200,height:120})}))}
+  const image=Symbol('image'),video=Symbol('video')
+  panel.setMediaPreview(true,image)
+  await panel.loadChannels();await panel.load();await nextTick();await advance(1000)
+  assert.equal(receipts.length,0,'GET message content behind an image is not a read receipt')
+  panel.setMediaPreview(false,image);await nextTick();await advance(449)
+  assert.equal(receipts.length,0)
+  await advance(1);assert.deepEqual(receipts[0].messageIds,['first'])
+  serverId='second';panel.setMediaPreview(true,image);panel.setMediaPreview(true,video)
+  await panel.load();panel.setMediaPreview(false,image);await nextTick();await advance(1000)
+  assert.equal(receipts.length,1,'closing one preview cannot unblock a second fullscreen media component')
+  panel.setMediaPreview(false,video);await nextTick();await advance(449);assert.equal(receipts.length,1)
+  await advance(1);assert.deepEqual(receipts[1].messageIds,['second'])
+  serverId='third';document.fullscreenElement={};panel.onFullscreenChange();await panel.load();await advance(1000)
+  assert.equal(receipts.length,2,'standard fullscreen also covers videos from the attachment draft')
+  document.fullscreenElement=null;panel.onFullscreenChange();await nextTick();await advance(449);assert.equal(receipts.length,2)
+  await advance(1);assert.deepEqual(receipts[2].messageIds,['third'])
+  serverId='fourth';panel.draftVideoFullscreen.value=true;await panel.load();await advance(1000);assert.equal(receipts.length,3)
+  panel.draftVideoFullscreen.value=false;await nextTick();await advance(449);assert.equal(receipts.length,3)
+  await advance(1);assert.deepEqual(receipts[3].messageIds,['fourth'])
+  panel.setMediaPreview(true,image);user.user={id:'b'};await nextTick();await panel.loadChannels();await panel.load()
+  const nextImage=Symbol('image-next-account');panel.setMediaPreview(true,nextImage);panel.setMediaPreview(false,image)
+  await nextTick();await advance(1000);assert.equal(receipts.length,4,'late teardown from the old account cannot clear the new overlay')
+  panel.setMediaPreview(false,nextImage);await nextTick();await advance(449);assert.equal(receipts.length,4)
+  await advance(1);assert.equal(receipts.length,5)
+  panel.reader.dispose()
+})
 
 test('三个运营页面的 Vue 脚本与模板均可编译', () => {
   for (const [name, source] of Object.entries(sources)) {
@@ -211,4 +258,23 @@ test('留言分页去重并防止重复加载，切换频道后迟到的旧页�
   assert.deepEqual(panel.messages.value.map((message) => message.id), ['new-channel'])
   assert.equal(panel.page.value, 1)
   assert.equal(panel.hasMore.value, false)
+})
+
+test('目录头像摘要不依赖机器接口，旧账号目录响应不能覆盖新账号且失败保留最新摘要', async () => {
+  const pending=[],dorm=reactive({code:'guiyuan',buildings:[{code:'guiyuan',name:'桂园'}]}),route=reactive({query:{}}),user=loggedInUser()
+  const panel=evaluate(sources.messages,{...messageBase,useRoute:()=>route,useRouter:()=>({push(){},replace(){}}),useDormStore:()=>dorm,useUserStore:()=>user,loadBoard:()=>assert.fail('directory must not query machines'),api:path=>{
+    if(path!=='/api/messages/channels')return Promise.resolve({notices:[]})
+    const job=deferred();pending.push(job);return job.promise
+  }},'({loadChannels,channelRows,channelPreview,channelsError})')
+  const old=panel.loadChannels();user.user={id:'new'};await nextTick()
+  assert.equal(pending.length,2,'同一账号的并发频道目录请求合并，切换账号才另发请求')
+  pending.at(-1).resolve({channels:[{code:'public',name:'公共频道',unreadCount:4,avatarData:'data:image/png;base64,fixture',summary:{nick:'李**同学',text:'你好',kind:'text'}}]});await nextTick();await nextTick()
+  pending.slice(0,-1).forEach(job=>job.resolve({channels:[{code:'public',name:'旧目录',unreadCount:99}]}));await old
+  assert.equal(panel.channelRows.value[0].name,'公共频道')
+  assert.equal(panel.channelRows.value[0].unreadCount,4)
+  assert.equal(panel.channelPreview(panel.channelRows.value[0]),'李**同学: 你好')
+  assert.equal(panel.channelPreview({summary:{nick:'王**同学',kind:'video',text:'private caption'}}),'王**同学: [视频]')
+  const failed=panel.loadChannels();pending.at(-1).reject(Error('offline'));await failed
+  assert.equal(panel.channelRows.value[0].unreadCount,4)
+  assert.match(panel.channelsError.value,/保留当前目录/)
 })

@@ -43,6 +43,7 @@ import { registerMachineFeedbackRoutes } from './machine-feedback.js'
 import { machineLabels } from '../packages/core/machine-labels.js'
 import { readCalibrationSettings, projectCalibratedBoard, calibrateMachineBoard, invalidateMachineCalibration } from '../packages/core/machine-time-calibration.js'
 import { configureMachineDocuments } from '../packages/core/machine-documents.js'
+import { communitySnapshot } from './community-snapshot.js'
 import { resolveMachineTime } from '../packages/core/machine-time.js'
 import { registerMachineTimeCalibrationRoutes } from './machine-time-calibration.js'
 import { registerQueueNoticeRoutes } from './queue-reminders.js'
@@ -1035,7 +1036,8 @@ export function createApp({ store, env, mobile = {} }) {
     })
   )
 
-  const authenticateRequest=async c=>{const uid=await bearerUser(c,env);return uid?store.get('user:'+uid,null):null}
+  const requestReadStore=c=>['GET','HEAD'].includes(c.req.method)&&c.req.path.startsWith('/api/messages')?communitySnapshot(c,store).store:store
+  const authenticateRequest=async c=>{const uid=await bearerUser(c,env);return uid?requestReadStore(c).get('user:'+uid,null):null}
   app.use('/api/*',async(c,next)=>{
     await next()
     const vary=new Set((c.res.headers.get('Vary')||'').split(',').map(value=>value.trim()).filter(Boolean));vary.add('Authorization');vary.add('X-Admin-Token');c.header('Vary',[...vary].join(', '))
@@ -1045,7 +1047,7 @@ export function createApp({ store, env, mobile = {} }) {
   app.use('/api/*', async(c,next)=>{
     c.set('adminAccessCodes',adminAccessCodes)
     try {
-      const access=(c.req.header('x-admin-token')||c.req.query('token'))?await adminAccessCodes.verifyRequest(c,(await getSiteConfig(store)).buildings):null
+      const access=(c.req.header('x-admin-token')||c.req.query('token'))?await adminAccessCodes.verifyRequest(c,(await getSiteConfig(requestReadStore(c))).buildings):null
       if(access)c.set('temporaryAdminAccess',access)
     }catch(error){c.set('adminAccessError',{code:error.code||'access_codes_unavailable',message:error.status?error.message:'临时口令暂不可用',status:error.status||503})}
     await next()
@@ -1059,7 +1061,7 @@ export function createApp({ store, env, mobile = {} }) {
   })
   const isHighest = async (c) => !c.get('temporaryAdminAccess') && (await checkSuperAdmin(c, env) || (await getUserIdentity(store, await bearerUser(c, env))).role === 'super')
   const baseEnv={...env}
-  app.use('/api/*',async(c,next)=>{const site=await getSiteConfig(store);env={...await loadSiteRuntime(store,baseEnv),SITE_BUILDINGS:site.buildings};await next()})
+  app.use('/api/*',async(c,next)=>{const source=requestReadStore(c),site=await getSiteConfig(source);if(source!==store)c.set('communitySiteSnapshot',site);env={...await loadSiteRuntime(source,baseEnv),SITE_BUILDINGS:site.buildings};await next()})
 
 
   // 看板数据超过这个时间就顺手刷一次，避免「后台每分钟才同步」造成的延迟。
@@ -1152,7 +1154,7 @@ export function createApp({ store, env, mobile = {} }) {
   }
 
 
-  registerPermissionMiddleware(app,{store,env,authenticate:async c=>{const uid=await bearerUser(c,env);return uid?store.get('user:'+uid,null):null},checkSuperAdmin:c=>checkSuperAdmin(c,env)})
+  registerPermissionMiddleware(app,{store,env,authenticate:authenticateRequest,checkSuperAdmin:c=>checkSuperAdmin(c,env)})
 
   // 身份、后台和私有活动始终禁止共享缓存。
   app.use('/api/*', async(c,next)=>{ await next(); if (!['/api/machines','/api/announcements','/api/push/key'].includes(c.req.path)) c.header('Cache-Control','no-store'); c.header('Referrer-Policy','no-referrer') })
@@ -1645,7 +1647,7 @@ export function createApp({ store, env, mobile = {} }) {
       const slotMap = savedMapping?.mapping || {}
       const map = overrides && typeof overrides === 'object' ? overrides : {}
       const calibration=await readCalibrationSettings(store,buildingId)
-      let board = applyMachineHealth(projectCalibratedBoard(entry.board, calibration), health)
+      let board = applyMachineHealth(projectCalibratedBoard(entry.board, calibration, { mapping: slotMap }), health)
       for (const floor of board.floors || []) {
         for (const m of floor.machines || []) {
           m.kind = machineKind(m, slotMap)
@@ -1713,7 +1715,7 @@ export function createApp({ store, env, mobile = {} }) {
       ])
       const taskOccupancy = await store.get(`occupancy:${bid}`, {})
       const registeredBoard = applyRegisteredAvailability(cachedBoard?.board, { occupancy:taskOccupancy, tasksByUser:new Map([[userId,list]]) })
-      const calibratedBoard = projectCalibratedBoard(registeredBoard, await readCalibrationSettings(store,bid))
+      const calibratedBoard = projectCalibratedBoard(registeredBoard, await readCalibrationSettings(store,bid), { mapping: savedMapping?.mapping || {} })
       const boardMachines = calibratedBoard?.floors?.flatMap((f) => f.machines) || []
       const now = nowISO()
       const nowMs = Date.now()
@@ -3713,8 +3715,8 @@ export function createApp({ store, env, mobile = {} }) {
   registerSiteRoutes(app,{store,env,checkAdmin:c=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env)})
   registerAdminRoutes(app, { store, env, authorize:c=>checkAdmin(c,env,store) })
   registerAdminAccessCodeRoutes(app,{service:adminAccessCodes,store,highest:async c=>{const allowed=await isHighest(c);if(allowed)c.set('adminAccessActor',await bearerUser(c,env)||'bootstrap');return allowed}})
-  const authenticate = async(c)=>{const uid=await bearerUser(c,env);return uid ? store.get(`user:${uid}`,null):null}
-  const getBoard = async({buildingId}={})=>{const bid=buildingId||env.BUILDING_ID||'b1';const [entry,mapping,calibration]=await Promise.all([store.get(`machines:${bid}`,null),store.get(`mapping:${bid}`,null),readCalibrationSettings(store,bid)]);return {board:projectCalibratedBoard(entry?.board,calibration),mapping:mapping?.mapping||{},buildings:env.SITE_BUILDINGS}}
+  const authenticate = authenticateRequest
+  const getBoard = async({buildingId}={})=>{const bid=buildingId||env.BUILDING_ID||'b1';const [entry,mapping,calibration]=await Promise.all([store.get(`machines:${bid}`,null),store.get(`mapping:${bid}`,null),readCalibrationSettings(store,bid)]);return {board:projectCalibratedBoard(entry?.board,calibration,{mapping:mapping?.mapping||{}}),mapping:mapping?.mapping||{},buildings:env.SITE_BUILDINGS}}
   registerMobileRoutes(app,{store,env,authenticate,getBoard,auth:mobileAuth,atomicStore:mobileAtomicStore,pushProviders:mobile.pushProviders||mobilePush.providers,mobilePush})
   registerPermissionRoutes(app,{store,authenticate,checkSuperAdmin:c=>checkSuperAdmin(c,env)})
   registerFavoriteRoutes(app,{store,env,authenticate,getBoard})

@@ -10,3 +10,24 @@ export function machineLabels(machine, mapping = {}) {
   const displayName = slot ? `${slot.replace(/^D/, '')}号${slot.startsWith('D') ? '烘干机' : '洗衣机'}` : remarkName || originalName
   return { slot: slot || null, displayName, originalName, remarkName }
 }
+
+/** The bound room slots are all on its first floor, even when upstream metadata is wrong. */
+export function projectMachinePlacement(board, mapping = board?.slotMapping || {}) {
+  if (!board) return board
+  const floors = board.floors || []
+  const firstFloor = floors.find(floor => /^(?:1|1F|F1)$/i.test(String(floor.code)))
+  const floorCode = firstFloor?.code ?? '1'
+  const next = new Map()
+  for (const floor of floors) {
+    for (const machine of floor.machines || []) {
+      const {slot} = machineLabels(machine, mapping)
+      const code = slot ? floorCode : floor.code
+      if (!next.has(String(code))) next.set(String(code), { ...(slot ? firstFloor || { code } : floor), machines: [] })
+      next.get(String(code)).machines.push(slot ? { ...machine, floorCode,
+        floorName: firstFloor?.name || firstFloor?.floorName || '1楼',
+        originalFloorCode: machine.originalFloorCode ?? machine.floorCode ?? floor.code,
+      } : { ...machine })
+    }
+  }
+  return { ...board, slotMapping: mapping, floors: [...next.values()] }
+}

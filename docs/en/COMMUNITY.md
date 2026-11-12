@@ -2,6 +2,14 @@
 
 [简体中文](../COMMUNITY.md) · [Deployment](../DEPLOYMENT.en.md) · [Machine state semantics](STATE-SEMANTICS.md)
 
+## Directory summaries and read receipts
+
+`GET /api/messages/channels` adds `summary` and `unreadCount` to each authorized channel. A summary is `null` or `{ messageId, nick, text, kind, at }`. Names are masked (for example, `李**同学`), text previews are limited to 80 characters, and media previews contain only `[图片]` or `[视频]`. `kind` is `text`, `image`, `video`, or `announcement`. The latest inserted, nondeleted message wins regardless of pin order. Disabled and unauthorized channels are omitted. Own messages do not count as unread; guest counts are zero.
+
+Directory and message GET requests never acknowledge reading. After messages are actually displayed in a foreground channel, call `POST /api/messages/read` with `{ channel, messageIds: [...] }` (1–50 existing message IDs). Only those IDs and their matching mention notices become read. Older unseen messages and later arrivals remain unread. The response is `{ ok: true, channel, unreadCount }`. The compatibility field `throughMessageId` acknowledges one ID only, never a range, and cannot be combined with `messageIds`.
+
+Receipts merge through durable compare-and-set so independent devices cannot overwrite each other. No client timestamp is accepted. Missing or deleted IDs return 404; refresh before retrying. Current view access is required, so muted and read-only members can acknowledge visible messages. Unavailable receipt storage returns a traceable 503. Request snapshots avoid repeated collection, profile, and role lookups without caching permissions across requests.
+
 ## Channels and roles
 
 | Role | Accessible channels | Channel management |
