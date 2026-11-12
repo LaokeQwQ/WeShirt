@@ -68,6 +68,7 @@ export async function isSiteAdmin(c, { store, env = {}, superAdminCheck }) {
   return await superAllowed(c, superAdminCheck) || checkSiteAdmin(c, store, env.AUTH_SECRET)
 }
 async function siteAccess(c, { store, env, checkSuperAdmin, checkAdmin }) {
+  if (c.get('temporaryAdminAccess')) return { allowed: true, superAdmin: false, bootstrap: false, role: 'admin', userId: null }
   const userId = await verifyRequestUser(c, env.AUTH_SECRET).catch(() => null)
   const identity = userId ? await getUserIdentity(store, userId) : { role: 'user' }
   if (await superAllowed(c, checkSuperAdmin)) return { allowed: true, superAdmin: true, bootstrap: identity.role !== 'super', role: 'super', userId }

@@ -2,7 +2,7 @@ import { mobileDigest } from './mobile-auth.js'
 import { timingSafeEqual } from './auth.js'
 import { readStreamBytes } from './stream-bytes.js'
 
-const keyOK = key => typeof key === 'string' && /^mobile:(?:challenge|session|limit|installation|installation-index|push-users):[A-Za-z0-9_:-]{1,180}$/.test(key)
+const keyOK = key => typeof key === 'string' && /^mobile:(?:challenge|session|limit|installation|installation-index|push-users|admin-access-codes):[A-Za-z0-9_:-]{1,180}$/.test(key)
 const error = () => new Error('mobile_store_unavailable')
 const assertKey = key => { if (!keyOK(key)) throw error() }
 export { assertKey as assertMobileAtomicKey }

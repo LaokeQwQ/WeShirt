@@ -21,8 +21,8 @@ test('configuration defaults closed and never serializes keys into admin/public 
   const next = patchAssistantConfig(old, { model: 'other', apiKey: '' })
   assert.equal(next.apiKey, old.apiKey)
   assert.equal(JSON.stringify(publicAssistantConfig(next)).includes('secret-key'), false)
-  assert.throws(() => patchAssistantConfig(old, { dailyLimit: 21 }))
-  assert.throws(() => patchAssistantConfig(old, { minuteLimit: 4 }))
+  assert.throws(() => patchAssistantConfig(old, { dailyLimit: 10001 }))
+  assert.throws(() => patchAssistantConfig(old, { minuteLimit: 31 }))
   assert.throws(() => patchAssistantConfig(old, { endpoint: 'https://localhost' }))
   assert.equal(old.model, 'mock-model')
 })
@@ -33,13 +33,13 @@ test('skills are bounded inert text; extra executable metadata never survives no
   assert.throws(() => validateSkill({ title: 'x', prompt: 'x'.repeat(1501) }))
 })
 
-test('history expires after 14 days, strips extra fields and keeps at most 20 messages', () => {
+test('history expires after 14 days, strips extra fields and keeps at most 256 messages', () => {
   const now = Date.now()
-  const rows = Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: String(i), at: new Date(now - i * 1000).toISOString(), secret: 'no' }))
+  const rows = Array.from({ length: 270 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: String(i), at: new Date(now - i * 1000).toISOString(), secret: 'no' }))
   rows.unshift({ role: 'user', content: 'expired', at: new Date(now - 15 * 86400000).toISOString() })
   const history = pruneHistory(rows, now)
-  assert.equal(history.length, 20)
-  assert.equal(history[0].content, '10')
+  assert.equal(history.length, 256)
+  assert.equal(history[0].content, '14')
   assert.equal(JSON.stringify(history).includes('secret'), false)
 })
 
@@ -57,6 +57,7 @@ test('machine tool strips occupancy/user data and keeps only bound dorm with map
   assert.equal(result.machines.length, 1)
   assert.equal(result.machines[0].kind, 'dryer')
   assert.equal(result.machines[0].remainingMinutes, 30)
+  assert.equal(result.machines[0].timeLabel, '预计剩余 30 分钟')
   assert.equal(JSON.stringify(result).includes('secret'), false)
   assert.equal(JSON.stringify(result).includes('other'), false)
   assert.throws(() => machineStatus(board, { dormBuilding: null }))
@@ -71,6 +72,40 @@ test('machine query honors custom catalog and reports stale snapshots as unknown
   assert.equal(status.machines[0].state, 'unknown')
   result.board.updatedAt = new Date(now).toISOString()
   assert.equal(machineStatus(result, { dormBuilding: 'custom' }, 'all', now).machines[0].state, 'idle')
+})
+
+test('machine tool keeps overdue running states and exposes a confirmation label instead of zero-minute prose', () => {
+  const now = Date.parse('2026-11-09T13:00:00Z')
+  const board = { updatedAt: new Date(now).toISOString(), floors: [{ code: '1F', machines: ['occupied', 'busy', 'abnormal'].map((state, index) => ({ id: `custom-${index}`, name: '自定义宿舍一号', state, finishAt: new Date(now - index * 60000).toISOString() })) }] }
+  const result = { buildings: [{ code: 'custom', name: '自定义宿舍' }], board }
+  const rows = machineStatus(result, { dormBuilding: 'custom' }, 'all', now).machines
+  assert.deepEqual(rows.map(row => row.state), ['occupied', 'busy', 'abnormal'])
+  for (const row of rows) {
+    assert.equal(row.remainingMinutes, 0)
+    assert.equal(row.timeLabel, '即将完成，等待设备确认')
+    assert.equal(Object.hasOwn(row, 'completionConfirmed'), false)
+  }
+  board.updatedAt = new Date(now - 8 * 60000).toISOString()
+  for (const row of machineStatus(result, { dormBuilding: 'custom' }, 'all', now).machines) {
+    assert.equal(row.state, 'unknown')
+    assert.equal(row.remainingMinutes, null)
+    assert.equal(row.timeLabel, null)
+  }
+})
+
+test('all provider protocols receive the zero-countdown instruction outside personal prompt text', async () => {
+  for (const protocol of ['responses', 'chat-completions', 'anthropic']) {
+    let sent
+    await callAssistant({ config: { ...config, protocol, endpoint: `https://example.com/v1/${protocol === 'responses' ? 'responses' : protocol === 'chat-completions' ? 'chat/completions' : 'messages'}` }, input: '还有多久', prompt: '请简单回答', getStatus: async () => ({}), fetchImpl: async (_, options) => {
+      sent = JSON.parse(options.body)
+      const result = protocol === 'responses' ? { output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '即将完成，等待设备确认' }] }] } : protocol === 'chat-completions' ? { choices: [{ message: { role: 'assistant', content: '即将完成，等待设备确认' } }] } : { content: [{ type: 'text', text: '即将完成，等待设备确认' }] }
+      return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } })
+    } })
+    const instructions = protocol === 'responses' ? sent.instructions : protocol === 'chat-completions' ? sent.messages[0].content : sent.system
+    assert.ok(instructions.includes('倒计时归零不代表设备结束'))
+    assert.ok(instructions.includes('不得显示“0分钟”或称机器已结束、已空闲'))
+    assert.ok(instructions.indexOf('倒计时归零不代表设备结束') < instructions.indexOf('<prompt>'))
+  }
 })
 
 test('Responses function loop retains reasoning/output and matches call_id, with store disabled', async () => {

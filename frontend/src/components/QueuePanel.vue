@@ -3,7 +3,7 @@
     <header><h3>排队预约</h3><button type="button" :disabled="loading" @click="load">刷新</button></header>
     <p v-if="!id" class="dim">先选择一台机器。</p>
     <template v-else>
-      <p class="dim">{{ machineState }}<span v-if="remaining !== null"> · 预计剩余 {{ remaining }} 分钟</span></p>
+      <p class="dim">{{ machineState }}<span v-if="machine?.state === 'occupied' && remaining !== null"> · {{ remaining > 0 ? `预计剩余 ${remaining} 分钟` : '即将完成' }}</span></p>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
       <div v-if="mine" class="mine"><strong>我的排位 · 第 {{ mine.position }} 位</strong><span>预计 {{ format(mine.startAt) }} 可使用</span><button :disabled="submitting" @click="cancel">{{ submitting ? '处理中…' : '取消预约' }}</button></div>
       <div v-else class="join"><label>预计使用时长<select v-model.number="durationMin" :disabled="submitting"><option v-for="duration in durations" :key="duration" :value="duration">{{ duration }} 分钟</option></select></label><button :disabled="submitting || loading || !!machine?.health?.confirmedFault" @click="join">{{ submitting ? '提交中…' : '加入预约' }}</button></div>

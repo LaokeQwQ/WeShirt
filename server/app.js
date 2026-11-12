@@ -30,6 +30,8 @@ import {
   randomNickExcept,
 } from '../packages/core/profile.js'
 import { registerAdminRoutes } from './admin.js'
+import { createAdminAccessCodes } from '../packages/core/admin-access-codes.js'
+import { registerAdminAccessCodeRoutes } from './admin-access-codes.js'
 import { registerTelemetryRoutes } from './telemetry.js'
 import { registerAnnouncementRoutes } from './announcements.js'
 import { registerAssistantRoutes, pruneAssistantStorage } from './assistant.js'
@@ -37,13 +39,19 @@ import { registerSiteRoutes,checkSiteAdmin,getSiteConfig,loadSiteRuntime } from 
 import { registerSocialRoutes } from './social.js'
 import { registerOperationsRoutes } from './operations.js'
 import { registerFavoriteRoutes } from './favorites.js'
+import { registerMachineFeedbackRoutes } from './machine-feedback.js'
+import { machineLabels } from '../packages/core/machine-labels.js'
+import { readCalibrationSettings, projectCalibratedBoard, calibrateMachineBoard, invalidateMachineCalibration } from '../packages/core/machine-time-calibration.js'
+import { configureMachineDocuments } from '../packages/core/machine-documents.js'
+import { resolveMachineTime } from '../packages/core/machine-time.js'
+import { registerMachineTimeCalibrationRoutes } from './machine-time-calibration.js'
 import { registerQueueNoticeRoutes } from './queue-reminders.js'
 import { registerInspectionRoutes, buildInspectionGroupNotice } from './inspections.js'
 import { taskLifecycle, retainedTasks } from '../packages/core/task-retention.js'
 import { pruneUserTasks } from './task-retention.js'
 import { createMobileAuth, registerMobileRoutes } from './mobile.js'
 import { createRemoteMobileAtomicStore } from '../packages/core/mobile-store.js'
-import { createMobilePush } from '../packages/core/mobile-push.js'
+import { createMobilePush, mobileNoticeData } from '../packages/core/mobile-push.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { registerPermissionMiddleware, registerPermissionRoutes } from './permissions.js'
 import { registerAuditMiddleware } from './audit-middleware.js'
@@ -51,8 +59,11 @@ import { registerRequestSafety } from './request-safety.js'
 import { registerTaskMutationLock, withTaskMutation } from './task-mutation-lock.js'
 import { processFavoriteReminders } from '../packages/core/favorites.js'
 import { processQueueReminders } from '../packages/core/queue-reminders.js'
-import { runOperations, applyMachineHealth, withOperationLock } from '../packages/core/operations.js'
+import { runOperations, applyMachineHealth, withOperationLock, resetHealthObservation } from '../packages/core/operations.js'
 import { resolveBroadcastTargets, buildHourlyGroupNotice } from '../packages/core/group-broadcast.js'
+import { processMachineFaultNotices } from '../packages/core/machine-fault-notices.js'
+import { deliverTaskNotificationChannels } from '../packages/core/task-notification-channels.js'
+import { mobileDigest } from '../packages/core/mobile-auth.js'
 import { resolveMachineKind, normalizeMachineCategory } from '../packages/core/machine-kind.js'
 import { applyRegisteredAvailability } from '../packages/core/availability.js'
 import { processCommunityNotices } from '../packages/core/community-notices.js'
@@ -155,16 +166,17 @@ async function bearerUser(c, env) {
 // 管理口令校验：优先请求头（避免口令出现在 URL / 访问日志里）。
 // 也接受后台页面用的 12 小时会话票据（见 packages/core/auth.js）。
 async function checkSuperAdmin(c, env) {
+  if (c.get('temporaryAdminAccess') || c.get('adminAccessError')) return false
   const expect = adminSecret(env)
   if (!expect) return false
   const token = c.req.header('x-admin-token') || c.req.query('token')
   if (!token) return false
   if (token === expect) return true
   const payload = await verifyAdminSession(token, authSecret(env)).catch(() => null)
-  return Boolean(payload)
+  return Boolean(payload && !payload.accessCodeId)
 }
 
-async function checkAdmin(c,env,store){return await checkSuperAdmin(c,env) || Boolean(store && await checkSiteAdmin(c,store,authSecret(env)))}
+async function checkAdmin(c,env,store){return Boolean(c.get('temporaryAdminAccess')) || await checkSuperAdmin(c,env) || Boolean(store && await checkSiteAdmin(c,store,authSecret(env)))}
 
 // 同步密钥：由 AUTH_SECRET 派生，只能用来触发 /api/cron/sync。
 // 填进外部定时器（cron-job.org / UptimeRobot 之类）用它就够了——
@@ -460,51 +472,6 @@ async function notifyIdleOccupants(env, store, events) {
   return sent
 }
 
-// 机器报故障 → 私信当前占用者（每台 30 分钟最多一次）
-//
-// 群播报是「所有人都看到」，但真正需要知道的是正在用这台机器的人：
-// 他的衣服还在里面，可能要先捞出来。所以这条单独私聊。
-async function notifyFaultOccupants(env, store, events) {
-  const faults = (events || []).filter((e) => e.type === 'fault' && e.machine)
-  if (!faults.length) return 0
-
-  const buildingId = env.BUILDING_ID || 'b1'
-  const occ = (await store.get(`occupancy:${buildingId}`, {}).catch(() => null)) || {}
-  const savedMap = await store.get(`mapping:${buildingId}`, null).catch(() => null)
-  const map = (savedMap && savedMap.mapping) || {}
-  const slotById = {}
-  for (const [slot, id] of Object.entries(map)) if (id) slotById[String(id)] = String(slot)
-
-  const dingMod = await import('../packages/core/dingtalk.js').catch(() => null)
-  if (!dingMod || typeof dingMod.createDingTalk !== 'function') return 0
-  const dt = dingMod.createDingTalk(env)
-
-  let sent = 0
-  for (const e of faults) {
-    const machineId = String(e.machine.id)
-    const entry = occ[machineId]
-    if (!entry || !entry.userId) continue
-
-    // 同一台 30 分钟内只私信一次，别在上游抖动时反复骚扰
-    const key = `faultdm:${buildingId}:${machineId}`
-    const last = Number((await store.get(key, 0).catch(() => 0)) || 0)
-    if (Date.now() - last < 30 * 60 * 1000) continue
-
-    const user = await store.get(`user:${entry.userId}`, null).catch(() => null)
-    if (!user || !user.dingUserId || user.notifyOn === false) continue
-
-    const slot = slotById[machineId]
-    const where = slot ? `${slot} 号位` : e.machine.name
-    const text = `【等衣】${where}报故障了，衣服先拿出来，别硬开。报给宿管后一般很快来修。`
-    const r = await dt.sendSingle(user.dingUserId, text).catch(() => null)
-    if (r && r.ok) {
-      await store.put(key, Date.now()).catch(() => {})
-      sent++
-    }
-  }
-  return sent
-}
-
 // ─────────────────────────────────────────────────────────────
 // 自检 + 管理员告警
 // ─────────────────────────────────────────────────────────────
@@ -645,9 +612,9 @@ export function runSync(env, store, opts = {}) {
 
 async function runSyncOnce(env, store, opts = {}) {
   const nativePush = createMobilePush({store,env,...(opts.mobileAtomicStore?{atomicStore:opts.mobileAtomicStore}:{}) ,...(opts.mobilePushTransports?{transports:opts.mobilePushTransports}:{})})
-  await nativePush.drain().catch(()=>null)
   env = await loadSiteRuntime(store,env)
   env.SITE_BUILDINGS=(await getSiteConfig(store)).buildings
+  configureMachineDocuments(store,{env,atomicStore:opts.mobileAtomicStore || createRemoteMobileAtomicStore(env)})
   const out = { fetched: 0, events: [], notified: 0, error: null }
   const buildingId = env.BUILDING_ID || 'b1'
   const buildingName = env.BUILDING_NAME || '1 号楼'
@@ -711,9 +678,17 @@ async function runSyncOnce(env, store, opts = {}) {
     let board = machinesMod.buildBoard(normalized, { buildingId, buildingName })
     for (const m of board.floors.flatMap((f)=>f.machines)) m.dormBuilding=resolveMachineDorm(m,savedMapping?.mapping||{},env.SITE_BUILDINGS)
     board.slotMapping = savedMapping?.mapping || {}
+    stage = 'time_calibration'
+    const previousBoard = (await store.get(`machines:${buildingId}`,null))?.board
+    const previousMachines = new Map((previousBoard?.floors || []).flatMap(f=>f.machines).map(machine=>[String(machine.id),machine]))
+    for (const machine of board.floors.flatMap(f=>f.machines)) {
+      const prior = previousMachines.get(String(machine.id))
+      if (machine.state==='idle' && prior && (prior.platformCompletionConfirmed || ['occupied','abnormal'].includes(prior.upstreamState || prior.state) && prior.availabilitySource!=='user_report')) machine.platformCompletionConfirmed=true
+    }
+    board = await calibrateMachineBoard({store,buildingId,board,previousBoard})
     stage = 'health'
     out.fetched = Array.isArray(raws) ? raws.length : 0
-    const operations = await runOperations({store,board,env,beforeNotify:async projected=>{
+    const operations = await runOperations({store,board,env,reviewRequired:true,atomicStore:opts.mobileAtomicStore || createRemoteMobileAtomicStore(env),beforeNotify:async projected=>{
       stage = 'snapshot_write'
       const prev = await store.get(`machines:${buildingId}`, null)
       out.events = machinesMod.diffEvents(prev?.board?.floors?.flatMap(f => f.machines) || [], projected.floors.flatMap(f => f.machines)) || []
@@ -732,6 +707,22 @@ async function runSyncOnce(env, store, opts = {}) {
     board=operations.board
     out.operations=operations.broadcast
     const nextMachines = board.floors.flatMap((f) => f.machines)
+    // Refresh the shared snapshot before retrying time-sensitive native events.
+    await nativePush.drain().catch(()=>null)
+    // Delivery errors must not turn a successful capture into an upstream failure.
+    try {
+      out.faultNotices = await processMachineFaultNotices({store,board,env,
+        atomicStore:opts.mobileAtomicStore || createRemoteMobileAtomicStore(env),
+        notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,nativePush),
+        broadcastTargets:()=>resolveBroadcastTargets(store,env),
+        broadcast:async({target,notice})=>{
+          const mod=await import('../packages/core/dingtalk.js'); const dt=mod.createDingTalk(env)
+          return target.via==='webhook' ? dt.broadcastMarkdown(notice.title,notice.markdown) : dt.sendGroup(target.conversationId,notice)
+        },
+      })
+    } catch {
+      out.faultNotices = {error:'notification_unavailable'}
+    }
     stage = 'maintenance'
     // Housekeeping must never prevent a fresh device snapshot from being saved.
     try {
@@ -754,7 +745,7 @@ async function runSyncOnce(env, store, opts = {}) {
     }
     const reminderBoard = { board: enabledMachineBoard(board, await currentDormCatalog(store, env.SITE_BUILDINGS), savedMapping?.mapping || {}), mapping: savedMapping?.mapping || {} }
     const reminders = await Promise.allSettled([
-      processQueueReminders({ store, board, env, notify: notifyUser }),
+      processQueueReminders({ store, board, env, notify: notifyUser,atomicStore:opts.mobileAtomicStore || createRemoteMobileAtomicStore(env) }),
       processFavoriteReminders({ store, board: reminderBoard, env, notify: notifyUser }),
       processCommunityNotices({store,env,notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,nativePush)}),
       pruneCommunityMedia({store,now:Date.now(),limit:20}),
@@ -780,10 +771,7 @@ async function runSyncOnce(env, store, opts = {}) {
     }
     // lastAttemptAt：不管成败都记「最近一次尝试」，页面刷新按它判断要不要再打上游。
     // 只用 lastFetchAt（成功时间）会让失败时每次刷新都重试 → 越刷越被 WAF 拦。
-    out.groupNotices = operations.broadcast?.sent ? 1 : 0
-
-    // 故障不主动私信：状态只跟着看板更新，别拿故障去打扰人。
-    // （「时间不动」那种卡住才通知，见 detectDryerStuck）
+    out.groupNotices = (operations.broadcast?.sent ? 1 : 0) + (out.faultNotices?.groups || 0)
 
     // 洗完私信：告诉占用者「洗好了」，他回「已取」就能销账
     try {
@@ -812,24 +800,39 @@ async function runSyncOnce(env, store, opts = {}) {
       const notificationUpdates = new Map()
       for (const original of value) {
         const t = { ...original }
-        if (taskLifecycle(t).archived || t.done || t.notified || (t.notifyFailed && Date.now() - Date.parse(t.notifyAttemptAt || 0) < 1800000)) continue
+        if (taskLifecycle(t).archived || t.done || t.takenAt) continue
+        const latestBoard = (await store.get(`machines:${buildingId}`,null))?.board || board
+        const currentMachine = latestBoard.floors.flatMap(f=>f.machines).find((machine) => String(machine.id) === String(t.machineId))
+        if (!currentMachine) continue
+        const clock = resolveMachineTime(currentMachine,{task:t,now:Date.now(),snapshotAt:latestBoard.updatedAt})
+        const running = ['occupied','abnormal'].includes(currentMachine.upstreamState || currentMachine.state) && currentMachine.availabilitySource !== 'user_report'
+        if (running && !clock.stale && !t.platformSeenRunning) {
+          t.platformSeenRunning = true
+          notificationUpdates.set(t.id,{platformSeenRunning:true})
+        }
+        const confirmed = clock.confirmedFinished && (currentMachine.platformCompletionConfirmed || t.platformSeenRunning || t.mode === 'machine')
+        if (confirmed && !t.platformSeenRunning) {
+          t.platformSeenRunning=true
+          notificationUpdates.set(t.id,{platformSeenRunning:true})
+        }
+        const left = confirmed ? 0 : clock.remainingMinutes
+        const phase = confirmed ? 'end' : left > 0 && left <= lead ? 'lead' : null
+        // Preserve old completed receipts, but partial new deliveries remain
+        // eligible independently of a different channel's success.
+        if (!phase || clock.stale || phase === 'lead' && t.notified && !t.notifyChannels?.lead || t.notifyPhases?.[phase]) continue
         t.notifyAttemptAt = nowISO()
-        const left = machinesMod.computeLeftMin(t.endAt, now)
-        if (left === null || left > lead) continue
-        const currentMachine = nextMachines.find((machine) => String(machine.id) === String(t.machineId)) || { id: t.machineId, name: t.machineName, dormBuilding: t.dormBuilding }
         if (!isMachineDormEnabled(currentMachine, await currentDormCatalog(store, env.SITE_BUILDINGS), savedMapping?.mapping || {})) continue
-        let anyOk = false
         // 统一文案：钉钉用卡片（title + markdown），Web Push 用纯文本兜底
         const notice =
           noticeMod && typeof noticeMod.buildTakeNotice === 'function'
             ? noticeMod.buildTakeNotice({
                 ...noticeMachine({ id: t.machineId, name: t.machineName, kind: t.kind }, savedMapping?.mapping || {}),
-                confirmed: false,
-                estimated: t.mode !== 'machine',
+                confirmed,
+                estimated: clock.source !== 'upstream',
                 machineName: t.machineName || t.machineId,
                 floorCode: t.floorCode,
                 leftMin: left > 0 ? left : null,
-                endAt: t.endAt,
+                endAt: clock.deadline,
                 leadMin: lead,
               })
             : {
@@ -841,14 +844,21 @@ async function runSyncOnce(env, store, opts = {}) {
                     : `【等衣】${t.machineName || t.machineId} 洗好了，快来取`,
               }
         const text = notice.text
-        // Persist an independent native outbox before the older channels mark
-        // this task notified. A later DingTalk success cannot cancel its retry.
-        try {
-          const confirmed=t.mode==='machine'&&left<=0&&currentMachine.state==='idle'&&!currentMachine.health?.stale
-          const nativeResult = await nativePush.notify(userId,{...notice,nativeEventKey:'task:'+t.id+':take:'+lead,taskId:t.id,finishAt:t.endAt,confirmed,nativeKind:left>0?'QUEUE_THREE_MINUTES':confirmed?'TASK_FINISHED':'ESTIMATED_END'})
-          if(nativeResult.ok)anyOk=true
-        } catch { /* delivery stays bounded and never exposes provider data */ }
-        // 记下有没有推送订阅，写审计时用（作用域只在这条任务里）
+        const atomicStore = opts.mobileAtomicStore || createRemoteMobileAtomicStore(env)
+        const channels = []
+        // Once queued durably, native retries and live countdown refresh belong
+        // to its independent outbox. Keep its revision stable across syncs.
+        if (nativePush.providers.length) {
+          const nativeNotice = {...notice,nativeEventKey:'task:'+t.id+':'+phase+':'+lead,taskId:t.id,machineId:String(t.machineId),finishAt:clock.deadline,confirmed,
+            machineTime:{machineId:String(t.machineId),phase,leadMinutes:lead},revision:1,nativeKind:left>0?'QUEUE_THREE_MINUTES':'TASK_FINISHED'}
+          channels.push({id:'native',send:async()=>{
+            const installed = await atomicStore.get('mobile:installation-index:' + userId)
+            if (!installed?.value?.installations?.length) return {skipped:true}
+            const data = await mobileNoticeData(nativeNotice)
+            if (installed.value.outbox?.some(row=>row.data?.eventId===data.eventId)) return {queued:true}
+            return nativePush.notify(userId,nativeNotice)
+          }})
+        }
         const userSubsCount = (Array.isArray(subs) ? subs : []).filter((s) => s.userId === userId).length
 
         // Web Push
@@ -856,42 +866,36 @@ async function runSyncOnce(env, store, opts = {}) {
           const userSubs = (Array.isArray(subs) ? subs : []).filter((s) => s.userId === userId)
           const wp = webpushMod.createWebPush(env)
           for (const s of userSubs) {
-            try {
-              // subs 结构：{ userId, endpoint, keys, createdAt }，而 webpush.send 需要 { endpoint, keys }
+            const destination = s.subscription?.endpoint || s.endpoint || ''
+            channels.push({ id:'web:' + await mobileDigest(destination), send:async()=>{
               const sub = s.subscription || { endpoint: s.endpoint, keys: s.keys }
               const r = await wp.send(sub, { type:'done', taskId:t.id, title:notice.title, body:text, text, tag:'task-'+t.id, url:'/#/task' })
-              if (r && r.ok) anyOk = true
               if (r && r.gone) {
-                // 端点失效，删除该订阅
                 const idx = subs.indexOf(s)
                 if (idx >= 0) subs.splice(idx, 1)
               }
-            } catch {
-              /* 静默 */
-            }
+              return r
+            } })
           }
         }
         // 钉钉单聊（有 markdown 就发卡片，失败自动降级纯文本）
         if (dingMod && typeof dingMod.createDingTalk === 'function' && user && user.dingUserId) {
-          try {
-            const dt = dingMod.createDingTalk(env)
-            const r = await dt.sendSingle(user.dingUserId, notice)
-            if (r && r.ok) anyOk = true
-          } catch {
-            /* 静默 */
-          }
+          const dt = dingMod.createDingTalk(env)
+          channels.push({ id:'ding', send:()=>dt.sendSingle(user.dingUserId, notice) })
         }
-        // 两条通道都没发出去就别标记 notified：
-        // 任务会在下一轮同步（30 秒后）再试一次。试满 3 次才彻底放弃，
-        // 否则一次网络抖动就永久丢了这条提醒。
-        if (anyOk) {
+        const delivery = await deliverTaskNotificationChannels({atomicStore,scope:`${buildingId}|${userId}|${t.id}|${phase}`,previous:t.notifyChannels?.[phase],channels,now:Date.now()})
+        const anyOk = delivery.anyOk
+        t.notifyChannels = {...t.notifyChannels,[phase]:delivery.state}
+        // Every selected destination settles separately; already successful
+        // destinations are never resent while another destination retries.
+        if (delivery.complete) {
           t.notified = true
+          t.notifyPhases = {...t.notifyPhases,[phase]:nowISO()}
           notified++
-        } else {
+        } else if (delivery.attempted) {
           t.notifyTries = (Number(t.notifyTries) || 0) + 1
-          if (t.notifyTries >= 3) t.notifyFailed = true
         }
-        notificationUpdates.set(t.id, { notified: t.notified, notifyAttemptAt: t.notifyAttemptAt, notifyTries: t.notifyTries, notifyFailed: t.notifyFailed })
+        notificationUpdates.set(t.id, { platformSeenRunning:t.platformSeenRunning,notifyPhases:t.notifyPhases,notifyChannels:t.notifyChannels,notified: t.notified, notifyAttemptAt: t.notifyAttemptAt, notifyTries: t.notifyTries, notifyFailed:false })
         // 提醒结果也留痕：用户说「没收到通知」时，第一件事就是查这条
         await audit(store, {
           type: 'notify',
@@ -902,11 +906,15 @@ async function runSyncOnce(env, store, opts = {}) {
           level: anyOk ? 'info' : 'warn',
           detail: {
             left,
-            endAt: t.endAt,
+            endAt: clock.deadline,
+            timeSource: clock.source,
+            phase,
             channels: {
               push: Boolean(userSubsCount),
               dm: Boolean(user && user.dingUserId),
             },
+            delivery:delivery.state,
+            complete:delivery.complete,
             ok: anyOk,
           },
         })
@@ -937,6 +945,10 @@ async function runSyncOnce(env, store, opts = {}) {
     out.error = category
     out.errorStage = stage
     out.eventId = eventId
+    if (stage === 'upstream_fetch') await resetHealthObservation(store, buildingId, {
+      status:Number(category.match(/HAIER HTTP (\d{3})/)?.[1]) || 0,eventId,
+    }).catch(() => {})
+    if (stage === 'upstream_fetch') await invalidateMachineCalibration({store,buildingId,eventId}).catch(()=>{})
 
     // 账号池：如果是鉴权/限流类失败，把这次用的账号冷却 10 分钟，
     // 下次自动换下一个。WAF 是按 IP 封的，轮账号救不了，但「按账号限流」能救；
@@ -962,7 +974,7 @@ async function runSyncOnce(env, store, opts = {}) {
     // 同时记 lastAttemptAt + cooldownUntil：
     // 上游 405 一般是 WAF 限流，失败后如果每个页面请求都立刻重试，
     // 只会让封禁更久（线上就这么把自己锁死过）。冷却期内一律不主动打上游，
-    // 只靠 CloudBase 的 5 分钟定时器去试，恢复后自动写回。
+    // 由 CloudBase 每分钟定时器重试，恢复后自动写回。
     const prevMeta = (await store.get('meta:sync', null)) || {}
     const failCount = (Number(prevMeta.failCount) || 0) + 1
     const cooldownMs = Math.min(120000, 30000 * failCount) // 30s → 60s → 120s 封顶
@@ -1006,6 +1018,8 @@ export function createApp({ store, env, mobile = {} }) {
 
   const app = new Hono()
   const mobileAtomicStore = mobile.atomicStore || createRemoteMobileAtomicStore(env)
+  configureMachineDocuments(store,{env,atomicStore:mobileAtomicStore})
+  const adminAccessCodes = createAdminAccessCodes({ atomicStore: mobileAtomicStore, authSecret: env.AUTH_SECRET })
   const mobileAuth = createMobileAuth({ store, env, atomicStore: mobileAtomicStore, identityProvider: mobile.identityProvider, now: mobile.now })
   const mobilePush = createMobilePush({store,env,atomicStore:mobileAtomicStore,...(mobile.pushTransports?{transports:mobile.pushTransports}:{})})
   app.use('/api/*', async (c, next) => { c.set('mobileAuthService', mobileAuth); await next() })
@@ -1028,6 +1042,14 @@ export function createApp({ store, env, mobile = {} }) {
     if(c.req.header('authorization')||c.req.header('x-admin-token'))c.header('Cache-Control','private, no-store')
   })
   registerAuditMiddleware(app,{store,env,authenticate:authenticateRequest,checkSuperAdmin:c=>checkSuperAdmin(c,env)})
+  app.use('/api/*', async(c,next)=>{
+    c.set('adminAccessCodes',adminAccessCodes)
+    try {
+      const access=(c.req.header('x-admin-token')||c.req.query('token'))?await adminAccessCodes.verifyRequest(c,(await getSiteConfig(store)).buildings):null
+      if(access)c.set('temporaryAdminAccess',access)
+    }catch(error){c.set('adminAccessError',{code:error.code||'access_codes_unavailable',message:error.status?error.message:'临时口令暂不可用',status:error.status||503})}
+    await next()
+  })
   registerRequestSafety(app,{store,env,authenticate:authenticateRequest})
   registerTaskMutationLock(app,{store,env})
   app.use('/api/user/*',async(c,next)=>{
@@ -1035,7 +1057,7 @@ export function createApp({ store, env, mobile = {} }) {
     const uid=await bearerUser(c,env)
     return uid?withOperationLock(store,'user-profile:'+uid,next):next()
   })
-  const isHighest = async (c) => await checkSuperAdmin(c, env) || (await getUserIdentity(store, await bearerUser(c, env))).role === 'super'
+  const isHighest = async (c) => !c.get('temporaryAdminAccess') && (await checkSuperAdmin(c, env) || (await getUserIdentity(store, await bearerUser(c, env))).role === 'super')
   const baseEnv={...env}
   app.use('/api/*',async(c,next)=>{const site=await getSiteConfig(store);env={...await loadSiteRuntime(store,baseEnv),SITE_BUILDINGS:site.buildings};await next()})
 
@@ -1083,7 +1105,7 @@ export function createApp({ store, env, mobile = {} }) {
 
     const task =
       inflightSync ||
-      (inflightSync = runSync(env, store).finally(() => {
+      (inflightSync = runSync(env, store, { mobileAtomicStore }).finally(() => {
         inflightSync = null
       }))
 
@@ -1137,6 +1159,7 @@ export function createApp({ store, env, mobile = {} }) {
   app.use('/api/auth/claim',async(c,next)=>withOperationLock(store,'auth:claim',async()=>{await next()}))
   app.use('/api/admin/*',async(c,next)=>{
     if(c.req.path==='/api/admin/login'||await isHighest(c))return next()
+    if(c.get('temporaryAdminAccess') && /^\/api\/admin\/(?:accounts|sync-url|diag-haier)/.test(c.req.path))return apiErr('forbidden','此配置需要总管权限',403)
     const uid=await bearerUser(c,env)
     if(uid){const role=(await store.get('meta:siteAdmins',[])).find(x=>x.userId===uid)?.role
       if(role==='operator' && !['GET','HEAD','OPTIONS'].includes(c.req.method))return apiErr('forbidden','运维账号仅可读取，修改请联系管理员',403)
@@ -1621,13 +1644,13 @@ export function createApp({ store, env, mobile = {} }) {
       ])
       const slotMap = savedMapping?.mapping || {}
       const map = overrides && typeof overrides === 'object' ? overrides : {}
-      let board = applyMachineHealth(JSON.parse(JSON.stringify(entry.board)), health)
+      const calibration=await readCalibrationSettings(store,buildingId)
+      let board = applyMachineHealth(projectCalibratedBoard(entry.board, calibration), health)
       for (const floor of board.floors || []) {
         for (const m of floor.machines || []) {
           m.kind = machineKind(m, slotMap)
           m.dormBuilding = resolveMachineDorm(m, slotMap,env.SITE_BUILDINGS)
-          m.slot = Object.entries(slotMap).find(([, id]) => String(id) === String(m.id))?.[0] || null
-          m.displayName = m.slot ? `${m.slot.replace(/^D/i,'')}号${m.kind==='dryer'?'烘干机':'洗衣机'}` : m.name
+          Object.assign(m, machineLabels(m, slotMap))
           const ov = map[m.id]
           if (ov && ov.state === 'recovered' && Date.now()-Date.parse(ov.recoveredAt)<3600000 && (m.state === 'faulty' || m.health?.suspectedFault)) {
             const upstream = m.upstreamState || 'unknown'
@@ -1641,6 +1664,8 @@ export function createApp({ store, env, mobile = {} }) {
       const ownerIds=[...new Set(Object.values(occupancy||{}).map(o=>o?.userId).filter(id=>typeof id==='string'))]
       const tasksByUser=new Map(await Promise.all(ownerIds.map(async id=>[id,await store.get('tasks:'+id,[])])))
       board=applyRegisteredAvailability(board,{occupancy,tasksByUser})
+      const tasksByMachine = new Map(Object.entries(occupancy || {}).map(([machineId, entry]) => [String(machineId), (tasksByUser.get(entry.userId) || []).find(task => ownsTaskOccupancy(entry, task, entry.userId))]))
+      board=projectCalibratedBoard(board, calibration, { tasksByMachine })
       board.floors=(board.floors||[]).map(floor=>({...floor,machines:(floor.machines||[]).filter(machine=>!env.SITE_BUILDINGS.some(building=>building.enabled===false&&building.code===resolveMachineDorm(machine,slotMap,env.SITE_BUILDINGS)))})).filter(floor=>floor.machines.length)
       if (dorm) {
         board.floors = filterDormFloors({ ...board, slotMapping: slotMap }, dorm,env.SITE_BUILDINGS)
@@ -1667,6 +1692,7 @@ export function createApp({ store, env, mobile = {} }) {
         { 'Cache-Control': 'no-store' }
       )
     } catch (e) {
+      if(e?.code==='machine_store_unavailable')return apiErr(e.code,'机器数据暂不可用，请稍后重试',503)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -1678,31 +1704,42 @@ export function createApp({ store, env, mobile = {} }) {
       // 提醒是同步里发的，如果只有 3D 页面才触发，直接进这个页面的用户就永远收不到。
       const userId = await bearerUser(c, env)
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
-      kickSync(c)
+      const bid = env.BUILDING_ID || 'b1'
+      await refreshIfStale(c, await store.get(`machines:${bid}`, null))
       const [list, savedMapping, cachedBoard] = await Promise.all([
         pruneUserTasks(store, env.BUILDING_ID, userId),
         store.get(`mapping:${env.BUILDING_ID || 'b1'}`, null),
         store.get(`machines:${env.BUILDING_ID || 'b1'}`, null),
       ])
-      const boardMachines = cachedBoard?.board?.floors?.flatMap((f) => f.machines) || []
+      const taskOccupancy = await store.get(`occupancy:${bid}`, {})
+      const registeredBoard = applyRegisteredAvailability(cachedBoard?.board, { occupancy:taskOccupancy, tasksByUser:new Map([[userId,list]]) })
+      const calibratedBoard = projectCalibratedBoard(registeredBoard, await readCalibrationSettings(store,bid))
+      const boardMachines = calibratedBoard?.floors?.flatMap((f) => f.machines) || []
       const now = nowISO()
       const nowMs = Date.now()
       const tasks = await Promise.all(
         (Array.isArray(list) ? list : []).map(async (t) => {
-          const endMs = t.endAt ? new Date(t.endAt).getTime() : NaN
-          const ended = Number.isFinite(endMs) && endMs <= nowMs
+          const machine = boardMachines.find(m => String(m.id) === String(t.machineId))
+          const currentTask = !t.done && ownsTaskOccupancy(taskOccupancy?.[t.machineId], t, userId)
+          const time = resolveMachineTime(currentTask ? machine || {} : {}, { task: t, now: nowMs, snapshotAt: calibratedBoard?.updatedAt })
+          const endAt = time.deadline || t.endAt
+          const endMs = Date.parse(endAt || '')
+          const confirmed = currentTask && time.confirmedFinished && (t.platformSeenRunning || machine?.platformCompletionConfirmed || t.mode==='machine')
+          const ended = currentTask ? confirmed : Number.isFinite(endMs) && endMs <= nowMs
           return {
             id: t.id,
             ...taskDetailsView(t),
             machineId: t.machineId,
             machineName: t.machineName,
             kind: machineKind(boardMachines.find((m) => String(m.id) === String(t.machineId)) || { id: t.machineId, name: t.machineName, kind: t.kind }, savedMapping?.mapping || {}),
-            mode:t.mode||'duration', minutes:t.minutes, timingSource:t.timingSource||(t.mode==='machine'?'upstream':'user'), estimated:t.estimated===true,
+            mode:t.mode||'duration', minutes:t.minutes, timingSource:time.source, estimated:time.source!=='upstream',
+            timeStale:time.stale, completionConfirmed:confirmed, platformFinishAt:time.platformFinishAt,
+            timeOffsetMinutes:time.timeOffsetMinutes, registrationEndAt:t.endAt,
             ...(t.program==='self_clean'?{program:'self_clean'}:{}),
             startAt: t.startAt,
             ...taskLifecycle(t, nowMs),
-            endAt: t.endAt,
-            leftMin: await computeLeftMin(t.endAt, now),
+            endAt,
+            leftMin: time.remainingMinutes,
             // 结束后过了多少分钟（>=0）。前端靠它区分「即将完成」和「早就洗完了」，
             // 之前只给 leftMin（负数被夹成 0），三天前的任务也会显示「即将完成」。
             overdueMin: ended ? Math.floor((nowMs - endMs) / 60000) : 0,
@@ -1714,8 +1751,9 @@ export function createApp({ store, env, mobile = {} }) {
         })
       )
       const byDate = (a, b) => Date.parse(b.createdAt || b.startAt || '') - Date.parse(a.createdAt || a.startAt || '')
-      return json({ tasks, activeTasks: tasks.filter(t => !t.archived).sort(byDate), history: tasks.filter(t => t.archived).sort(byDate), retention: { archiveHours: 72, deleteHours: 336, basis: 'createdAt' } })
+      return json({ serverNow:now, tasks, activeTasks: tasks.filter(t => !t.archived).sort(byDate), history: tasks.filter(t => t.archived).sort(byDate), retention: { archiveHours: 72, deleteHours: 336, basis: 'createdAt' } })
     } catch (e) {
+      if(e?.code==='machine_store_unavailable')return apiErr(e.code,'机器数据暂不可用，请稍后重试',503)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -3604,7 +3642,7 @@ export function createApp({ store, env, mobile = {} }) {
         }).catch(() => {})
         return apiErr('forbidden', '口令不对', 403)
       }
-      const r = await runSync(env, store)
+      const r = await runSync(env, store, { mobileAtomicStore })
       return json(r)
     } catch (e) {
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
@@ -3645,15 +3683,18 @@ export function createApp({ store, env, mobile = {} }) {
         raws.push({
           id,
           name: typeof it.name === 'string' ? it.name.slice(0, 64) : '',
+          originalName: typeof (it.originalName || it.deviceName || it.name) === 'string' ? (it.originalName || it.deviceName || it.name).replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,100) : '',
+          remarkName: typeof (it.remarkName || it.remark) === 'string' ? (it.remarkName || it.remark).replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,100) : '',
           floorCode: it.floorCode != null ? String(it.floorCode).slice(0, 8) : '',
           state,
+          ...(it.queryFailed === true || Number(it.queryStatus) >= 400 ? {queryFailed:true,queryStatus:Number.isInteger(Number(it.queryStatus)) ? Number(it.queryStatus) : 0} : {}),
           ...(normalizeMachineCategory(it.categoryCode)?{categoryCode:it.categoryCode}:{}),
           finishTime: it.finishTime ?? null,
         })
       }
       if (!raws.length) return apiErr('bad_param', 'raws 里没有一条合法设备')
 
-      const r = await runSync(env, store, { raws, source: String(body.source || 'external').slice(0, 24) })
+      const r = await runSync(env, store, { raws, source: String(body.source || 'external').slice(0, 24), mobileAtomicStore })
       await audit(store, {
         type: 'sync',
         action: '外部抓取回写',
@@ -3671,13 +3712,16 @@ export function createApp({ store, env, mobile = {} }) {
   // 管理端扩展路由（用户 / 留言 / 机器 / 审计），拆在 admin.js
   registerSiteRoutes(app,{store,env,checkAdmin:c=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env)})
   registerAdminRoutes(app, { store, env, authorize:c=>checkAdmin(c,env,store) })
+  registerAdminAccessCodeRoutes(app,{service:adminAccessCodes,store,highest:async c=>{const allowed=await isHighest(c);if(allowed)c.set('adminAccessActor',await bearerUser(c,env)||'bootstrap');return allowed}})
   const authenticate = async(c)=>{const uid=await bearerUser(c,env);return uid ? store.get(`user:${uid}`,null):null}
-  const getBoard = async()=>{const bid=env.BUILDING_ID||'b1';const [entry,mapping]=await Promise.all([store.get(`machines:${bid}`,null),store.get(`mapping:${bid}`,null)]);return {board:entry?.board,mapping:mapping?.mapping||{},buildings:env.SITE_BUILDINGS}}
+  const getBoard = async({buildingId}={})=>{const bid=buildingId||env.BUILDING_ID||'b1';const [entry,mapping,calibration]=await Promise.all([store.get(`machines:${bid}`,null),store.get(`mapping:${bid}`,null),readCalibrationSettings(store,bid)]);return {board:projectCalibratedBoard(entry?.board,calibration),mapping:mapping?.mapping||{},buildings:env.SITE_BUILDINGS}}
   registerMobileRoutes(app,{store,env,authenticate,getBoard,auth:mobileAuth,atomicStore:mobileAtomicStore,pushProviders:mobile.pushProviders||mobilePush.providers,mobilePush})
   registerPermissionRoutes(app,{store,authenticate,checkSuperAdmin:c=>checkSuperAdmin(c,env)})
   registerFavoriteRoutes(app,{store,env,authenticate,getBoard})
+  registerMachineFeedbackRoutes(app,{store,env,authenticate,authorize:c=>checkAdmin(c,env,store)})
+  registerMachineTimeCalibrationRoutes(app,{store,env,authorize:c=>checkAdmin(c,env,store)})
   registerQueueNoticeRoutes(app,{store,authenticate})
-  registerAssistantRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),getBoard:async()=>{const bid=env.BUILDING_ID||'b1';const [entry,mapping]=await Promise.all([store.get(`machines:${bid}`,null),store.get(`mapping:${bid}`,null)]);return {board:entry?.board,mapping:mapping?.mapping||{},buildings:env.SITE_BUILDINGS}}})
+  registerAssistantRoutes(app,{store,env,atomicStore:mobileAtomicStore,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),getBoard})
   registerOperationsRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env),notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,mobilePush)})
   registerInspectionRoutes(app,{store,env,authenticate,getBoard,checkSuperAdmin:c=>checkSuperAdmin(c,env),notifyBuilding:async({conversationId,inspection})=>{
     const mod=await import('../packages/core/dingtalk.js')
@@ -3685,7 +3729,7 @@ export function createApp({ store, env, mobile = {} }) {
     return mod.createDingTalk(env).sendGroup(conversationId,notice)
   }})
   registerAnnouncementRoutes(app,{store,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store)})
-  registerSocialRoutes(app,{store,env,authenticate,notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,mobilePush)})
+  registerSocialRoutes(app,{store,env,authenticate,getBoard,notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,mobilePush)})
   registerTelemetryRoutes(app, { store, checkAdmin: (c) => checkAdmin(c, env, store) })
 
   return app

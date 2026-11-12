@@ -35,7 +35,7 @@ export function useDormBoard(dorm) {
   function schedule() {
     clearTimeout(timer)
     if (disposed || document.hidden) return
-    timer = setTimeout(async () => { await load(); schedule() }, Math.min(180000, 45000 * 2 ** Math.min(failures, 2)) + Math.random() * 3000)
+    timer = setTimeout(async () => { await load(); schedule() }, Math.min(120000, 30000 * 2 ** Math.min(failures, 2)) + Math.random() * 1500)
   }
   function onVisibility() {
     stop()

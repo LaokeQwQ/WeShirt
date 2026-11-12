@@ -1,7 +1,8 @@
 <template>
-  <div class="adm">
+  <div class="page adm">
     <van-nav-bar :title="title" left-text="返回" left-arrow @click-left="goBack" />
 
+    <div class="admin-detail-content">
     <div v-if="error" class="request-error" role="alert">{{ error }}<button class="op" @click="reload">重试</button></div>
     <div v-if="loading" class="empty text-dim">读取中…</div>
 
@@ -13,12 +14,21 @@
       <div class="toolbar">
         <input v-model="userQ" class="q" placeholder="搜昵称 / 账号 ID / 钉钉 ID" @keyup.enter="loadUsers" />
         <van-button size="small" @click="loadUsers">搜索</van-button>
+        <van-button size="small" :loading="exportingUsers" @click="exportUsers">导出脱敏 CSV</van-button>
       </div>
+      <section v-if="bulkAccess.operate" class="bulk-users card" aria-label="批量用户管理">
+        <div class="bulk-selection"><label><input type="checkbox" :checked="allVisibleSelected" :disabled="batchSaving || !selectableUsers.length" @change="selectVisibleUsers($event.target.checked)" />选择当前可操作用户</label><span>已选 {{ selectedUsers.length }} / 50</span></div>
+        <div class="bulk-controls"><select v-model="bulkDorm" class="log-sel" aria-label="批量目标住宿楼" :disabled="batchSaving"><option value="">选择目标住宿楼</option><option v-for="b in bulkBuildings" :key="b.code" :value="b.code">{{ b.name }}</option><option v-if="bulkAccess.operateBuildings === null" value="__unbound__">清除住宿楼绑定</option></select><van-button size="small" :disabled="!selectedUsers.length || !bulkDorm || batchSaving" @click="batchUsers('setDorm')">修改住宿楼</van-button></div>
+        <div class="bulk-controls"><van-button size="small" :disabled="!selectedUsers.length || batchSaving" @click="batchUsers('setNotify', true)">开启提醒</van-button><van-button size="small" :disabled="!selectedUsers.length || batchSaving" @click="batchUsers('setNotify', false)">关闭提醒</van-button><van-button size="small" type="danger" :disabled="!selectedUsers.length || batchSaving" @click="batchUsers('delete')">删除所选用户</van-button></div>
+        <p class="text-dim">每次最多 50 人。未取衣任务、现场登记和高权限账号会受到额外保护。</p>
+      </section>
+      <section v-if="batchResult" class="batch-result card" role="status"><b>成功 {{ batchResult.succeeded }} 人，未完成 {{ batchResult.failed }} 人</b><p v-for="item in batchResult.results.filter(row => !row.ok)" :key="item.id">{{ item.id }}：{{ item.error?.message || '请刷新后核对' }}（{{ item.status }} · {{ item.error?.eventId || batchResult.eventId }}）</p></section>
       <div class="toolbar">
         <van-button size="small" block :loading="backfilling" @click="backfill">补全已绑定用户的手机号 / 钉钉昵称</van-button>
       </div>
       <div class="hint text-dim">共 {{ users.length }} 人（手机号默认脱敏）</div>
       <div v-for="u in users" :key="u.id" class="row card">
+        <input v-if="u.canOperate" class="user-select" type="checkbox" :aria-label="'选择用户 ' + u.nick" :checked="selectedUsers.includes(u.id)" :disabled="batchSaving" @change="selectUser(u.id, $event.target.checked)" />
         <Avatar :seed="u.avatar" :src="u.avatarUrl" :size="38" />
         <div class="row-main">
           <div class="row-title">{{ u.nick }}<span class="dim-id">{{ u.id }}</span></div>
@@ -27,12 +37,12 @@
             <template v-if="u.dingNick"> · {{ u.dingNick }}</template>
             <template v-if="u.mobile"> · {{ u.mobile }}</template>
           </div>
-          <label class="user-dorm">住宿楼<select v-model="u._dormDraft" :disabled="savingUser === u.id" aria-label="用户住宿楼"><option value="">未绑定</option><option v-for="b in buildings" :key="b.code" :value="b.code">{{ b.name }}</option></select><button class="op" :disabled="savingUser === u.id || (u.dormBuilding || '') === u._dormDraft" @click="saveUserDorm(u)">{{ savingUser === u.id ? '保存中…' : '保存' }}</button></label>
+          <label class="user-dorm">住宿楼<select v-model="u._dormDraft" :disabled="!u.canOperate || savingUser === u.id || batchSaving" aria-label="用户住宿楼"><option value="">未绑定</option><option v-for="b in buildings" :key="b.code" :value="b.code">{{ b.name }}</option></select><button class="op" :disabled="!u.canOperate || savingUser === u.id || batchSaving || (u.dormBuilding || '') === u._dormDraft" @click="saveUserDorm(u)">{{ savingUser === u.id ? '保存中…' : '保存' }}</button></label>
         </div>
         <div class="row-ops">
           <button class="op" @click="togglePhone(u)">{{ u._full ? '隐藏' : '全号' }}</button>
-          <button v-if="u.dingBound" class="op warn" @click="unbind(u)">解绑</button>
-          <button class="op danger" @click="removeUser(u)">删</button>
+          <button v-if="u.canOperate && u.dingBound" class="op warn" :disabled="batchSaving" @click="unbind(u)">解绑</button>
+          <button v-if="u.canOperate" class="op danger" :disabled="batchSaving" @click="removeUser(u)">删</button>
         </div>
       </div>
       <div v-if="!users.length" class="empty text-dim">没有匹配的用户</div>
@@ -71,15 +81,16 @@
         <div class="state-dot" :class="'st-' + r.state" />
         <div class="row-main">
           <div class="row-title">
-            {{ r.name || r.id }}
+            {{ r.displayName || r.remarkName || r.name || r.id }}
             <span class="tag">{{ r.dormBuildingName || '归属未知' }} · {{ floorText(r.floor) }}</span>
             <span class="tag">{{ r.kind === 'dryer' ? '烘干' : '洗衣' }}</span>
             <span v-if="r.slots?.length" class="tag">机位 {{ r.slots.join(' / ') }}</span>
             <span class="st-text" :class="'st-' + r.state">{{ stateText(r.state) }}</span>
           </div>
+          <div v-if="(r.originalName || r.name) !== (r.displayName || r.remarkName || r.name)" class="row-sub text-dim">原名 {{ r.originalName || r.name }}</div>
           <div class="row-sub text-dim">
-            <template v-if="r.leftMin != null">{{ r.estimated ? '预计' : '剩余' }} {{ r.leftMin }} 分</template>
-            <template v-if="r.occupiedBy"> · 登记人 {{ r.occupiedBy.nick }}</template>
+            <template v-if="r.leftMin != null">{{ r.state === 'idle' ? '已完成' : r.leftMin === 0 ? '即将完成' : `${r.estimated ? '预计' : '剩余'} ${r.leftMin} 分` }}</template>
+            <template v-if="r.occupiedBy"> · 登记人 <button class="occupant-link" @click="openOccupant(r.occupiedBy)">{{ r.occupiedBy.nick || r.occupiedBy.userId }}</button></template>
             <template v-if="r.queueCount"> · 排队 {{ r.queueCount }}</template>
           </div>
         </div>
@@ -89,6 +100,8 @@
         </div>
       </div>
       <div v-if="!machines.length" class="empty text-dim">还没拿到设备数据</div>
+      <MachineFeedbackAdmin />
+      <AdminMachineTimeCalibration />
     </template>
 
     <!-- 上报事件审计 -->
@@ -184,16 +197,19 @@
         <van-button block class="photo-close" @click="photoShow = false">关闭</van-button>
       </div>
     </van-popup>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { showToast, showConfirmDialog } from 'vant'
 import { api, BASE, getAdminSession, getToken } from '../api'
 import Avatar from '../components/Avatar.vue'
 import AdminCommunityReports from '../components/AdminCommunityReports.vue'
+import MachineFeedbackAdmin from '../components/MachineFeedbackAdmin.vue'
+import AdminMachineTimeCalibration from '../components/AdminMachineTimeCalibration.vue'
 import { useDormStore } from '../stores/dorm'
 import { normalizeDormBuilding } from '../../../packages/core/buildings.js'
 
@@ -209,6 +225,7 @@ const error = ref('')
 const savingUser = ref('')
 let usersRequest = 0
 let machinesRequest = 0
+let active = true
 
 const loading = ref(false)
 const title = computed(
@@ -223,7 +240,16 @@ const title = computed(
 )
 
 const users = ref([])
-const userQ = ref('')
+const userQ = ref(String(route.query.q || ''))
+const selectedUsers = ref([])
+const bulkAccess = ref({ operate: false, operateBuildings: [] })
+const bulkDorm = ref('')
+const batchSaving = ref(false)
+const batchResult = ref(null)
+const exportingUsers = ref(false)
+const selectableUsers = computed(() => users.value.filter(user => user.canOperate))
+const allVisibleSelected = computed(() => selectableUsers.value.length > 0 && selectableUsers.value.every(user => selectedUsers.value.includes(user.id)))
+const bulkBuildings = computed(() => buildings.value.filter(building => bulkAccess.value.operateBuildings === null || bulkAccess.value.operateBuildings?.includes(building.code)))
 const messages = ref([])
 const machines = ref([])
 const machineAt = ref('')
@@ -248,7 +274,61 @@ function stateText(s) {
   )
 }
 function goBack() {
-  router.push('/admin')
+  return router.replace('/admin')
+}
+function openOccupant(user) {
+  if (user?.userId) return router.push({ path: '/admin/users', query: { q: user.userId } })
+}
+function selectUser(id, checked) {
+  if (batchSaving.value || !selectableUsers.value.some(user => user.id === id)) return
+  if (checked && selectedUsers.value.length >= 50) return showToast('每次最多选择 50 人')
+  selectedUsers.value = checked ? [...new Set([...selectedUsers.value, id])] : selectedUsers.value.filter(value => value !== id)
+}
+function selectVisibleUsers(checked) {
+  if (batchSaving.value) return
+  selectedUsers.value = checked ? selectableUsers.value.slice(0, 50).map(user => user.id) : []
+  if (checked && selectableUsers.value.length > 50) showToast('已选择当前列表前 50 位可操作用户')
+}
+async function batchUsers(action, notifyOn) {
+  if (batchSaving.value || !selectedUsers.value.length || selectedUsers.value.length > 50) return
+  const ids = [...selectedUsers.value]
+  const principal = getToken() + '|' + (getAdminSession()?.session || '')
+  const body = { ids, action, confirmed: true }
+  let description
+  if (action === 'setDorm') {
+    if (!bulkDorm.value) return
+    body.dormBuilding = bulkDorm.value === '__unbound__' ? null : bulkDorm.value
+    description = body.dormBuilding ? `更换住宿楼为「${bulkBuildings.value.find(b => b.code === body.dormBuilding)?.name || body.dormBuilding}」` : '清除住宿楼绑定'
+  } else if (action === 'setNotify') { body.notifyOn = notifyOn; description = notifyOn ? '开启钉钉提醒' : '关闭钉钉提醒' }
+  else if (action === 'delete') description = '永久删除用户及相关个人数据；有未取衣任务或登记的用户将跳过'
+  else return
+  batchSaving.value = true
+  try { await showConfirmDialog({ title: `确认操作 ${ids.length} 位用户？`, message: description + '。系统会逐人校验权限，失败项会保留原因。' }) } catch { batchSaving.value = false; return }
+  if (!active || props.tab !== 'users' || principal !== getToken() + '|' + (getAdminSession()?.session || '')) { batchSaving.value = false; return }
+  batchResult.value = null
+  try {
+    const result = await adminApi('/api/admin/users/batch', { method: 'POST', body })
+    if (!active) return
+    batchResult.value = result
+    selectedUsers.value = (result.results || []).filter(item => !item.ok).map(item => item.id)
+    if (props.tab === 'users') await loadUsers()
+  } catch (e) { showToast(e?.message || '批量操作未完成，请刷新后核对') }
+  finally { batchSaving.value = false }
+}
+async function exportUsers() {
+  if (exportingUsers.value) return
+  const token = getToken(), session = getAdminSession()
+  if (!token && !session?.session) return showToast('请先登录管理账号')
+  exportingUsers.value = true
+  try {
+    const query = new URLSearchParams({ q: userQ.value.trim(), dorm: selectedDorm.value })
+    const response = await fetch(BASE + '/api/admin/users.csv?' + query, { headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(session?.session ? { 'x-admin-token': session.session } : {}) }, cache: 'no-store' })
+    if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(`${data.error?.message || '导出未完成'}（HTTP ${response.status}，事件 ${data.error?.eventId || response.headers.get('X-Event-ID') || 'client_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24)}）`) }
+    if (!active || token !== getToken() || session?.session !== getAdminSession()?.session) return
+    const blob = await response.blob(), url = URL.createObjectURL(blob), link = document.createElement('a')
+    try { link.href = url; link.download = `weshirt-users-${new Date().toISOString().slice(0, 10)}.csv`; link.click() } finally { URL.revokeObjectURL(url) }
+  } catch (e) { const message = e?.message || '导出失败'; showToast(message.includes('事件 ') ? message : `${message}（网络 0，事件 client_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}）`) }
+  finally { exportingUsers.value = false }
 }
 function floorText(value) { const s = String(value || ''); return /F$/i.test(s) ? s : s ? s + ' 层' : '楼层未知' }
 function reload() { ({ users: loadUsers, messages: loadMessages, machines: loadMachines, audits: loadAudits, logs: loadLogs })[props.tab]?.() }
@@ -282,7 +362,11 @@ async function loadUsers() {
     if (q) query.set('q', q)
     if (selectedDorm.value) query.set('dorm', selectedDorm.value)
     const d = await adminApi('/api/admin/users?' + query)
-    if (request === usersRequest) users.value = (d.items || []).map((u) => ({ ...u, _full: false, _dormDraft: u.dormBuilding || '' }))
+    if (request === usersRequest) {
+      users.value = (d.items || []).map((u) => ({ ...u, _full: false, _dormDraft: u.dormBuilding || '' }))
+      bulkAccess.value = d.bulk || { operate: false, operateBuildings: [] }
+      selectedUsers.value = selectedUsers.value.filter(id => users.value.some(user => user.id === id && user.canOperate))
+    }
   } catch (e) {
     if (request === usersRequest) error.value = e?.message || '读取失败'
   } finally {
@@ -554,14 +638,26 @@ async function exportLogs() {
   }
 }
 
-watch(() => props.tab, () => { usersRequest++; machinesRequest++; error.value = ''; reload() }, { immediate: true })
-onUnmounted(() => { usersRequest++; machinesRequest++ })
+watch(() => [props.tab, route.query.q], () => {
+  usersRequest++; machinesRequest++; error.value = ''; selectedUsers.value = []; batchResult.value = null
+  if (props.tab === 'users') userQ.value = String(route.query.q || '')
+  reload()
+}, { immediate: true })
+let machineRefreshTimer
+function refreshVisibleMachines(){if(active && props.tab==='machines' && !document.hidden && !loading.value)loadMachines()}
+onMounted(()=>{machineRefreshTimer=setInterval(refreshVisibleMachines,30000);document.addEventListener('visibilitychange',refreshVisibleMachines);window.addEventListener('online',refreshVisibleMachines)})
+onUnmounted(() => { active = false; usersRequest++; machinesRequest++;clearInterval(machineRefreshTimer);document.removeEventListener('visibilitychange',refreshVisibleMachines);window.removeEventListener('online',refreshVisibleMachines) })
 </script>
 
 <style scoped>
+.bulk-users,.batch-result{margin:10px 12px;padding:12px;display:grid;gap:12px}.bulk-selection,.bulk-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.bulk-selection{justify-content:space-between;font-size:12px}.bulk-selection label{display:flex;align-items:center;gap:8px}.bulk-users input,.user-select{width:20px;height:20px;accent-color:var(--primary);flex:none}.user-select{margin:8px 0}.bulk-users p,.batch-result p{font-size:12px;line-height:1.6;margin:0;overflow-wrap:anywhere}.bulk-controls .log-sel{flex:1 1 150px}.batch-result b{font-size:13px}.occupant-link{border:0;background:transparent;color:#93c5fd;padding:4px;font:inherit;text-decoration:underline;cursor:pointer}
 .request-error{margin:12px;padding:12px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);border-radius:10px;color:#fca5a5;font-size:12px;overflow-wrap:anywhere;display:flex;gap:10px;justify-content:space-between;align-items:center}.user-dorm{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--text-dim)}.user-dorm select{min-height:34px;max-width:130px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;color-scheme:dark}.op:disabled{opacity:.5;cursor:default}.st-unknown{background:#64748b}.st-text.st-unknown{color:#94a3b8}@media(max-width:420px){.toolbar{flex-wrap:wrap}.toolbar .q{min-width:180px}.row-ops{gap:9px}.row-ops .op{min-height:32px;padding:4px 8px}}
-.adm { padding-bottom: 24px; }
-.toolbar { display: flex; gap: 8px; align-items: center; padding: 10px 12px; }
+.adm { width: 100%; min-width: 0; padding-bottom: 24px; }
+.admin-detail-content { width: 100%; max-width: 1200px; min-width: 0; margin: 0 auto; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; }
+.toolbar .q { min-width: 0; flex: 1 1 160px; }
+.toolbar :deep(.van-button) { flex-shrink: 0; }
+@media (min-width: 720px) { .admin-detail-content { padding: 0 20px 24px; } }
 .q {
   flex: 1;
   height: 32px;
@@ -579,6 +675,7 @@ onUnmounted(() => { usersRequest++; machinesRequest++ })
 .log-filters { display: flex; gap: 8px; padding: 0 12px 8px; }
 .log-sel {
   flex: 1;
+  min-width: 0;
   height: 32px;
   padding: 0 8px;
   border-radius: 8px;
@@ -604,6 +701,7 @@ onUnmounted(() => { usersRequest++; machinesRequest++ })
 .log-search { display: flex; gap: 8px; padding: 0 12px 8px; }
 .log-input {
   flex: 1;
+  min-width: 0;
   height: 32px;
   padding: 0 10px;
   border-radius: 8px;
@@ -636,7 +734,7 @@ onUnmounted(() => { usersRequest++; machinesRequest++ })
 .row-main { flex: 1; min-width: 0; }
 .row-title { font-size: 14px; font-weight: 600; color: #eaf2fb; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .dim-id { font-size: 11px; color: #7d8ea3; font-weight: 400; }
-.row-sub { font-size: 12px; margin-top: 3px; }
+.row-sub { font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
 .row-text { font-size: 13px; color: #cdd8e5; margin-top: 4px; word-break: break-word; }
 .row-ops { display: flex; flex-direction: column; gap: 6px; flex: none; }
 .op {
@@ -662,9 +760,9 @@ onUnmounted(() => { usersRequest++; machinesRequest++ })
   font-weight: 400;
 }
 .state-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; flex: none; }
-.st-idle { background: #22c55e; }
-.st-occupied { background: #f59e0b; }
-.st-faulty { background: #ef4444; }
+.state-dot.st-idle { background: #22c55e; }
+.state-dot.st-occupied { background: #f59e0b; }
+.state-dot.st-faulty { background: #ef4444; }
 .st-text { font-size: 12px; font-weight: 400; }
 .st-text.st-idle { color: #22c55e; }
 .st-text.st-occupied { color: #f59e0b; }

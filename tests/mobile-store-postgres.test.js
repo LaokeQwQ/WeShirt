@@ -5,6 +5,7 @@ import { PGlite } from '@electric-sql/pglite'
 import { createCloudBasePostgresAtomicStore } from '../packages/core/mobile-store-postgres.js'
 import { createMobileAtomicHttpHandler } from '../packages/core/mobile-store.js'
 import { mobileDigest } from '../packages/core/mobile-auth.js'
+import { createAdminAccessCodes } from '../packages/core/admin-access-codes.js'
 
 let db
 const migration = new URL('../cloudbase/migrations/20261111030000_mobile_atomic_store.sql', import.meta.url)
@@ -169,4 +170,16 @@ test('HTTP bridge preserves method/auth denials and uses PostgreSQL transactions
   const read = await request({ op: 'get', key: 'mobile:limit:pg-http' })
   assert.equal(read.statusCode, 200)
   assert.deepEqual(JSON.parse(read.body).result.value, { deploymentCheck: true })
+})
+
+test('temporary admin namespace stores hashes and revokes sessions through real PostgreSQL CAS',async()=>{
+  const service=createAdminAccessCodes({atomicStore:makeStore(),authSecret:'postgres-admin-code-test-secret32'})
+  const created=await service.create({name:'数据库回归'},{actor:'bootstrap',key:'postgres-admin-create-key',buildings:[]})
+  const stored=await makeStore().get('mobile:admin-access-codes:registry')
+  assert.equal(JSON.stringify(stored).includes(created.code),false)
+  const login=await service.login(created.code,[],12*3600000)
+  const c={req:{header:()=>login.session,query:()=>undefined}}
+  assert.equal((await service.verifyRequest(c,[])).identity.role,'admin')
+  await service.revoke(created.accessCode.id)
+  await assert.rejects(service.verifyRequest(c,[]),error=>error.status===401)
 })

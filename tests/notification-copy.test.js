@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildTakeNotice, buildStuckNotice, buildUrgeNotice, buildWelcomeText, buildMachineLabel, NOTICE_TEMPLATES } from '../packages/core/notice.js'
+import { buildTakeNotice, buildStuckNotice, buildBoardDigest, buildUrgeNotice, buildWelcomeText, buildMachineLabel, NOTICE_TEMPLATES } from '../packages/core/notice.js'
 import { buildBindReply, buildHelpText, buildStatusReply } from '../packages/core/dingtalk.js'
 
 const END = '2026-11-09T10:30:00Z'
@@ -56,6 +56,28 @@ test('异常提醒只描述观测时间并要求现场确认，不推断断电�
   }
   const missing = buildStuckNotice()
   assert.ok(!/undefined|NaN|Infinity/.test(missing.text))
+})
+
+test('运行倒计时到零统一为即将完成，未知时间和已确认结束保留各自语义', () => {
+  for (const leftMin of [0, -1]) {
+    const take=buildTakeNotice({machineName:'测试洗衣机',leftMin,confirmed:false})
+    for (const value of [take.text,take.markdown]) {
+      assert.match(value,/即将完成/)
+      assert.doesNotMatch(value,/0 分钟|已完成|洗好了|烘好了|计时结束/)
+    }
+    const digest=buildBoardDigest({started:[{machine:{id:'fixture',name:'测试洗衣机',estimated:true,leftMin}}]})
+    assert.match(digest.text,/即将完成/)
+    assert.doesNotMatch(digest.text,/0 分钟|-1 分钟/)
+  }
+  for (let variant=0;variant<NOTICE_TEMPLATES.STUCK_LINES.length;variant++) {
+    const stuck=buildStuckNotice({leftMin:0,stuckMin:8,variant})
+    assert.match(stuck.text,/即将完成/)
+    assert.match(stuck.text,/8 分钟未变化/)
+    assert.doesNotMatch(stuck.text,/剩余 0 分钟|停在 0 分钟/)
+  }
+  assert.doesNotMatch(buildStuckNotice({leftMin:null}).text,/即将完成|0 分钟/)
+  assert.match(buildTakeNotice({leftMin:0,confirmed:true}).title,/洗好了/)
+  assert.match(buildTakeNotice({leftMin:null,confirmed:false}).title,/计时结束/)
 })
 
 test('催取文案保留次数与操作，不催骂或宣称一定有人排队', () => {

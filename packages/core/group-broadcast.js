@@ -31,27 +31,27 @@ export async function resolveBroadcastTargets(store, env = {}) {
 const escape = value => String(value ?? '').replace(/[\r\n\t]+/g, ' ').slice(0, 100).replace(/([\\`*_{}\[\]()#+.!<>|~-])/g, '\\$1')
 
 export function buildHourlyGroupNotice(board, { name = '洗衣房', hourKey = '', now = Date.now() } = {}) {
-  const title = `${name} · 整点洗衣房播报`
+  const title = `🧺 ${name} · 整点洗衣房播报`
   const clock = /^\d{4}-\d{2}-\d{2}T\d{2}$/.test(hourKey) ? `${hourKey.slice(-2)}:00` : hhmm(new Date(now).toISOString())
   const list = (board?.floors || []).flatMap(f => (f.machines || []).map(m => ({ ...m, floor: f.name || f.code || '' })))
   const idle = list.filter(m => m.state === 'idle')
   const occupied = list.filter(m => ['occupied', 'abnormal'].includes(m.state))
   const fault = list.filter(m => m.state === 'faulty')
-  const lines = [`### ${escape(title)}`, '', `**${clock} · 空闲 ${idle.length} 台 · 使用中 ${occupied.length} 台**`]
+  const lines = [`### ${escape(title)}`, '', `**🕒 ${clock} · 空闲 ${idle.length} 台 · 使用中 ${occupied.length} 台**`]
   const section = (heading, machines, running = false) => {
     lines.push('', `**${heading}**`, '')
     if (!machines.length) lines.push('- 暂无')
     for (const machine of machines.slice(0, 60)) {
-      const label = `${escape(machine.name || machine.id)}${machine.floor && !String(machine.name).includes(machine.floor) ? ` · ${escape(machine.floor)}` : ''}`
+      const label = `${escape(machine.displayName || machine.name || machine.id)}${machine.floor && !String(machine.name).includes(machine.floor) ? ` · ${escape(machine.floor)}` : ''}`
       const finishAt = Date.parse(machine.finishAt || '')
-      const remaining = Number.isFinite(finishAt) && finishAt > now ? ` · 约 ${Math.ceil((finishAt - now) / 60000)} 分钟` : ' · 结束时间待更新'
+      const remaining = Number.isFinite(finishAt) ? finishAt > now ? ` · 约 ${Math.ceil((finishAt - now) / 60000)} 分钟` : ' · 即将完成，等待设备确认' : ' · 结束时间待更新'
       lines.push(`- ${label}${running ? remaining : machine.suspectedUncollected ? ' · 疑似未取衣' : ''}`)
     }
     if (machines.length > 60) lines.push(`- 其余 ${machines.length - 60} 台请在页面查看`)
   }
-  section('空闲机器', idle)
-  section('使用中', occupied, true)
-  if (fault.length) section('已确认故障', fault)
-  lines.push('', `> 仅统计${escape(name)}楼下机器；数据来自海乐生活，请以现场为准。`)
+  section('✅ 空闲机器', idle)
+  section('⏳ 使用中', occupied, true)
+  if (fault.length) section('⚠️ 已确认故障', fault)
+  lines.push('', '> 数据来自海乐生活；使用前请确认机器和衣物情况。')
   return { title, markdown: lines.join('\n'), text: lines.join('\n').replace(/^###?\s|\*\*/gm, '') }
 }

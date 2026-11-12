@@ -40,6 +40,11 @@ const clean = (value) => {
   for (const privateValue of [secret, 'upstream-private', 'private-header', 'server-secret-diagnostic']) assert.ok(!text.includes(privateValue), 'No secret/diagnostic in result')
 }
 
+test('cloud ingestion preserves original and remark labels plus query-failure provenance',()=>{
+ const rows=ingestRows([{id:'fixture',name:'别名',originalName:'原名',remarkName:'一楼备注',rawState:3,state:'unknown',finishAt:null,queryFailed:true,queryStatus:405}])
+ assert.equal(rows[0].originalName,'原名');assert.equal(rows[0].remarkName,'一楼备注');assert.equal(rows[0].queryStatus,405)
+})
+
 test('complete real core pagination is ingested with raw state and ISO finish time; credentials stay upstream', async () => {
   const originalFetch = globalThis.fetch
   const mock = fixture({ handle: ({ url, body }) => {

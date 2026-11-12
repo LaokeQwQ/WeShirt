@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { ref, computed, watch, reactive, nextTick } from 'vue'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { normalizeDormBuilding } from '../packages/core/buildings.js'
 
 const source = await readFile(new URL('../frontend/src/views/AdminDetail.vue', import.meta.url), 'utf8')
@@ -10,7 +11,7 @@ const deferred = () => { let resolve; const promise = new Promise((yes) => { res
 function evaluate(overrides = {}, returned = '({ selectedDorm, buildings, loadUsers, users, exportLogs })') {
   const script = source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]*\n/gm, '')
   const bindings = {
-    ref, computed, watch, onUnmounted() {}, defineProps: () => reactive({ tab: 'users' }),
+    ref, computed, watch, onMounted() {}, onUnmounted() {}, defineProps: () => reactive({ tab: 'users' }),
     useRoute: () => ({ query: {} }), useRouter: () => ({ push() {} }),
     useDormStore: () => reactive({ buildings: [{ code: 'custom', name: '自定义楼' }] }),
     normalizeDormBuilding, api: async () => ({ items: [], rows: [] }),
@@ -19,6 +20,21 @@ function evaluate(overrides = {}, returned = '({ selectedDorm, buildings, loadUs
   }
   return new Function(...Object.keys(bindings), script + '\nreturn ' + returned)(...Object.values(bindings))
 }
+
+test('管理详情返回固定管理首页，浏览器返回不会再次打开刚关闭的详情', async () => {
+  const router = createRouter({ history: createMemoryHistory(), routes: ['/settings', '/admin', '/admin/users'].map((path) => ({ path, component: {} })) })
+  await router.push('/settings')
+  await router.push('/admin/users')
+  const panel = evaluate({ useRouter: () => router }, '({ goBack })')
+  await panel.goBack()
+  assert.equal(router.currentRoute.value.path, '/admin')
+  const returned = new Promise((resolve) => {
+    const stop = router.afterEach(() => { stop(); resolve() })
+  })
+  router.back()
+  await returned
+  assert.equal(router.currentRoute.value.path, '/settings')
+})
 
 test('管理详情 Vue 脚本和模板编译通过，住宿楼选项来自网站目录', () => {
   const { descriptor, errors } = parse(source)
@@ -79,4 +95,56 @@ test('未登录时不发起日志导出，管理详情切换页签会重新请�
   await nextTick()
   assert.match(paths.at(-1).path, /\/api\/admin\/machines/)
   assert.equal(paths.at(-1).options.auth, 'optional')
+})
+
+test('用户批量选择只包含可操作目标，取消确认不写入，失败逐项可见', async () => {
+  let cancel = true
+  const writes = []
+  const panel = evaluate({
+    showConfirmDialog: async () => { if (cancel) throw new Error('cancel') },
+    api: async (path, options) => {
+      if (options?.method === 'POST') {
+        writes.push({ path, options })
+        return { succeeded: 1, failed: 1, eventId: 'evt_fixture', results: [{ id: 'one', ok: true, status: 200 }, { id: 'two', ok: false, status: 409, error: { message: '仍有任务', eventId: 'evt_fixture' } }] }
+      }
+      return { items: [{ id: 'one', canOperate: true }, { id: 'two', canOperate: true }, { id: 'view-only', canOperate: false }], bulk: { operate: true, operateBuildings: ['custom'] } }
+    },
+  }, '({ loadUsers, selectVisibleUsers, selectUser, selectedUsers, batchUsers, batchResult, bulkBuildings })')
+  await panel.loadUsers()
+  panel.selectVisibleUsers(true)
+  assert.deepEqual(panel.selectedUsers.value, ['one', 'two'])
+  panel.selectUser('view-only', true)
+  assert.deepEqual(panel.selectedUsers.value, ['one', 'two'])
+  await panel.batchUsers('setNotify', false)
+  assert.equal(writes.length, 0)
+  cancel = false
+  await panel.batchUsers('setNotify', false)
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].path, '/api/admin/users/batch')
+  assert.deepEqual(writes[0].options.body, { ids: ['one', 'two'], action: 'setNotify', confirmed: true, notifyOn: false })
+  assert.equal(panel.batchResult.value.failed, 1)
+  assert.deepEqual(panel.selectedUsers.value, ['two'])
+  assert.deepEqual(panel.bulkBuildings.value.map(row => row.code), ['custom'])
+})
+
+test('机器登记人导航携带账号筛选，用户CSV保留筛选且兼容两种管理认证', async () => {
+  const router = createRouter({ history: createMemoryHistory(), routes: ['/admin/users', '/admin/machines'].map(path => ({ path, component: {} })) })
+  await router.push('/admin/machines')
+  const machinePanel = evaluate({ useRouter: () => router, defineProps: () => reactive({ tab: 'machines' }) }, '({ openOccupant })')
+  await machinePanel.openOccupant({ userId: 'occupier_123' })
+  assert.equal(router.currentRoute.value.path, '/admin/users')
+  assert.equal(router.currentRoute.value.query.q, 'occupier_123')
+  const fetches = [], downloads = []
+  const panel = evaluate({
+    useRoute: () => router.currentRoute.value, getToken: () => 'fixture-user-token', getAdminSession: () => ({ session: 'fixture-admin-session' }),
+    fetch: async (path, options) => { fetches.push({ path, options }); return { ok: true, blob: async () => new Blob(['masked,csv']) } },
+    document: { createElement: () => ({ click() { downloads.push(true) } }) },
+    URL: { createObjectURL: () => 'blob:csv', revokeObjectURL() {} },
+  }, '({ exportUsers, userQ })')
+  assert.equal(panel.userQ.value, 'occupier_123')
+  await panel.exportUsers()
+  assert.match(fetches[0].path, /\/api\/admin\/users\.csv\?q=occupier_123/)
+  assert.equal(fetches[0].options.headers.Authorization, 'Bearer fixture-user-token')
+  assert.equal(fetches[0].options.headers['x-admin-token'], 'fixture-admin-session')
+  assert.equal(downloads.length, 1)
 })

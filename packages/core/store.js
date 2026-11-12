@@ -21,9 +21,11 @@ export function safeParse(s) {
 }
 
 // ───────────────────────── MemoryStore ─────────────────────────
+const memoryStores = new WeakSet()
+export const isMemoryStore = store => memoryStores.has(store)
 export function createMemoryStore() {
   const map = new Map()
-  return {
+  const store = {
     async get(key, fallback = null) {
       return map.has(key) ? map.get(key) : fallback
     },
@@ -40,6 +42,8 @@ export function createMemoryStore() {
       return out
     },
   }
+  memoryStores.add(store)
+  return store
 }
 
 // FileStore 已移到 ./store-node.js（需要 node:fs，不能混进这个 Edge 安全文件）

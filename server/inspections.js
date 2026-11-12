@@ -189,6 +189,8 @@ export function registerInspectionRoutes(app, { store, env = {}, authenticate, g
   const historyKey = 'inspections:' + bid
   const cleanupKey = 'inspections:cleanup:' + bid
   const access = async (c) => {
+    const temporary=c.get('temporaryAdminAccess')
+    if(temporary)return {user:{id:temporary.id,nick:'临时管理员'},identity:temporary.identity}
     const value = await authenticate?.(c)
     const user = typeof value === 'string' ? await store.get('user:' + value, null) : value
     if (await checkSuperAdmin?.(c)) return { user, identity: { role: 'super', label: '总管', buildings: [] } }

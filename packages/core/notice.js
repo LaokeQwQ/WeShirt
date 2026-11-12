@@ -102,7 +102,7 @@ export function buildBoardDigest({
   if (s.length) {
     section('刚开洗', s, (m) => {
       const tail = []
-      if (m.estimated && m.leftMin != null) tail.push(`约 ${m.leftMin} 分钟`)
+      if (m.estimated && m.leftMin != null && Number.isFinite(Number(m.leftMin))) tail.push(Number(m.leftMin) > 0 ? `约 ${Math.ceil(Number(m.leftMin))} 分钟` : '即将完成')
       else if (m.finishAt) tail.push(`${hhmm(m.finishAt)} 结束`)
       const cw = claimWord(m)
       if (cw) tail.push(`回复「认领 ${cw}」`)
@@ -183,8 +183,8 @@ const DONE_LINES = [
 ]
 
 const STUCK_LINES = [
-  (m) => `上游持续显示剩余 ${m} 分钟。`,
-  (m) => `上游剩余时间停在 ${m} 分钟。`,
+  (m) => m > 0 ? `上游持续显示剩余 ${m} 分钟。` : '上游持续显示即将完成，结束状态尚未确认。',
+  (m) => m > 0 ? `上游剩余时间停在 ${m} 分钟。` : '上游倒计时已到，显示即将完成，结束状态尚未确认。',
 ]
 
 const URGE_LINES = [
@@ -229,6 +229,13 @@ export function buildTakeNotice({ machineName, machineLabel, slot, kind, floorCo
     return noticeCard(dryer ? '⏳ 快烘好了' : '⏳ 快洗好了', sub, [
       pick(BEFORE_LINES, variant)(Math.max(1, Math.ceil(left))),
       at ? `预计 ${at} 结束${estimated ? '（估时）' : ''}` : '',
+      action,
+    ])
+  }
+
+  if (!confirmed && leftMin != null && Number.isFinite(left) && left <= 0) {
+    return noticeCard('⏳ 即将完成', sub, [
+      '设备结束状态尚未确认，请以现场状态为准。',
       action,
     ])
   }

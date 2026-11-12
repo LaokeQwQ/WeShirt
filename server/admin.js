@@ -17,6 +17,10 @@ import { resolveBroadcastTargets } from '../packages/core/group-broadcast.js'
 import { DORM_BUILDINGS, normalizeDormBuilding, normalizeKnownDormBuilding, dormBuildingName, resolveMachineDorm } from '../packages/core/buildings.js'
 import { computeLeftMin } from '../packages/core/machines.js'
 import { resolveMachineKind } from '../packages/core/machine-kind.js'
+import { getUserPermissions } from '../packages/core/permissions.js'
+import { adminUsersCsv } from './admin-user-export.js'
+import { machineLabels } from '../packages/core/machine-labels.js'
+import { readCalibrationSettings, projectCalibratedBoard } from '../packages/core/machine-time-calibration.js'
 
 // 管理鉴权：两种凭据都收
 //   1) 原始 ADMIN_TOKEN —— 脚本/自检/同步密钥场景，长期有效，别外传
@@ -30,7 +34,7 @@ async function checkAdmin(c, env) {
   if (token === expect) return true
   // 会话票据：签名对、没过期、role=admin
   const payload = await verifyAdminSession(token, (env && env.AUTH_SECRET) || '')
-  return Boolean(payload)
+  return Boolean(payload && !payload.accessCodeId)
 }
 
 // 路径参数统一校验：只允许字母数字下划线连字符，避免拼进 KV key 时注入奇怪前缀
@@ -72,6 +76,10 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
   const guard = async (c) => ((await (authorize ? authorize(c) : checkAdmin(c,env))) ? null : apiErr('unauthorized', '口令不对', 401))
   // 用户数据操作与成员授权共用锁，避免校验后目标被同时晋升而绕过角色保护。
   const mutateUser = (c, id, action, operation) => withOperationLock(store, 'site-config', async () => {
+    if(c.get('temporaryAdminAccess')){
+      try{c.set('temporaryAdminAccess',await c.get('adminAccessCodes').verifyRequest(c,(await getSiteConfig(store)).buildings))}
+      catch(error){return apiErr(error.code||'unauthorized',error.status?error.message:'临时会话暂不可用',error.status||503)}
+    }
     // 最高管理员口令/会话保留恢复能力；用户 Bearer 必须重新检查当前服务端身份。
     const bootstrap = await checkAdmin(c, env)
     const saved = await store.get('meta:siteAdmins', [])
@@ -79,7 +87,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
     const target = members.find((row) => row?.userId === id)
     if (!bootstrap) {
       const uid = await verifyRequestUser(c, env.AUTH_SECRET).catch(() => null)
-      const identity = await getUserIdentity(store, uid)
+      const identity = c.get('temporaryAdminAccess')?.identity || await getUserIdentity(store, uid)
       if (!['super', 'admin'].includes(identity.role)) return apiErr('forbidden', '需要总管或管理员权限', 403)
       // 失效/停用的高权限成员也须保护，不能利用账号状态绕过授权表。
       if (identity.role === 'admin' && ['super', 'admin', 'operator'].includes(target?.role)) return apiErr('forbidden', '管理员不能修改或删除高权限成员的账号，请使用总管入口', 403)
@@ -173,6 +181,16 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       const body = await c.req.json().catch(() => ({}))
       const token = String(body.token || '').trim()
       const expect = String(env.ADMIN_TOKEN || '').trim()
+      if (token.startsWith('wac1.')) {
+        const service = c.get('adminAccessCodes')
+        if (!service) return apiErr('not_configured', '临时口令尚未配置', 503)
+        try {
+          const result = await service.login(token, (await getSiteConfig(store)).buildings, sessionTtlMs)
+          if (!result) return apiErr('unauthorized', '口令不对', 401)
+          await auditAdmin(c, { type: 'admin', action: '临时口令登录', target: '临时管理员' })
+          return json({ ok: true, ...result }, 200, { 'Cache-Control': 'no-store' })
+        } catch(error) { return apiErr(error.code || 'unavailable', error.status ? error.message : '登录暂不可用', error.status || 503) }
+      }
       if (expect.length < 8) return apiErr('not_configured', '后台口令未配置', 503)
       if (!token || token !== expect) {
         await auditAdmin(c, { type: 'admin', action: '后台登录失败', level: 'warn', target: c.req.header('cf-connecting-ip') || '' })
@@ -195,11 +213,13 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       const token = c.req.header('x-admin-token') || c.req.query('token')
       const payload = await verifyAdminSession(token, env.AUTH_SECRET || '')
       const rawOk = token && token === String(env.ADMIN_TOKEN || '').trim()
+      const temporary = c.get('temporaryAdminAccess')
       return json({
         ok: true,
-        kind: payload ? 'session' : rawOk ? 'token' : 'unknown',
-        expAt: payload ? payload.exp : null,
-        ttlMs: payload ? Math.max(0, payload.exp - Date.now()) : null,
+        kind: temporary ? 'temporary' : payload ? 'session' : rawOk ? 'token' : 'unknown',
+        expAt: temporary ? temporary.expAt : payload ? payload.exp : null,
+        ttlMs: temporary ? Math.max(0, temporary.expAt - Date.now()) : payload ? Math.max(0, payload.exp - Date.now()) : null,
+        ...(temporary ? { role: 'admin', identity: temporary.identity, permissions: temporary.permissions, adminVisible: temporary.adminVisible } : {}),
       })
     } catch (e) {
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
@@ -667,6 +687,125 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
 
   // ---------- 用户管理 ----------
 
+  // CSV cannot rely on the JSON response filter. Batch items also re-read the
+  // current permission ceiling under mutateUser's site-config lock.
+  async function userResourceAccess(c, mode, buildings) {
+    const temporary = c.get('temporaryAdminAccess')
+    if (!temporary && await checkAdmin(c, env)) return { allowed: true, scope: null, role: 'super' }
+    let access = temporary
+    if (!access) {
+      const uid = await verifyRequestUser(c, env.AUTH_SECRET).catch(() => null)
+      access = await getUserPermissions(store, uid ? await store.get('user:' + uid, null) : null, buildings)
+    }
+    const row = access?.permissions?.adminUsers
+    const scope = row?.[mode + 'Buildings']
+    return { allowed: row?.[mode] === true, scope: scope === null ? null : Array.isArray(scope) ? scope : [], role: access?.identity?.role }
+  }
+
+  app.get('/api/admin/users.csv', async (c) => {
+    try {
+      const bad = await guard(c)
+      if (bad) return bad
+      const buildings = (await getSiteConfig(store)).buildings
+      const access = await userResourceAccess(c, 'view', buildings)
+      if (!access.allowed) return apiErr('forbidden', '没有用户导出权限', 403)
+      const dorm = c.req.query('dorm') || '', q = String(c.req.query('q') || '').trim().toLowerCase()
+      if (q.length > 100 || dorm && dorm !== 'unbound' && !normalizeKnownDormBuilding(dorm, buildings)) return apiErr('bad_param', '用户筛选条件无效')
+      if (dorm && access.scope !== null && !access.scope.includes(dorm)) return apiErr('forbidden', '该楼栋不在授权查看范围内', 403)
+      const entries = await store.list('user:')
+      const users = (Array.isArray(entries) ? entries : []).map((entry) => entry?.value).filter((user) => {
+        if (!user?.id) return false
+        const code = normalizeKnownDormBuilding(user.dormBuilding, buildings)
+        return (access.scope === null || access.scope.includes(code)) &&
+          (!dorm || (dorm === 'unbound' ? !code : code === dorm)) &&
+          (!q || `${user.id} ${user.nick || ''} ${user.dingUserId || ''} ${user.dingNick || ''}`.toLowerCase().includes(q))
+      }).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+      if (users.length > 2000) return apiErr('too_large', '单次最多导出 2000 人，请缩小搜索或楼栋范围', 413)
+      await auditAdmin(c, { action: '导出脱敏用户列表', detail: { count: users.length, dorm: dorm || null, filtered: Boolean(q) } })
+      return new Response(adminUsersCsv(users.map((user) => publicUserForAdmin(user, { buildings }))), {
+        headers: { 'content-type': 'text/csv; charset=utf-8', 'cache-control': 'private, no-store',
+          'content-disposition': `attachment; filename="weshirt-users-${new Date().toISOString().slice(0, 10)}.csv"` },
+      })
+    } catch { return apiErr('internal', '用户导出失败，请稍后重试', 500) }
+  })
+
+  app.post('/api/admin/users/batch', async (c) => {
+    const bad = await guard(c)
+    if (bad) return bad
+    if (Number(c.req.header('content-length')) > 8192) return apiErr('too_large', '批量请求过长', 413)
+    let body
+    try {
+      const raw = await c.req.text()
+      if (new TextEncoder().encode(raw).length > 8192) return apiErr('too_large', '批量请求过长', 413)
+      body = JSON.parse(raw)
+    } catch { return apiErr('bad_param', '需要有效 JSON 对象') }
+    if (!body || Array.isArray(body) || typeof body !== 'object' || Object.keys(body).some((key) => !['ids', 'action', 'dormBuilding', 'notifyOn', 'confirmed'].includes(key)) || body.confirmed !== true ||
+      !Array.isArray(body.ids) || !body.ids.length || body.ids.length > 50 || body.ids.some((id) => typeof id !== 'string' || !safeId(id)) || new Set(body.ids).size !== body.ids.length ||
+      !['setDorm', 'setNotify', 'delete'].includes(body.action)) return apiErr('bad_param', '请选择 1–50 个不同用户并确认批量操作')
+    const buildings = (await getSiteConfig(store)).buildings
+    if (body.action === 'setDorm' && body.dormBuilding !== null && !normalizeDormBuilding(body.dormBuilding, buildings) ||
+      body.action === 'setNotify' && typeof body.notifyOn !== 'boolean') return apiErr('bad_param', '批量修改内容无效')
+    const eventId = c.get('eventId') || 'evt_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24)
+    const results = []
+    for (const id of body.ids) {
+      let response
+      try {
+        response = await mutateUser(c, id, body.action === 'delete' ? 'delete' : 'edit', async () => {
+          const user = await store.get('user:' + id, null)
+          if (!user) return apiErr('not_found', '用户不存在', 404)
+          const catalog = (await getSiteConfig(store)).buildings
+          const access = await userResourceAccess(c, 'operate', catalog)
+          const code = normalizeKnownDormBuilding(user.dormBuilding, catalog)
+          if (!access.allowed || access.scope !== null && (!access.scope.includes(code) || body.action === 'setDorm' && !access.scope.includes(body.dormBuilding)))
+            return apiErr('forbidden', '目标或新住宿楼不在授权操作范围内', 403)
+          if (body.action === 'delete') {
+            const tasks = await store.get('tasks:' + id, [])
+            const occupancy = await store.get('occupancy:' + buildingIdOf(c), {})
+            if ((Array.isArray(tasks) ? tasks : []).some((task) => !task.done) || Object.values(occupancy || {}).some((entry) => entry?.userId === id))
+              return apiErr('active_laundry', '该用户仍有未取衣任务或机器登记，请先处理后再删除', 409)
+            return deleteManagedUser(c, id, user)
+          }
+          const next = { ...user }
+          if (body.action === 'setDorm') {
+            if (body.dormBuilding !== null && !normalizeDormBuilding(body.dormBuilding, catalog)) return apiErr('bad_param', '目标住宿楼已停用或不存在')
+            next.dormBuilding = normalizeDormBuilding(body.dormBuilding, catalog)
+          } else next.notifyOn = body.notifyOn
+          await store.put('user:' + id, next)
+          await auditAdmin(c, { action: '批量修改用户', target: id, detail: { action: body.action, eventId,
+            ...(body.action === 'setDorm' ? { dormBuilding: next.dormBuilding } : { notifyOn: next.notifyOn }) } })
+          return json({ ok: true })
+        })
+      } catch { response = apiErr('internal', '此用户操作未完成，请刷新后核对', 500) }
+      const data = await response.json().catch(() => ({}))
+      const ok = response.status >= 200 && response.status < 300
+      results.push({ id, ok, status: response.status, ...(ok ? {} : { error: { ...data.error, eventId } }) })
+      if (!ok) await auditAdmin(c, { action: '批量用户操作未完成', target: id, level: 'warn', detail: { action: body.action, status: response.status, code: data.error?.code, eventId } })
+    }
+    const succeeded = results.filter((item) => item.ok).length
+    await auditAdmin(c, { action: '批量用户操作汇总', detail: { action: body.action, count: results.length, succeeded, failed: results.length - succeeded, eventId } })
+    return json({ total: results.length, succeeded, failed: results.length - succeeded, results, eventId }, 200, { 'cache-control': 'private, no-store' })
+  })
+
+  async function deleteManagedUser(c, id, user) {
+    const bid = buildingIdOf(c)
+    const list = await store.get('messages:' + bid, [])
+    const kept = (Array.isArray(list) ? list : []).filter((message) => message.userId !== id)
+    const removedMessages = (Array.isArray(list) ? list.length : 0) - kept.length
+    if (user.dingUserId) await store.del('userByDing:' + user.dingUserId)
+    if (user.dingUnionId) await store.del('userByUnionId:' + user.dingUnionId)
+    if (user.takeCode) await store.del('takeCode:' + user.takeCode)
+    await deleteAssistantUserData(store, id)
+    for (const entry of await store.list('userByDevice:')) if (entry?.value === id) await store.del(entry.key)
+    if (removedMessages) await store.put('messages:' + bid, kept)
+    const queue = await store.get('queue:' + bid, [])
+    if (Array.isArray(queue)) await store.put('queue:' + bid, queue.filter((item) => item?.userId !== id))
+    await store.del('tasks:' + id)
+    await store.del('access:user:' + id)
+    await store.del('user:' + id)
+    await auditAdmin(c, { action: '删除用户', target: id, level: 'warn', detail: { removedMessages, dingBound: Boolean(user.dingUserId) } })
+    return json({ ok: true, removedMessages })
+  }
+
   // 列表：支持 q 搜索（昵称 / 账号 ID / 钉钉 ID），limit 默认 200
   app.get('/api/admin/users', async (c) => {
     try {
@@ -678,6 +817,10 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       if (dorm && dorm !== 'unbound' && !normalizeKnownDormBuilding(dorm,buildings)) return apiErr('bad_param', '住宿楼筛选无效')
       const requestedLimit = Number(c.req.query('limit') || 200)
       const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 200
+      const operation = await userResourceAccess(c, 'operate', buildings)
+      const viewing = await userResourceAccess(c, 'view', buildings)
+      if (!viewing.allowed) return apiErr('forbidden', '没有用户查看权限', 403)
+      const members = await store.get('meta:siteAdmins', [])
       // store.list() 返回 [{ key, value }]，不是字符串数组
       const entries = await store.list('user:')
       const items = []
@@ -685,16 +828,21 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         const u = e && e.value
         if (!u || typeof u !== 'object') continue
         const userDorm = normalizeKnownDormBuilding(u.dormBuilding,buildings)
+        if (viewing.scope !== null && !viewing.scope.includes(userDorm)) continue
         if (dorm && (dorm === 'unbound' ? Boolean(userDorm) : userDorm !== dorm)) continue
         if (q) {
           const hay = `${u.id} ${u.nick} ${u.dingUserId || ''} ${u.dingNick || ''}`.toLowerCase()
           if (!hay.includes(q)) continue
         }
-        items.push(publicUserForAdmin(u, { buildings }))
+        const role = (Array.isArray(members) ? members : []).find((member) => member?.userId === u.id)?.role
+        items.push({ ...publicUserForAdmin(u, { buildings }), canOperate: operation.allowed &&
+          (operation.scope === null || operation.scope.includes(userDorm)) &&
+          !(operation.role === 'admin' && ['super', 'admin', 'operator'].includes(role)) })
       }
       // 新用户排前面
       items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-      return json({ total: items.length, items: items.slice(0, limit), buildings })
+      return json({ total: items.length, items: items.slice(0, limit), buildings,
+        bulk: { max: 50, operate: operation.allowed, operateBuildings: operation.scope } })
     } catch (e) {
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
@@ -863,7 +1011,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         store.get(`machines:${bid}`, null), store.get(`occupancy:${bid}`, {}),
         store.get(`queue:${bid}`, []), store.get(`mapping:${bid}`, null),
       ])
-      const board = entry && entry.board ? entry.board : null
+      const board = entry?.board ? projectCalibratedBoard(entry.board, await readCalibrationSettings(store,bid)) : null
       const slotMap = mapping?.mapping || {}
       const slotsById = new Map()
       for (const [slot, id] of Object.entries(slotMap)) {
@@ -891,6 +1039,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
           const currentLeft = m.finishAt ? computeLeftMin(m.finishAt, now) : m.leftMin
           const leftMin = currentLeft == null ? null : Math.max(0, currentLeft)
           rows.push({
+            ...machineLabels(m, slotMap),
             id: m.id,
             name: m.name || '',
             floor: m.floorCode || f.code || '',
@@ -902,6 +1051,8 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
             leftMin,
             remainMin: leftMin,
             finishAt: m.finishAt || null,
+            platformFinishAt:m.platformFinishAt, timeOffsetMinutes:m.timeOffsetMinutes, calibration:m.calibration,
+            timeSource:m.timeSource, timeStale:m.timeStale,
             estimated: Boolean(m.estimated),
             endAt: m.finishAt || null,
             // 本地登记信息
@@ -917,6 +1068,7 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
         rows,
       })
     } catch (e) {
+      if(e?.code==='machine_store_unavailable')return apiErr(e.code,'机器数据暂不可用，请稍后重试',503)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })

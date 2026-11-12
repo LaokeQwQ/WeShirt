@@ -1,6 +1,9 @@
 import { withOperationLock } from './operations.js'
 import { buildMachineLabel, hhmm } from './notice.js'
 import { currentDormCatalog, isMachineDormEnabled } from './buildings.js'
+import { resolveMachineTime } from './machine-time.js'
+import { claimNotificationDelivery } from './notification-delivery.js'
+import { mobileDigest } from './mobile-auth.js'
 
 const MINUTE = 60000
 const MAX_ATTEMPTS = 4
@@ -68,9 +71,9 @@ function nextCycle(machine, previous, state, snapshotAt, now) {
     if (finishAt < now - 30 * MINUTE) return null
     return { id: 'cycle_' + crypto.randomUUID(), startAt: Number.isFinite(startAt) ? startAt : null, finishAt, estimated: machine.estimated === true, state, observedAt: snapshotAt, snapshotAt, phases: {} }
   }
-  // 自己计算的估时只锚定一次；上游真实结束时间更新也不创建新周期。
-  const updateFinish = !machine.estimated || previous.estimated === true && !previous.finishAt
-  return { ...previous, state, snapshotAt, ...(updateFinish ? { finishAt, estimated: machine.estimated === true } : {}) }
+  // Every platform deadline update supersedes an old registration/estimate;
+  // it remains the same cycle, with its existing phase deduplication.
+  return { ...previous, state, snapshotAt, finishAt, estimated: machine.estimated === true }
 }
 
 function buildNotice(machine, cycle, phase, now) {
@@ -89,7 +92,7 @@ function buildNotice(machine, cycle, phase, now) {
     ? `登记计时约 ${minutes} 分钟后结束，请准备。设备实际状态和桶内衣物请到场确认。`
     : '用户登记计时已到，请现场确认设备状态和上一位的衣物；确认可用后再使用。'
     : phase === 'lead'
-    ? `预计 ${minutes} 分钟后结束，请准备。到场后请先确认上一位的衣物已取走。`
+    ? `预计 ${minutes} 分钟后结束，请准备。请现场确认上一位的衣物已取走。`
     : confirmed ? `已结束${kind === 'dryer' ? '烘干' : '洗衣'}，请现场确认衣物并使用。`
       : '预计计时结束，请现场确认机器状态和衣物情况。'
   const end = Number.isFinite(cycle.finishAt) ? `${reported ? '登记' : ''}预计结束 ${hhmm(iso(cycle.finishAt))}${cycle.estimated ? '（估时）' : ''}` : ''
@@ -123,7 +126,7 @@ export async function markQueueNoticeRead(store, userId, id, now = Date.now()) {
 }
 
 /** 仅遍历当前队首和他们的 outbox；不推进队列，不扫描用户表。notify 仅返回钉钉投递结果。 */
-export async function processQueueReminders({ store, board, env = {}, now = Date.now(), notify } = {}) {
+export async function processQueueReminders({ store, board, env = {}, now = Date.now(), notify, atomicStore } = {}) {
   now = typeof now === 'function' ? now() : stamp(now)
   const snapshotAt = stamp(board?.updatedAt)
   const stats = { created: 0, sent: 0, failed: 0, stale: false }
@@ -166,7 +169,7 @@ export async function processQueueReminders({ store, board, env = {}, now = Date
       const eligible = cycle.source === 'user_report' ? left > 0 && left <= 3 * MINUTE ? 'lead' : left <= 0 ? 'end' : null
         : cycle.confirmed && state === 'idle' ? 'end'
         : ['occupied', 'abnormal'].includes(state) && left > 0 && left <= 3 * MINUTE ? 'lead'
-          : ['occupied', 'abnormal'].includes(state) && left <= 0 && cycle.estimated ? 'end' : null
+          : null
       let list = await store.get('queue-notices:' + entry.userId, [])
       list = Array.isArray(list) ? list : []
       if (eligible && !phases[eligible]) {
@@ -211,6 +214,7 @@ export async function processQueueReminders({ store, board, env = {}, now = Date
         const { userId, item, qid } = jobs[cursor++]
         let sending
         let allowed = false
+        let claim
         await withOperationLock(store, 'queue:' + bid, async () => {
           const current = heads(await store.get('queue:' + bid, []))
           const head = current.get(item.machineId)
@@ -218,15 +222,26 @@ export async function processQueueReminders({ store, board, env = {}, now = Date
           if (!head || head.userId !== userId || reservationId(head) !== qid || !user?.id || user.disabled || user.blocked || user.notifyOn === false) return
           const machine = machineById.get(item.machineId)
           if (!machine || !isMachineDormEnabled(machine, await currentDormCatalog(store, env.SITE_BUILDINGS), board.slotMapping)) return
+          const latest = (await store.get('machines:' + bid,null))?.board
+          const currentMachine = latest ? latest.floors.flatMap(f=>f.machines).find(machine=>String(machine.id)===item.machineId) : machine
+          if (!currentMachine) return
+          const time = resolveMachineTime(currentMachine,{now,snapshotAt:latest?.updatedAt || board.updatedAt})
+          if (time.stale || item.phase === 'lead' && (time.remainingMinutes === null || time.remainingMinutes <= 0 || time.remainingMinutes > 3)
+            || item.phase === 'end' && !time.confirmedFinished && item.availabilitySource !== 'user_report') return
+          if (time.deadline && item.phase === 'lead') Object.assign(item,buildNotice(currentMachine,{...cycles[item.machineId],finishAt:Date.parse(time.deadline)},item.phase,now))
+          try {claim=await claimNotificationDelivery(atomicStore,'mobile:limit:queue-delivery:'+await mobileDigest(`${bid}|${item.machineId}|${qid}|${item.phase}`),`${qid}:${item.phase}`,now)}
+          catch {stats.failed++;return}
+          if(!claim)return
           allowed = true
           // 请求在排队锁内发起，完成等待在锁外，取消预约不会等待网络。
-          try { sending = Promise.resolve(notify(userId, { title: item.title, text: item.text, markdown: item.markdown, url: item.url, type: 'queue', machineId: item.machineId, machineName: item.machineName, kind: item.kind, confirmed: item.confirmed, estimated: item.estimated, availabilitySource: item.availabilitySource, finishAt: item.finishAt, phase: item.phase, noticeId: item.id, reservationId: qid })) }
+          try { sending = Promise.resolve(notify(userId, { title: item.title, text: item.text, markdown: item.markdown, url: item.url, type: 'queue', machineId: item.machineId, machineName: item.machineName, kind: item.kind, confirmed: item.confirmed, estimated: item.estimated, availabilitySource: item.availabilitySource, finishAt: item.finishAt, phase: item.phase, noticeId: item.id, reservationId: qid,revision:Math.floor(now/1000) })) }
           catch { sending = Promise.resolve({ ok: false }) }
         })
         if (!allowed) continue
         let timer
         const result = await Promise.race([sending.catch(() => ({ ok: false })), new Promise((resolve) => { timer = setTimeout(() => resolve({ ok: false }), 9000) })]).finally(() => clearTimeout(timer))
         const ok = result?.ok === true
+        await claim.finish(ok).catch(()=>{})
         await withOperationLock(store, 'queue-notices:' + userId, async () => {
           const list = await store.get('queue-notices:' + userId, [])
           const current = Array.isArray(list) && list.find((notice) => notice.id === item.id)

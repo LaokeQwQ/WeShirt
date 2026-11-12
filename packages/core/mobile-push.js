@@ -4,6 +4,9 @@ import { createRemoteMobileAtomicStore } from './mobile-store.js'
 import { DORM_BUILDINGS } from './buildings.js'
 import { getUserPermissions } from './permissions.js'
 import { readQueueNotices } from './queue-reminders.js'
+import { machineFaultRecipientAllowed } from './machine-fault-notices.js'
+import { resolveMachineTime } from './machine-time.js'
+import { buildTakeNotice,hhmm } from './notice.js'
 
 const enc = new TextEncoder(), DAY = 86400000
 const b64 = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -153,6 +156,15 @@ export function createMobilePush({ store, env = {}, atomicStore = createRemoteMo
   async function allowedNotice(uid, policy = {}) {
     const user = await store.get('user:' + uid, null)
     if (!user || user.disabled || user.blocked || user.notifyOn === false) return false
+    if (policy.machineFault && !await machineFaultRecipientAllowed(store,uid,policy.machineFault,env,now())) return false
+    if (policy.machineTime) {
+      const board=(await store.get('machines:'+(env.BUILDING_ID||'b1'),null))?.board
+      const machine=board?.floors?.flatMap(f=>f.machines||[]).find(machine=>String(machine.id)===policy.machineTime.machineId)
+      const task=(await store.get('tasks:'+uid,[])).find(task=>task.id===policy.taskId&&!task.done&&!task.takenAt)
+      if (!machine || !task) return false
+      const time=resolveMachineTime(machine,{task,now:now(),snapshotAt:board.updatedAt})
+      if(time.stale || now()-Date.parse(board.updatedAt)>90000 || policy.machineTime.phase==='end'&&!time.confirmedFinished || policy.machineTime.phase==='lead'&&(time.confirmedFinished||time.remainingMinutes===null||time.remainingMinutes<=0||time.remainingMinutes>policy.machineTime.leadMinutes)) return false
+    }
     if (policy.channel) {
       const site = await store.get('meta:site', {}), buildings = site.buildings || DORM_BUILDINGS, access = await getUserPermissions(store,user,buildings)
       if (!access.permissions.messages.view || access.permissions.messages.viewBuildings !== null && !access.permissions.messages.viewBuildings.includes(policy.channel) || !['super','admin'].includes(access.identity.role) && !['public',user.dormBuilding].includes(policy.channel) || policy.channel !== 'public' && !buildings.some(building=>building.code===policy.channel&&building.enabled!==false)) return false
@@ -166,6 +178,13 @@ export function createMobilePush({ store, env = {}, atomicStore = createRemoteMo
       const notice=(await readQueueNotices(store,uid)).find(notice=>notice.id===policy.queueNoticeId&&notice.active)
       if(!notice)return false
       if(notice.phase!=='end'&&(!Number.isFinite(Date.parse(notice.finishAt))||Date.parse(notice.finishAt)<=now()||Date.parse(notice.finishAt)>now()+3*60000))return false
+      const board=(await store.get('machines:'+(env.BUILDING_ID||'b1'),null))?.board
+      if (board) {
+        const machine=board.floors.flatMap(f=>f.machines||[]).find(machine=>String(machine.id)===notice.machineId)
+        if(!machine)return false
+        const time=resolveMachineTime(machine,{now:now(),snapshotAt:board.updatedAt})
+        if(time.stale||now()-Date.parse(board.updatedAt)>90000||notice.phase==='lead'&&(time.remainingMinutes===null||time.remainingMinutes<=0||time.remainingMinutes>3)||notice.phase==='end'&&!time.confirmedFinished&&notice.availabilitySource!=='user_report')return false
+      }
     }
     if (policy.taskId && !(await store.get('tasks:'+uid, [])).some(task=>task.id===policy.taskId&&!task.done&&!task.takenAt)) return false
     if(policy.queueNoticeId||policy.taskId){
@@ -200,7 +219,24 @@ export function createMobilePush({ store, env = {}, atomicStore = createRemoteMo
         const deviceRow = await atomicStore.get('mobile:installation:' + installationId), device = deviceRow?.value
         let result = { ok: false, code: 'suppressed' }
         if (device?.userId === uid && device.notificationsEnabled && providers.includes(device.provider) && typeof device.token === 'string' && await allowedNotice(uid,event.policy)) {
-          try { result = await transports[device.provider](device.token, event.data) } catch { result = { ok: false, code: 'provider_unavailable' } }
+          let data=event.data
+          // Retried time-sensitive events use the current deadline and wording,
+          // rather than replaying a countdown captured by an earlier attempt.
+          if(event.policy?.machineTime || event.policy?.queueNoticeId){
+            const board=(await store.get('machines:'+(env.BUILDING_ID||'b1'),null))?.board
+            const queued=event.policy.queueNoticeId?(await readQueueNotices(store,uid)).find(row=>row.id===event.policy.queueNoticeId):null
+            const machineId=event.policy.machineTime?.machineId || queued?.machineId
+            const machine=board?.floors?.flatMap(f=>f.machines||[]).find(machine=>String(machine.id)===machineId)
+            const task=event.policy.taskId?(await store.get('tasks:'+uid,[])).find(task=>task.id===event.policy.taskId):null
+            if(machine){
+              const time=resolveMachineTime(machine,{task,now:now(),snapshotAt:board.updatedAt})
+              const confirmed=queued?.availabilitySource==='user_report'?false:time.confirmedFinished
+              const notice=queued?{title:queued.title,text:[machine.displayName||machine.name||queued.machineName,queued.phase==='lead'?`预计 ${time.remainingMinutes} 分钟后结束，请现场确认衣物情况。`:confirmed?'机器已结束，请现场确认衣物情况。':'登记计时已到，设备实际状态请现场确认。',time.deadline?`预计结束 ${hhmm(time.deadline)}`:''].filter(Boolean).join('\n')}
+                :buildTakeNotice({machineName:machine.displayName||machine.name,kind:machine.kind,leftMin:event.policy.machineTime.phase==='lead'?time.remainingMinutes:null,endAt:time.deadline,confirmed:time.confirmedFinished,estimated:time.source!=='upstream'})
+              data={...event.data,title:clean(notice.title,48),body:clean(notice.text,120),finishAt:time.deadline||'',serverConfirmed:confirmed?'true':'false'}
+            }
+          }
+          try { result = await transports[device.provider](device.token, data) } catch { result = { ok: false, code: 'provider_unavailable' } }
           if (result.gone) {
             const deleted = await atomicStore.compareAndSet('mobile:installation:' + installationId, deviceRow.version, { ...device, notificationsEnabled: false, token: null, provider: null }, { expiresAt: expiresAt() })
             if (deleted) await remove(uid, installationId, device.sessionId)
@@ -235,7 +271,7 @@ export function createMobilePush({ store, env = {}, atomicStore = createRemoteMo
         // lease expires, that exhausted event is terminal and can be evicted.
         const terminal = row => ['sent', 'suppressed', 'failed'].includes(row.state) || row.attempts >= 4 && !(row.leaseUntil > now())
         while (outbox.length >= 20) { const index = outbox.findIndex(event => Object.values(event.deliveries).every(terminal)); if (index < 0) fail('mobile_push_capacity', 503); outbox.splice(index, 1) }
-        outbox.push({ data, policy:{...(notice.channel?{channel:notice.channel,noticeId:notice.noticeId}:{}),...(notice.type==='queue'?{queueNoticeId:notice.noticeId}:{}),...(notice.taskId?{taskId:notice.taskId}:{})}, expiresAt: now() + DAY, deliveries: Object.fromEntries(installations.map(id => [id, { state: 'pending', attempts: 0 }])) }); queued = true
+        outbox.push({ data, policy:{...(notice.channel?{channel:notice.channel,noticeId:notice.noticeId}:{}),...(notice.type==='queue'?{queueNoticeId:notice.noticeId}:{}),...(notice.taskId?{taskId:notice.taskId}:{}),...(notice.machineFault?{machineFault:notice.machineFault}:{}),...(notice.machineTime?{machineTime:notice.machineTime}:{})}, expiresAt: now() + DAY, deliveries: Object.fromEntries(installations.map(id => [id, { state: 'pending', attempts: 0 }])) }); queued = true
         return { ...value, outbox }
       })
       const result = await deliver(uid)

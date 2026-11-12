@@ -3,11 +3,13 @@
 // 纯 JS / ESM / 仅用 node 内置与全局 fetch
 import { safeErrorCategory } from './util.js'
 import { normalizeMachineCategory, resolveMachineKind } from './machine-kind.js'
+import { upstreamQueryFailure } from './upstream-query.js'
 
 // ---- 默认 state 映射：原始整数 → 展示状态 ----
 export const DEFAULT_STATE_MAP = { idle: [1], occupied: [2], faulty: [3] }
 
 const VALID_STATES = ['idle', 'occupied', 'faulty', 'unknown']
+const machineLabel = value => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 100) : ''
 
 // ---- Mock 设备：≥12 台，覆盖 3 个楼层 ----
 export const MOCK_MACHINES = [
@@ -82,13 +84,17 @@ export function normalizeMachines(raws, stateMap = DEFAULT_STATE_MAP) {
     // 真实 API 数据是原始形态（带 finishTime 字符串），走北京时间解析。
     const finishAt =
       raw.finishAt !== undefined ? raw.finishAt : parseBeijing(raw.finishTime)
+    const queryFailure = upstreamQueryFailure(raw)
     return {
       id,
       name,
+      originalName: machineLabel(raw.originalName || raw.deviceName || raw.name),
+      remarkName: machineLabel(raw.remarkName || raw.remark),
       floorCode,
       ...(categoryCode ? { categoryCode } : {}),
       kind: resolveMachineKind(raw),
-      state,
+      state: queryFailure === null ? state : 'unknown',
+      ...(queryFailure === null ? {} : { queryFailed: true, queryStatus: queryFailure }),
       finishAt,
       // 上游原始状态码，原样带出来：面板上直接显示，
       // 免得「为什么是故障」只能靠猜（4号机 state=3 那次就是靠它定位的）
@@ -619,9 +625,12 @@ export function createHaierClient(env = {}, { fetch: fetchImpl = globalThis.fetc
               out.push({
                 id: String(it.deviceId ?? it.id ?? ''),
                 name: it.name ?? '',
+                originalName: machineLabel(it.originalName || it.deviceName || it.name),
+                remarkName: machineLabel(it.remarkName || it.remark),
                 floorCode: String(it.floorCode ?? floorCode),
                 categoryCode: normalizeMachineCategory(categoryCode) || normalizeMachineCategory(it.categoryCode),
                 state: it.state,
+                ...(upstreamQueryFailure(it) === null ? {} : {queryFailed:true,queryStatus:upstreamQueryFailure(it)}),
                 finishTime: it.finishTime ?? null,
               })
             }

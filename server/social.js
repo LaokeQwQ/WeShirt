@@ -1,7 +1,7 @@
 import { createSocialService, SocialError } from '../packages/core/social.js'
 
-export function registerSocialRoutes(app, { store, env, authenticate, notify }) {
-  const service = createSocialService({ store, env, notify })
+export function registerSocialRoutes(app, { store, env, authenticate, notify, getBoard }) {
+  const service = createSocialService({ store, env, notify, getBoard })
   const handler = (fn, publicRead = false) => async (c) => {
     try {
       const result = publicRead ? null : await authenticate(c)
@@ -10,6 +10,7 @@ export function registerSocialRoutes(app, { store, env, authenticate, notify }) 
       return c.json(await fn(c, uid))
     } catch (error) {
       if (error instanceof SocialError) return c.json({ error: { code: error.code, message: error.message } }, error.status)
+      if(error?.code==='machine_store_unavailable')return c.json({error:{code:error.code,message:'协作服务暂不可用，请稍后重试'}},503)
       return c.json({ error: { code: 'internal', message: '协作服务暂不可用，请稍后重试' } }, 500)
     }
   }

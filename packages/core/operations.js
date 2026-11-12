@@ -1,6 +1,9 @@
 // 运营规则仅依赖标准 Web API。不同页面读取健康投影时不会增加确认次数。
 import { applyRegisteredAvailability } from './availability.js'
 import { currentDormCatalog, enabledMachineBoard, filterDormFloors } from './buildings.js'
+import { upstreamQueryFailure } from './upstream-query.js'
+import { mobileDigest } from './mobile-auth.js'
+import { claimNotificationDelivery } from './notification-delivery.js'
 const MINUTE = 60000
 // 容忍短暂抓取失败和调度抖动；超过窗口统一显示过期。
 const FRESH_MS = 7 * MINUTE
@@ -31,6 +34,7 @@ export function normalizeOperationsConfig(input = {}) {
 
 function machines(board) { return (board?.floors || []).flatMap((floor) => floor.machines || []) }
 function freshSnapshot(board, now) {
+  if (upstreamQueryFailure(board) !== null) return null
   const at = Date.parse(board?.updatedAt || '')
   return Number.isFinite(at) && now - at <= FRESH_MS && at <= now + 30000 ? at : null
 }
@@ -48,7 +52,7 @@ export function evaluateMachineHealth(board, previousState = {}, now = Date.now(
   for (const machine of machines(board)) {
     const id = String(machine.id)
     const prior = state.machines[id] || { confirmedFault: false, count: 0, candidate: null, lastSnapshotAt: 0 }
-    if (snapshotAt === null) {
+    if (snapshotAt === null || upstreamQueryFailure(machine) !== null) {
       state.machines[id] = { ...prior, candidate: null, count: 0, firstAt: null }
       continue
     }
@@ -63,6 +67,10 @@ export function evaluateMachineHealth(board, previousState = {}, now = Date.now(
       next.firstAt = snapshotAt
     } else if (snapshotAt - prior.firstAt >= 30000) next.count = Math.min(2, (prior.count || 1) + 1)
     if (next.count >= 2) next.confirmedFault = candidate === 'fault'
+    if (next.confirmedFault && (!prior.confirmedFault || !prior.faultEventId)) {
+      next.faultEventId = 'evt_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24)
+      next.faultSince = new Date(snapshotAt).toISOString()
+    }
     state.machines[id] = next
   }
   // 健康表只保留最近一次看板中的设备，避免已下线设备无限增长。
@@ -76,11 +84,13 @@ export function applyMachineHealth(board, health = {}, now = Date.now()) {
   return projectBoard(board, (machine) => {
     const record = health.machines?.[String(machine.id)]
     const upstreamState = machine.upstreamState || machine.state
-    const confirmedFault = Boolean(record?.confirmedFault)
+    const queryFailed = upstreamQueryFailure(board) !== null || upstreamQueryFailure(machine) !== null
+    const confirmedFault = !queryFailed && Boolean(record?.confirmedFault)
     const suspect = upstreamState === 'faulty' && !confirmedFault
-    return { ...machine, upstreamState, state: !fresh ? 'unknown' : confirmedFault ? 'faulty' : suspect ? 'unknown' : upstreamState,
-      health: { confirmedFault, suspectedFault: suspect, recovering: confirmedFault && ['idle', 'occupied'].includes(upstreamState), stale: !fresh,
-        label: !fresh ? '数据已过期，等待更新' : suspect ? '故障待复核' : confirmedFault && upstreamState !== 'faulty' ? '恢复待复核' : confirmedFault ? '故障已确认' : '' } }
+    return { ...machine, upstreamState, state: !fresh || queryFailed ? 'unknown' : confirmedFault ? 'faulty' : suspect ? 'unknown' : upstreamState,
+      health: { confirmedFault, suspectedFault: !queryFailed && suspect, recovering: confirmedFault && ['idle', 'occupied'].includes(upstreamState), stale: !fresh || queryFailed,
+        ...(queryFailed ? { queryFailed: true } : {}), ...(confirmedFault ? { eventId: record.faultEventId, faultSince: record.faultSince } : {}),
+        label: queryFailed ? '上游查询失败，等待重试' : !fresh ? '数据已过期，等待更新' : suspect ? '故障待复核' : confirmedFault && upstreamState !== 'faulty' ? '恢复待复核' : confirmedFault ? '故障已确认' : '' } }
   })
 }
 
@@ -102,6 +112,21 @@ export function broadcastWindow(config, now = Date.now()) {
   const hours = b.hours?.length ? b.hours : Array.from({ length: (b.endHour ?? 22) - (b.startHour ?? 8) + 1 }, (_, i) => i + (b.startHour ?? 8))
   if (!b.enabled || !hours.includes(hour) || minute >= 10) return null
   return `${d.toISOString().slice(0, 10)}T${String(hour).padStart(2, '0')}`
+}
+
+export function broadcastReviewWindow(config, now = Date.now()) {
+  return new Date(now + 8 * 3600000).getUTCMinutes() === 59 ? broadcastWindow(config, now + MINUTE) : null
+}
+
+// A failed upstream request breaks the sequence of hardware observations.
+// Keep confirmed history, but do not combine faults across a 405/timeout gap.
+export async function resetHealthObservation(store, bid, { now = Date.now(), status = 0, eventId } = {}) {
+  return withOperationLock(store, `run:${bid}`, async () => {
+    const prior = await store.get(`operations:health:${bid}`, {})
+    const health = { ...prior, machines: Object.fromEntries(Object.entries(prior?.machines || {}).map(([id, row]) => [id, { ...row, candidate: null, count: 0, firstAt: null }])),
+      lastQueryFailure: { at: new Date(now).toISOString(), status, eventId } }
+    await store.put(`operations:health:${bid}`, health)
+  })
 }
 
 export async function recordAdminAlert(store, alert, { now = Date.now(), notify } = {}) {
@@ -151,7 +176,7 @@ export function buildQueueSchedule(queue, machineList, now = Date.now()) {
   })
 }
 
-export async function runOperations({ store, board, env = {}, now = Date.now(), broadcast, broadcastTargets, notify, beforeNotify }) {
+export async function runOperations({ store, board, env = {}, now = Date.now(), broadcast, broadcastTargets, notify, beforeNotify, reviewRequired = false, atomicStore }) {
   const bid = env.BUILDING_ID || board?.buildingId || 'b1'
   return withOperationLock(store, `run:${bid}`, async () => {
     const previous = await store.get(`operations:health:${bid}`, {})
@@ -174,13 +199,32 @@ export async function runOperations({ store, board, env = {}, now = Date.now(), 
     const alerts = []
     for (const m of machines(projected)) {
       if (m.health?.confirmedFault && !previous.machines?.[String(m.id)]?.confirmedFault) {
-        alerts.push(await recordAdminAlert(store, { key: `fault:${bid}:${m.id}`, kind: 'machine_fault', severity: 'warn', title: '设备故障已复核', message: `${m.name || m.id} 在两次独立快照中持续故障，请现场确认。` }, { now, notify }))
+        // Hardware faults have scoped volunteer/occupant delivery, never the
+        // global system-alert recipient. Keep an auditable management record.
+        alerts.push(await recordAdminAlert(store, { key: `fault:${bid}:${m.id}`, kind: 'machine_fault', severity: 'warn', title: '设备故障已复核', message: `${m.name || m.id} 在两次独立快照中持续故障，请现场确认。事件 ${m.health.eventId}` }, { now }))
       }
     }
     const config = normalizeOperationsConfig(await store.get('operations:config', DEFAULT_OPERATIONS_CONFIG))
     const hourKey = broadcastWindow(config, now)
+    const reviewKey = `operations:broadcast-review:${bid}`
+    const reviewHour = broadcastReviewWindow(config, now)
+    const snapshotAt = freshSnapshot(board, now)
+    if (reviewRequired && reviewHour && snapshotAt !== null && now - snapshotAt < MINUTE) {
+      await store.put(reviewKey, { hourKey: reviewHour, snapshotAt, checkedAt: now })
+    }
+    let reviewed = !reviewRequired
+    if (reviewRequired && hourKey && snapshotAt !== null) {
+      const review = await store.get(reviewKey, {})
+      const hourAt = Date.parse(hourKey + ':00:00+08:00')
+      reviewed = review.hourKey === hourKey && (review.snapshotAt >= hourAt - MINUTE && review.snapshotAt < hourAt
+        || now - review.checkedAt >= MINUTE && snapshotAt > review.snapshotAt)
+      // Missing scheduler ticks must not turn into an unreviewed broadcast.
+      // Check now, then require a new independent snapshot at least a minute later.
+      if (!reviewed && review.hourKey !== hourKey) await store.put(reviewKey, { hourKey, snapshotAt, checkedAt: now })
+    }
     let broadcastResult = { sent: false, reason: hourKey ? 'not_sent' : 'outside_window' }
-    if (hourKey && freshSnapshot(board, now) !== null) {
+    if (hourKey && reviewRequired && !reviewed) broadcastResult.reason = 'awaiting_recheck'
+    if (hourKey && reviewed && snapshotAt !== null) {
       const targets = typeof broadcastTargets === 'function' ? await broadcastTargets() : [{}]
       const deliveries = []
       for (const target of targets) {
@@ -202,6 +246,7 @@ export async function runOperations({ store, board, env = {}, now = Date.now(), 
         else {
           const attempt = { ...last, checkedHour: hourKey, unchanged: false, success: false, retryAfter: now + MINUTE, attemptAt: now }
           await store.put(key, attempt)
+          let claim
           try {
             // Site configuration can change while an earlier notification awaits
             // I/O. Recheck just before handing the public summary to its sender.
@@ -215,12 +260,18 @@ export async function runOperations({ store, board, env = {}, now = Date.now(), 
               broadcastResult.reason = 'unchanged'
             } else {
               const broadcastBoard = projectBoard({ ...current, floors: current.floors.map((floor) => ({ ...floor, machines: floor.machines.filter((m) => m.state !== 'unknown' && !m.health?.suspectedFault) })) }, (m) => m)
-              const sent = await broadcast({ board: broadcastBoard, hourKey, config, target })
-              if (!sent?.ok) throw new Error(sent?.error || sent?.err || '群播报发送失败')
-              await store.put(key, { ...attempt, success: true, successHash: currentHash, successAt: new Date(now).toISOString(), retryAfter: 0 })
-              broadcastResult = { sent: true, hourKey }
+              claim = await claimNotificationDelivery(atomicStore, 'mobile:limit:group-delivery:' + await mobileDigest(`${bid}|${target.key || 'legacy'}|${target.conversationId || target.via || ''}`), hourKey, now, {stateHash:currentHash})
+              if (!claim) broadcastResult = {sent:false,reason:'delivery_claimed'}
+              else {
+                const sent = await broadcast({ board: broadcastBoard, hourKey, config, target })
+                if (!sent?.ok) throw new Error(sent?.error || sent?.err || '群播报发送失败')
+                await claim.finish(true)
+                await store.put(key, { ...attempt, success: true, successHash: currentHash, successAt: new Date(now).toISOString(), retryAfter: 0 })
+                broadcastResult = { sent: true, hourKey }
+              }
             }
           } catch (e) {
+            await claim?.finish(false).catch(() => {})
             broadcastResult = { sent: false, reason: 'failed', error: String(e?.message || e).slice(0, 160) }
             await store.put(key, { ...attempt, error: broadcastResult.error })
             alerts.push(await recordAdminAlert(store, { key: 'broadcast:' + bid + ':' + (target.key || 'legacy'), kind: 'notification', severity: 'warn', title: '整点群播报未送达', message: broadcastResult.error }, { now, notify }))

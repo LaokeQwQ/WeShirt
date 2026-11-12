@@ -1,7 +1,8 @@
 import { getSiteConfig } from './site.js'
 import { issueTicket, verifyTicket } from '../packages/core/auth.js'
 import { normalizeDormBuilding, dormBuildingName } from '../packages/core/buildings.js'
-import { ASSISTANT_LIMITS, AssistantError, BUILTIN_SKILLS, MACHINE_TOOL, assistantConfig, publicAssistantConfig, patchAssistantConfig, validateSkill, beijingDay, pruneHistory, memoryHabits, machineStatus, callAssistant, readBoundedJson, plainObject } from '../packages/core/assistant.js'
+import { ASSISTANT_LIMITS, AssistantError, BUILTIN_SKILLS, MACHINE_TOOL, assistantConfig, publicAssistantConfig, patchAssistantConfig, validateSkill, beijingDay, pruneHistory, memoryHabits, machineStatus, callAssistant, readBoundedJson, plainObject, discoverAssistantModels, normalizePromptProfiles } from '../packages/core/assistant.js'
+import { mobileDigest } from '../packages/core/mobile-auth.js'
 
 const runtimes = new WeakMap()
 function runtime(store) { if (!runtimes.has(store)) runtimes.set(store, new Set()); return runtimes.get(store) }
@@ -12,6 +13,7 @@ const configKey = 'assistant:config'
 const memoryKey = (id) => `assistant:memory:${id}`
 const historyKey = (id) => `assistant:history:${id}`
 const skillsKey = (id) => `assistant:skills:${id}`
+const preferencesKey = (id) => `assistant:preferences:${id}`
 const emptyMemory = () => ({ enabled: false, note: '', since: 0 })
 
 async function locked(store, key, action) {
@@ -21,7 +23,7 @@ async function locked(store, key, action) {
   try { return await action() } finally { active.delete(key) }
 }
 async function readBody(c) {
-  const body = await readBoundedJson(c.req.raw, 16384)
+  const body = await readBoundedJson(c.req.raw, 196608)
   if (!plainObject(body)) throw new AssistantError('bad_param', '请求须为 JSON 对象')
   return body
 }
@@ -55,11 +57,11 @@ export async function pruneAssistantStorage(store, now = Date.now()) {
 }
 
 export async function deleteAssistantUserData(store, userId) {
-  for (const key of [memoryKey(userId), historyKey(userId), skillsKey(userId), `assistant:usage:${userId}`, `assistant:mcp:${userId}`]) await store.del(key)
+  for (const key of [memoryKey(userId), historyKey(userId), skillsKey(userId), preferencesKey(userId), `assistant:usage:${userId}`, `assistant:mcp:${userId}`]) await store.del(key)
 }
 
 /** All identity and board access is resolved server-side; clients cannot pass a user or building. */
-export function registerAssistantRoutes(app, { store, env = {}, authenticate, checkAdmin, getBoard, fetchImpl = globalThis.fetch }) {
+export function registerAssistantRoutes(app, { store, env = {}, authenticate, checkAdmin, getBoard, fetchImpl = globalThis.fetch, atomicStore }) {
   async function userFor(c) {
     const identity = await authenticate(c)
     const id = typeof identity === 'string' ? identity : identity?.id || identity?.userId
@@ -69,6 +71,58 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     return { ...user, id }
   }
   const loadConfig = async () => assistantConfig(await store.get(configKey, {}), env)
+  const quotaKey = async id => 'mobile:limit:assistant:' + await mobileDigest(id)
+  async function readUsage(id, config) {
+    if (atomicStore) {
+      try { const row = await atomicStore.get(await quotaKey(id)); return usageFor(row?.value || await store.get(`assistant:usage:${id}`,{}),config) }
+      catch { throw new AssistantError('quota_unavailable','调用额度暂时无法核验，请稍后重试',503) }
+    }
+    return usageFor(await store.get(`assistant:usage:${id}`,{}),config)
+  }
+  async function reserveRequest(id, config, first) {
+    const reserve = value => {
+      const usage = usageFor(value,config)
+      if ((first && !usage.dailyRemaining) || !usage.minuteRemaining) throw new AssistantError('rate_limit',first && !usage.dailyRemaining ? '今日 AI 额度已用完，明天再来' : '本分钟模型请求已达上限，请稍后重试',429)
+      return {day:usage.day,count:usage.count+(first?1:0),minute:usage.minute,minuteCount:usage.minuteCount+1}
+    }
+    if (!atomicStore) {
+      const next = reserve(await store.get(`assistant:usage:${id}`,{}))
+      await store.put(`assistant:usage:${id}`,next)
+      return usageFor(next,config)
+    }
+    try {
+      const key = await quotaKey(id)
+      for(let attempt=0;attempt<8;attempt++) {
+        const row = await atomicStore.get(key)
+        const next = reserve(row?.value || await store.get(`assistant:usage:${id}`,{}))
+        if (await atomicStore.compareAndSet(key,row?.version || null,next,{expiresAt:Date.now()+2*86400000})) return usageFor(next,config)
+      }
+    } catch(error) { if(error instanceof AssistantError)throw error; throw new AssistantError('quota_unavailable','调用额度暂时无法核验，请稍后重试',503) }
+    throw new AssistantError('busy','调用额度正在更新，请稍后重试',429)
+  }
+  async function withChatLease(id,action) {
+    if(!atomicStore)return action()
+    const key='mobile:limit:assistant-chat:'+await mobileDigest(id),owner=crypto.randomUUID()
+    let claimed=false
+    try {
+      for(let attempt=0;attempt<8;attempt++) {
+        const row=await atomicStore.get(key)
+        if(row?.value?.until>Date.now())throw new AssistantError('busy','已有问题正在处理，请稍后再试',429)
+        if(await atomicStore.compareAndSet(key,row?.version||null,{owner,until:Date.now()+30000},{expiresAt:Date.now()+30000})){claimed=true;break}
+      }
+      if(!claimed)throw new AssistantError('busy','已有问题正在处理，请稍后再试',429)
+    }catch(error){if(error instanceof AssistantError)throw error;throw new AssistantError('quota_unavailable','暂时无法确认处理状态，请稍后重试',503)}
+    try{return await action()}
+    finally{
+      try{const row=await atomicStore.get(key);if(row?.value?.owner===owner)await atomicStore.compareAndSet(key,row.version,{owner:'',until:0},{expiresAt:Date.now()+1000})}catch{/* The bounded lease expires even if a release fails. */}
+    }
+  }
+  async function readPreferences(user,config) {
+    const saved = await store.get(preferencesKey(user.id),null)
+    let promptProfiles
+    try { promptProfiles = saved ? normalizePromptProfiles(saved.promptProfiles) : config.promptProfiles } catch { promptProfiles = config.promptProfiles }
+    return {promptProfiles,activePromptId:promptProfiles.some(row=>row.id===saved?.activePromptId) ? saved.activePromptId : promptProfiles.some(row=>row.id===config.activePromptId) ? config.activePromptId : promptProfiles[0].id,customized:!!saved}
+  }
   const wrap = (action) => async (c) => { try { return await action(c) } catch (error) { return fail(error) } }
   const ownSkills = async (id) => {
     const data = await store.get(skillsKey(id), [])
@@ -104,17 +158,40 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
       return json(publicAssistantConfig(next))
     })
   }))
+  app.post('/api/admin/assistant/models',wrap(async c=>{
+    if(!await checkAdmin(c))throw new AssistantError('forbidden','请先登录管理后台',401)
+    const body=await readBody(c)
+    if(Object.keys(body).some(key=>!['protocol','endpoint','apiKey'].includes(key)))throw new AssistantError('bad_param','模型发现参数无效')
+    const current=await loadConfig()
+    const config=patchAssistantConfig({...current,enabled:false},body)
+    return locked(store,'assistant:models',async()=>json(await discoverAssistantModels({config,fetchImpl,resolveHost:env.ASSISTANT_RESOLVE_HOST})))
+  }))
+  app.get('/api/assistant/preferences',wrap(async c=>json(await readPreferences(await userFor(c),await loadConfig()))))
+  app.patch('/api/assistant/preferences',wrap(async c=>{
+    const user=await userFor(c),body=await readBody(c)
+    if(Object.keys(body).some(key=>!['promptProfiles','activePromptId','reset'].includes(key)) || own(body,'reset') && typeof body.reset!=='boolean')throw new AssistantError('bad_param','提示词设置无效')
+    return locked(store,`preferences:${user.id}`,async()=>{
+      const config=await loadConfig()
+      if(body.reset===true){await store.del(preferencesKey(user.id));return json(await readPreferences(user,config))}
+      const current=await readPreferences(user,config)
+      const promptProfiles=own(body,'promptProfiles') ? normalizePromptProfiles(body.promptProfiles) : current.promptProfiles
+      const activePromptId=body.activePromptId ?? current.activePromptId
+      if(!promptProfiles.some(row=>row.id===activePromptId))throw new AssistantError('bad_param','请选择存在的提示词')
+      await store.put(preferencesKey(user.id),{promptProfiles,activePromptId})
+      return json({promptProfiles,activePromptId,customized:true})
+    })
+  }))
   app.get('/api/assistant/status', wrap(async (c) => {
     const user = await userFor(c)
     const catalog = (await getSiteConfig(store)).buildings
     const config = await loadConfig()
-    const usage = usageFor(await store.get(`assistant:usage:${user.id}`, {}), config)
-    return json({ enabled: config.enabled, ready: publicAssistantConfig(config).ready, dormBuilding: normalizeDormBuilding(user.dormBuilding, catalog), buildingName: dormBuildingName(user.dormBuilding, catalog), usage: visibleUsage(usage), limits: { input: ASSISTANT_LIMITS.input, history: 20, retentionDays: 14 }, memoryEnabled: cleanMemory(await store.get(memoryKey(user.id), emptyMemory())).enabled })
+    const usage = await readUsage(user.id,config)
+    return json({ enabled: config.enabled, ready: publicAssistantConfig(config).ready, dormBuilding: normalizeDormBuilding(user.dormBuilding, catalog), buildingName: dormBuildingName(user.dormBuilding, catalog), usage: visibleUsage(usage), limits: { input: ASSISTANT_LIMITS.input, history: ASSISTANT_LIMITS.history, retentionDays: 14,context:128000,minuteHardLimit:30 },skillsEnabled:true,mcpEnabled:true,readonlyTools:[MACHINE_TOOL.name], memoryEnabled: cleanMemory(await store.get(memoryKey(user.id), emptyMemory())).enabled })
   }))
   app.get('/api/assistant/history', wrap(async (c) => json({ messages: await readHistory(await userFor(c)) })))
   app.delete('/api/assistant/history', wrap(async (c) => {
     const user = await userFor(c)
-    return locked(store, `chat:${user.id}`, async () => { await store.del(historyKey(user.id)); return json({ ok: true, messages: [] }) })
+    return locked(store, `chat:${user.id}`, () => withChatLease(user.id,async () => { await store.del(historyKey(user.id)); return json({ ok: true, messages: [] }) }))
   }))
   app.get('/api/assistant/memory', wrap(async (c) => json(await readMemory(await userFor(c)))))
   app.patch('/api/assistant/memory', wrap(async (c) => {
@@ -184,19 +261,21 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     if (!normalizeDormBuilding(user.dormBuilding,(await getSiteConfig(store)).buildings)) throw new AssistantError('building_required', '请先在设置中绑定住宿楼', 409)
     const skill = body.skillId ? [...BUILTIN_SKILLS, ...await ownSkills(user.id)].find((s) => s.id === body.skillId) : null
     if (body.skillId && !skill) throw new AssistantError('not_found', '所选 Skill 不存在', 404)
-    return locked(store, `chat:${user.id}`, async () => {
-      const usage = usageFor(await store.get(`assistant:usage:${user.id}`, {}), config)
-      if (!usage.dailyRemaining || !usage.minuteRemaining) throw new AssistantError('rate_limit', !usage.dailyRemaining ? '今日 AI 额度已用完，明天再来' : '提问过快，请在下一分钟重试', 429)
-      usage.count++; usage.minuteCount++
-      await store.put(`assistant:usage:${user.id}`, { day: usage.day, count: usage.count, minute: usage.minute, minuteCount: usage.minuteCount })
+    return locked(store, `chat:${user.id}`, () => withChatLease(user.id, async () => {
+      let usage = await readUsage(user.id,config)
+      if (!usage.dailyRemaining || !usage.minuteRemaining) throw new AssistantError('rate_limit', !usage.dailyRemaining ? '今日 AI 额度已用完，明天再来' : '本分钟模型请求已达上限，请稍后重试', 429)
       const memory = await readMemory(user)
       const history = await readHistory(user)
-      const reply = await callAssistant({ config, input: body.input.trim(), history, skill, memory: memory.enabled ? { note: memory.note, habits: memory.habits } : null, getStatus: (kind) => statusFor(user, kind), fetchImpl, resolveHost: env.ASSISTANT_RESOLVE_HOST })
+      const preferences = await readPreferences(user,config)
+      const prompt = preferences.promptProfiles.find(row=>row.id===preferences.activePromptId)?.text
+      let first = true, context = null
+      const reply = await callAssistant({ config, input: body.input.trim(), history, skill, skills:[...BUILTIN_SKILLS,...await ownSkills(user.id)], prompt, memory: memory.enabled ? { note: memory.note, habits: memory.habits } : null, getStatus: (kind) => statusFor(user, kind), fetchImpl, resolveHost: env.ASSISTANT_RESOLVE_HOST,
+        beforeRequest:async()=>{usage=await reserveRequest(user.id,config,first);first=false},onContext:value=>{context=value} })
       const at = new Date().toISOString()
       const messages = pruneHistory([...history, { role: 'user', content: body.input.trim(), at }, { role: 'assistant', content: reply, at }])
       await store.put(historyKey(user.id), messages)
-      return json({ reply, messages, usage: visibleUsage(usageFor({ ...usage }, config)) })
-    })
+      return json({ reply, messages, context, usage: visibleUsage(usage) })
+    }))
   }))
 
   app.post('/api/mcp', async (c) => {

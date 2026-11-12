@@ -66,13 +66,19 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
   app.onError((_error, c) => {
     const id = c.get('eventId') || eventId()
     c.set('eventId', id)
-    return json({ error: { code: 'internal', message: '服务暂时不可用，请稍后重试', eventId: id, status: 500 } }, 500, { 'X-Event-ID': id, 'Cache-Control': 'no-store' })
+    const unavailable=_error?.code==='machine_store_unavailable',status=unavailable?503:500
+    return json({ error: { code: unavailable?'machine_store_unavailable':'internal', message: '服务暂时不可用，请稍后重试', eventId: id, status } }, status, { 'X-Event-ID': id, 'Cache-Control': 'no-store' })
   })
   app.use('/api/*', async (c, next) => {
     c.set('eventId', eventId())
     try {
       const key = c.req.header('Idempotency-Key')
-      const eligible = writes.has(c.req.method) && key && !excluded.test(c.req.path) && (c.req.header('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json'
+      const accessError = c.get('adminAccessError')
+      if (accessError) { c.res = json({ error: { code: accessError.code, message: accessError.message } }, accessError.status || 401); return }
+      // Creation returns a credential once: never persist or replay that reply.
+      // Temporary sessions also cannot replay a cached, more privileged Bearer result.
+      const accessCodeRoute = /^\/api\/admin\/(?:access-codes|login)(?:\/|$)/.test(c.req.path)
+      const eligible = writes.has(c.req.method) && key && !accessCodeRoute && !c.get('temporaryAdminAccess') && !excluded.test(c.req.path) && (c.req.header('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json'
       if (!eligible) { await next(); return }
       if (!/^[A-Za-z0-9_.:-]{8,128}$/.test(key)) { c.res = json({ error: { code: 'bad_idempotency_key', message: '请求标识无效，请重新提交' } }, 400); return }
       const actor = await authenticate?.(c)

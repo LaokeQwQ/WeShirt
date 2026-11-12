@@ -28,11 +28,14 @@
           class="gate-input"
           type="password"
           placeholder="口令"
+          aria-label="管理口令"
           autocomplete="current-password"
           @keyup.enter="unlock"
         />
-        <van-button type="primary" block :loading="unlocking" @click="unlock">进入</van-button>
-        <van-button block plain @click="useAccount">使用当前钉钉账号管理</van-button>
+        <div class="gate-actions">
+          <van-button type="primary" block :loading="unlocking" @click="unlock">进入</van-button>
+          <van-button block plain @click="useAccount">使用当前钉钉账号管理</van-button>
+        </div>
         <p v-if="gateError" class="gate-err">{{ gateError }}</p>
       </div>
     </div>
@@ -41,7 +44,7 @@
     <div v-else-if="!status" class="loading text-dim"><template v-if="gateError">{{ gateError }}<van-button size="small" @click="load">重试</van-button></template><template v-else>读取中…</template></div>
 
     <!-- 已登录 -->
-    <template v-else>
+    <div v-else class="admin-content">
       <section class="hero card">
         <div class="hero-top">
           <span class="badge" :class="status.mode === 'real' ? 'live' : 'mock'">
@@ -169,6 +172,7 @@
       <AdminOperations />
       <AdminAnnouncements />
       <AdminAI />
+      <AdminAccessCodes />
 
       <section class="block card">
         <header>
@@ -365,7 +369,7 @@
         <button class="exit-btn" @click="lock">退出</button>
       </div>
       <p class="foot text-dim">口令只存在这台设备上。</p>
-    </template>
+    </div>
 
     <van-popup v-model:show="pickerShow" position="bottom" round>
       <div class="picker-filters"><h3>{{ pickerSlot }} 号位 · 人工选择设备</h3><input v-model="pickerSearch" placeholder="搜索设备名 / ID" /><select v-model="pickerDorm"><option value="">全部住宿楼</option><option v-for="b in DORM_BUILDINGS" :key="b.code" :value="b.code">{{ b.name }}</option></select><p class="text-dim">已在其他机位使用的设备不可重复绑定。</p></div>
@@ -395,6 +399,7 @@ import AdminTelemetry from '../components/AdminTelemetry.vue'
 import AdminOperations from '../components/AdminOperations.vue'
 import AdminAnnouncements from '../components/AdminAnnouncements.vue'
 import AdminAI from '../components/AdminAI.vue'
+import AdminAccessCodes from '../components/AdminAccessCodes.vue'
 import { DORM_BUILDINGS } from '../../../packages/core/buildings.js'
 
 const router = useRouter()
@@ -409,6 +414,7 @@ const unlocking = ref(false)
 const gateError = ref('')
 const sessionExpAt = ref(0)
 let tickTimer = null
+let boardRefreshTimer = null
 
 // 会话剩余时间（每分钟刷新一次，到点自动回到口令页）
 const nowTick = ref(Date.now())
@@ -966,7 +972,9 @@ function startCountdown(expiresAt) {
 
 function go(path) { router.push({ path, query: selectedDorm.value && ['/admin/users', '/admin/machines'].includes(path) ? { dorm: selectedDorm.value } : {} }) }
 function goBack() {
-  router.back()
+  // Entry may be a direct link or an OAuth return. Browser history can lead
+  // back to the same login gate, so leave management for a stable app page.
+  return router.replace(userStore.isLoggedIn ? '/settings' : '/list')
 }
 
 // ---------- 发消息测试 ----------
@@ -1009,6 +1017,7 @@ async function sendTestMsg(target) {
 }
 
 onMounted(async () => {
+  boardRefreshTimer = setInterval(()=>{if(authed.value && !document.hidden && !loading.value && !syncing.value && !savingMap.value)load()},30000)
   // 每分钟刷一次「剩余有效期」，到点自动收起后台
   tickTimer = setInterval(() => {
     nowTick.value = Date.now()
@@ -1034,6 +1043,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (codeTimer) clearInterval(codeTimer)
   if (tickTimer) clearInterval(tickTimer)
+  if (boardRefreshTimer) clearInterval(boardRefreshTimer)
 })
 
 onBeforeRouteLeave(async () => {
@@ -1045,17 +1055,13 @@ onBeforeRouteLeave(async () => {
 
 <style scoped>
 .dorm-tabs { display:flex;flex-wrap:wrap;gap:8px;padding:0 12px 12px; }.dorm-tabs button { min-height:36px;border:1px solid var(--border);border-radius:8px;padding:4px 12px;background:var(--bg);color:var(--text);cursor:pointer; }.dorm-tabs button.active { color:#93c5fd;border-color:#3b82f6;background:rgba(59,130,246,.12); }.map-note,.map-warning { font-size:12px;padding:0 12px;overflow-wrap:anywhere; }.map-note{color:#93c5fd}.map-warning{color:#fbbf24}.picker-filters{padding:16px;background:var(--bg-card)}.picker-filters h3{margin:0 0 12px;font-size:16px}.picker-filters input,.picker-filters select{min-height:40px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);padding:8px;width:100%;margin-bottom:8px;color-scheme:dark}.picker-filters p{font-size:12px;margin:0}.hero-err{overflow-wrap:anywhere}@media(max-width:400px){.nav-right{gap:6px}.conn{display:none}.slot-name{min-width:75px}.actions{flex-wrap:wrap}}
-.admin { padding-bottom: 24px; }
+.admin { width: 100%; min-width: 0; display: flex; flex-direction: column; padding-bottom: 24px; }
+.admin :deep(.van-nav-bar) { flex: none; width: 100%; }
+.admin-content { width: 100%; min-width: 0; max-width: 1200px; align-self: center; }
 
-/* ── 自适应：手机全宽，PC 居中限宽并按两列排卡片 ── */
+/* Navigation fills the window; only the operational content is bounded. */
 @media (min-width: 720px) {
-  .admin {
-    max-width: 1040px;
-    margin: 0 auto;
-    padding: 0 20px 32px;
-  }
-  .admin .gate { padding: 60px 0; }
-  .admin .gate-card { max-width: 420px; margin: 0 auto; }
+  .admin-content { padding: 0 20px 32px; }
   /* 宽屏下表格类区域左右留白更舒服 */
   .admin .acct-list,
   .admin .notify-channels { padding-left: 16px; padding-right: 16px; }
@@ -1079,11 +1085,13 @@ onBeforeRouteLeave(async () => {
 
 /* 口令闸门 */
 .gate {
-  min-height: calc(100vh - 46px);
-  display: flex; flex-direction: column; justify-content: center;
-  padding: 0 20px 60px;
+  flex: 1; min-height: 0; width: 100%;
+  display: flex; align-items: center; justify-content: center;
+  padding: clamp(24px, 8vh, 72px) max(16px, env(safe-area-inset-left)) calc(32px + env(safe-area-inset-bottom));
 }
-.gate-card { padding: 28px 20px 20px; text-align: center; }
+.gate-card { width: 100%; max-width: 440px; min-width: 0; padding: 28px clamp(20px, 4vw, 28px) 24px; text-align: center; }
+.gate-actions { display: flex; flex-direction: column; gap: 12px; }
+.gate-actions :deep(.van-button) { min-height: 44px; }
 .gate-icon {
   width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 16px;
   display: flex; align-items: center; justify-content: center;
