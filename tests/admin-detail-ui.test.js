@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { ref, computed, watch, reactive, nextTick } from 'vue'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { normalizeDormBuilding } from '../packages/core/buildings.js'
 
 const source = await readFile(new URL('../frontend/src/views/AdminDetail.vue', import.meta.url), 'utf8')
@@ -19,6 +20,21 @@ function evaluate(overrides = {}, returned = '({ selectedDorm, buildings, loadUs
   }
   return new Function(...Object.keys(bindings), script + '\nreturn ' + returned)(...Object.values(bindings))
 }
+
+test('管理详情返回固定管理首页，浏览器返回不会再次打开刚关闭的详情', async () => {
+  const router = createRouter({ history: createMemoryHistory(), routes: ['/settings', '/admin', '/admin/users'].map((path) => ({ path, component: {} })) })
+  await router.push('/settings')
+  await router.push('/admin/users')
+  const panel = evaluate({ useRouter: () => router }, '({ goBack })')
+  await panel.goBack()
+  assert.equal(router.currentRoute.value.path, '/admin')
+  const returned = new Promise((resolve) => {
+    const stop = router.afterEach(() => { stop(); resolve() })
+  })
+  router.back()
+  await returned
+  assert.equal(router.currentRoute.value.path, '/settings')
+})
 
 test('管理详情 Vue 脚本和模板编译通过，住宿楼选项来自网站目录', () => {
   const { descriptor, errors } = parse(source)

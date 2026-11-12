@@ -1,7 +1,8 @@
 <template>
-  <div class="adm">
+  <div class="page adm">
     <van-nav-bar :title="title" left-text="返回" left-arrow @click-left="goBack" />
 
+    <div class="admin-detail-content">
     <div v-if="error" class="request-error" role="alert">{{ error }}<button class="op" @click="reload">重试</button></div>
     <div v-if="loading" class="empty text-dim">读取中…</div>
 
@@ -184,6 +185,7 @@
         <van-button block class="photo-close" @click="photoShow = false">关闭</van-button>
       </div>
     </van-popup>
+    </div>
   </div>
 </template>
 
@@ -248,7 +250,7 @@ function stateText(s) {
   )
 }
 function goBack() {
-  router.push('/admin')
+  return router.replace('/admin')
 }
 function floorText(value) { const s = String(value || ''); return /F$/i.test(s) ? s : s ? s + ' 层' : '楼层未知' }
 function reload() { ({ users: loadUsers, messages: loadMessages, machines: loadMachines, audits: loadAudits, logs: loadLogs })[props.tab]?.() }
@@ -560,8 +562,12 @@ onUnmounted(() => { usersRequest++; machinesRequest++ })
 
 <style scoped>
 .request-error{margin:12px;padding:12px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);border-radius:10px;color:#fca5a5;font-size:12px;overflow-wrap:anywhere;display:flex;gap:10px;justify-content:space-between;align-items:center}.user-dorm{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--text-dim)}.user-dorm select{min-height:34px;max-width:130px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;color-scheme:dark}.op:disabled{opacity:.5;cursor:default}.st-unknown{background:#64748b}.st-text.st-unknown{color:#94a3b8}@media(max-width:420px){.toolbar{flex-wrap:wrap}.toolbar .q{min-width:180px}.row-ops{gap:9px}.row-ops .op{min-height:32px;padding:4px 8px}}
-.adm { padding-bottom: 24px; }
-.toolbar { display: flex; gap: 8px; align-items: center; padding: 10px 12px; }
+.adm { width: 100%; min-width: 0; padding-bottom: 24px; }
+.admin-detail-content { width: 100%; max-width: 1200px; min-width: 0; margin: 0 auto; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; }
+.toolbar .q { min-width: 0; flex: 1 1 160px; }
+.toolbar :deep(.van-button) { flex-shrink: 0; }
+@media (min-width: 720px) { .admin-detail-content { padding: 0 20px 24px; } }
 .q {
   flex: 1;
   height: 32px;
@@ -579,6 +585,7 @@ onUnmounted(() => { usersRequest++; machinesRequest++ })
 .log-filters { display: flex; gap: 8px; padding: 0 12px 8px; }
 .log-sel {
   flex: 1;
+  min-width: 0;
   height: 32px;
   padding: 0 8px;
   border-radius: 8px;
@@ -604,6 +611,7 @@ onUnmounted(() => { usersRequest++; machinesRequest++ })
 .log-search { display: flex; gap: 8px; padding: 0 12px 8px; }
 .log-input {
   flex: 1;
+  min-width: 0;
   height: 32px;
   padding: 0 10px;
   border-radius: 8px;
@@ -636,7 +644,7 @@ onUnmounted(() => { usersRequest++; machinesRequest++ })
 .row-main { flex: 1; min-width: 0; }
 .row-title { font-size: 14px; font-weight: 600; color: #eaf2fb; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .dim-id { font-size: 11px; color: #7d8ea3; font-weight: 400; }
-.row-sub { font-size: 12px; margin-top: 3px; }
+.row-sub { font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
 .row-text { font-size: 13px; color: #cdd8e5; margin-top: 4px; word-break: break-word; }
 .row-ops { display: flex; flex-direction: column; gap: 6px; flex: none; }
 .op {

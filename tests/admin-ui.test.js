@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { ref, computed } from 'vue'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { DORM_BUILDINGS } from '../packages/core/buildings.js'
 
 function evaluate(source, bindings, returned) {
@@ -10,6 +11,22 @@ function evaluate(source, bindings, returned) {
 }
 const adminSource = await readFile(new URL('../frontend/src/views/Admin.vue', import.meta.url), 'utf8')
 const telemetrySource = await readFile(new URL('../frontend/src/components/AdminTelemetry.vue', import.meta.url), 'utf8')
+
+test('管理页返回在直达和登录回跳后都离开后台，不依赖浏览器上一页', async () => {
+  for (const loggedIn of [false, true]) for (const previous of [null, '/login?to=/admin', '/admin/users']) {
+    const router = createRouter({ history: createMemoryHistory(), routes: ['/admin', '/admin/users', '/login', '/settings', '/list'].map((path) => ({ path, component: {} })) })
+    if (previous) await router.push(previous)
+    await router.push('/admin')
+    const admin = evaluate(adminSource, {
+      ref, computed, onMounted() {}, onUnmounted() {}, onBeforeRouteLeave() {},
+      useRouter: () => router, useUserStore: () => ({ isLoggedIn: loggedIn }),
+      showToast() {}, showConfirmDialog: async () => {}, getAdminSession() {}, setAdminSession() {}, clearAdminSession() {}, DORM_BUILDINGS,
+      api: async () => ({}),
+    }, '({ goBack })')
+    await admin.goBack()
+    assert.equal(router.currentRoute.value.path, loggedIn ? '/settings' : '/list')
+  }
+})
 
 test('钉钉角色账号无需口令会话即可进入后台，退出后迟到请求不能恢复后台', async () => {
   let delay = false
