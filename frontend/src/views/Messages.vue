@@ -38,7 +38,7 @@
               <div class="msg-meta"><span v-if="message.pinned" class="pinned-tag">置顶</span><span v-if="message.type === 'announcement'" class="announcement-tag">频道公告</span><span v-if="message.mentionAll" class="mention-channel-badge">@全体</span><time>{{ format(message.at) }}</time><span v-if="message.machineId" class="machine-tag">{{ message.machineName || '机器留言' }}</span></div>
               <blockquote v-if="message.reply">回复 {{ message.reply.nick || '同学' }}：{{ message.reply.text }}</blockquote><blockquote v-else-if="message.replyTo">原留言已删除</blockquote>
               <p class="msg-text">{{ message.text }}</p>
-              <CommunityMedia v-if="message.media" :media="message.media" />
+              <CommunityMedia v-if="message.media" :media="message.media" @preview-visibility="setMediaPreview" />
               <div class="msg-actions">
                 <button type="button" @click="replyTo(message)">回复</button>
                 <button v-if="message.permissions?.canDelete ?? message.mine" type="button" :disabled="Boolean(moderatingId)" @click="remove(message)">{{ moderatingId === 'delete:' + message.id ? '删除中…' : '删除' }}</button>
@@ -53,7 +53,7 @@
       <div class="composer-wrap">
         <p v-if="isMuted" class="mute-notice" role="status">{{ muteNotice }}</p>
         <p v-if="sendError" class="send-error" role="alert">{{ sendError }}</p>
-        <div v-if="attachment" class="attachment-draft"><img v-if="attachment.kind==='image'" :src="attachment.preview" alt="待发送图片" /><video v-else :src="attachment.preview" controls playsinline preload="metadata" /><span>{{ attachment.kind==='video' ? '短视频 · 最多30秒' : '图片' }}</span><button type="button" @click="clearAttachment">移除</button></div>
+        <div v-if="attachment" class="attachment-draft"><img v-if="attachment.kind==='image'" :src="attachment.preview" alt="待发送图片" /><video v-else :src="attachment.preview" controls playsinline preload="metadata" @webkitbeginfullscreen="draftVideoFullscreen=true" @webkitendfullscreen="draftVideoFullscreen=false" /><span>{{ attachment.kind==='video' ? '短视频 · 最多30秒' : '图片' }}</span><button type="button" @click="clearAttachment">移除</button></div>
         <div v-if="selectedMentions.length || mentionAll" class="mention-draft"><button v-for="item in selectedMentions" :key="item.ref" type="button" @click="removeMention(item)">@{{ item.nick }} ×</button><button v-if="mentionAll" type="button" @click="mentionAll=false">@全体成员 ×</button></div>
         <div v-if="reply" class="reply-target">回复 {{ reply.nick || '同学' }}：{{ reply.text.slice(0, 40) }}<button type="button" @click="reply = null" aria-label="取消回复">×</button></div>
         <div class="composer"><button class="composer-plus" type="button" aria-label="添加附件或提及成员" :disabled="sending || isMuted || preparing" @click="openAdd">＋</button><label class="visually-hidden" for="message-composer">留言内容</label><van-field id="message-composer" v-model="text" class="composer-input" placeholder="消息 / 输入@提及成员" maxlength="200" type="textarea" autosize rows="1" /><van-button type="primary" size="small" :disabled="(!text.trim() && !attachment) || sending || isMuted || preparing" :loading="sending || preparing" @click="send">发送</van-button></div>
@@ -131,6 +131,7 @@ const reply = ref(null)
 const attachment = ref(null), preparing = ref(false), announcement = ref(false)
 const selectedMentions = ref([]), mentionAll = ref(false), mentionCounts = ref({}), participants = ref([]), participantsLoading = ref(false)
 const showMentions = ref(false), showAdd = ref(false), showMessageActions = ref(false), heldMessage = ref(null)
+const mediaPreviews = ref(new Set()), draftVideoFullscreen = ref(false)
 const imageInput = ref(null), videoInput = ref(null), avatarInput = ref(null), transportState = ref('polling')
 const messageActions = computed(() => [{ name: '回复', action: 'reply' }, ...(!heldMessage.value?.mine ? [{ name: '举报', action: 'report', color: '#ef4444' }] : [])])
 const hold = createMessageHold()
@@ -164,7 +165,7 @@ let readRepairScope = ''
 let channelsPending = null
 const reader = createChannelReadTracker({
   context:()=>({key:scope.value,owner:user.isLoggedIn?ownerKey.value:'',channel:channelCode.value}),
-  visible:()=>document.visibilityState==='visible' && (!document.hasFocus || document.hasFocus()) && !showMute.value && !showReport.value && !showMentions.value && !showAdd.value && !showMessageActions.value,
+  visible:()=>document.visibilityState==='visible' && (!document.hasFocus || document.hasFocus()) && !showMute.value && !showReport.value && !showMentions.value && !showAdd.value && !showMessageActions.value && !mediaPreviews.value.size && !draftVideoFullscreen.value && !document.fullscreenElement && !document.webkitFullscreenElement,
   visibleIds:()=>visibleChannelMessageIds(messageList.value,{
     top:document.querySelector('.messages .van-nav-bar')?.getBoundingClientRect().bottom || 0,
     bottom:document.querySelector('.composer-wrap')?.getBoundingClientRect().top || globalThis.innerHeight || 0,
@@ -175,6 +176,8 @@ const reader = createChannelReadTracker({
   // actual message set before another attempt; do not loop an invalid batch.
   onError:(error,view)=>{if(error.status===404 && readRepairScope!==view.key){readRepairScope=view.key;load(false)}},
 })
+function setMediaPreview(visible, source) { const next = new Set(mediaPreviews.value); if (visible) next.add(source); else next.delete(source); mediaPreviews.value = next }
+function onFullscreenChange() { reader.pause(); nextTick(() => reader.schedule()) }
 
 function format(at) {
   const time = Date.parse(at || '')
@@ -366,7 +369,7 @@ watch(scope, (next) => {
   attachment.value = draft?.attachment || null; selectedMentions.value = draft?.mentions || []; mentionAll.value = draft?.mentionAll || false; announcement.value = draft?.announcement || false
   cancelHold(); showAdd.value = false; showMentions.value = false; showMessageActions.value = false; showReport.value = false; participants.value = []
   generation++; machineGeneration++
-  reader.reset()
+  reader.reset(); mediaPreviews.value = new Set(); draftVideoFullscreen.value = false
   readRepairScope=''
   messages.value = []; machines.value = []; error.value = ''; sendError.value = ''; hasMore.value = false; page.value = 1
   loading.value = false; refreshing.value = false; showMute.value = false
@@ -377,19 +380,21 @@ watch(() => Boolean(currentChannel.value), (available) => { if (available && cha
 const transport = createChannelTransport({ configure: (channel) => user.isLoggedIn ? api('/api/messages/realtime?channel=' + encodeURIComponent(channel), { silent: true }) : Promise.resolve({ enabled: false }), refresh: () => { if (!loading.value && !sending.value && page.value === 1) refresh() }, onState: (state) => { transportState.value = state } })
 watch(() => [channelCode.value, ownerKey.value, Boolean(currentChannel.value)], () => { if (channelCode.value && currentChannel.value) transport.start(channelCode.value); else transport.stop() }, { immediate: true })
 watch(text, (value, old) => { if (value.endsWith('@') && value.length > old.length) openMentions() })
-watch(()=>[showMute.value,showReport.value,showMentions.value,showAdd.value,showMessageActions.value],values=>{if(values.some(Boolean))reader.pause();else nextTick(()=>reader.schedule())})
+watch(()=>[showMute.value,showReport.value,showMentions.value,showAdd.value,showMessageActions.value,mediaPreviews.value.size>0,draftVideoFullscreen.value],values=>{if(values.some(Boolean))reader.pause();else nextTick(()=>reader.schedule())},{flush:'sync'})
 function onVisible() { cancelHold(); reader.reset(); clock.value = Date.now(); transport.visibilityChanged(); if (document.visibilityState === 'visible') { if(!channelCode.value)refresh();else reader.schedule() } }
 function onScroll() { cancelHold(); reader.schedule() }
 onMounted(() => {
   if (!channelsLoading.value && !channelRows.value.length) loadChannels()
   ticker = setInterval(() => { if (document.visibilityState === 'visible') clock.value = Date.now() }, 30000)
   document.addEventListener('visibilitychange', onVisible)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange)
   document.addEventListener('scroll', onScroll, true)
   window.addEventListener('blur', cancelHold)
   window.addEventListener('focus', onScroll)
   window.addEventListener('resize', onScroll)
 })
-onUnmounted(() => { disposed = true; reader.dispose(); generation++; machineGeneration++; channelGeneration++; transport.stop(); cancelHold(); clearInterval(ticker); const previews = new Set([attachment.value?.preview, ...[...drafts.values()].map((draft) => draft.attachment?.preview)]); for (const url of previews) if (url) URL.revokeObjectURL(url); drafts.clear(); document.removeEventListener('visibilitychange', onVisible); document.removeEventListener('scroll', onScroll, true); window.removeEventListener('blur', cancelHold);window.removeEventListener('focus',onScroll);window.removeEventListener('resize',onScroll) })
+onUnmounted(() => { disposed = true; reader.dispose(); generation++; machineGeneration++; channelGeneration++; transport.stop(); cancelHold(); clearInterval(ticker); const previews = new Set([attachment.value?.preview, ...[...drafts.values()].map((draft) => draft.attachment?.preview)]); for (const url of previews) if (url) URL.revokeObjectURL(url); drafts.clear(); document.removeEventListener('visibilitychange', onVisible); document.removeEventListener('fullscreenchange', onFullscreenChange); document.removeEventListener('webkitfullscreenchange', onFullscreenChange); document.removeEventListener('scroll', onScroll, true); window.removeEventListener('blur', cancelHold);window.removeEventListener('focus',onScroll);window.removeEventListener('resize',onScroll) })
 </script>
 
 <style scoped>
