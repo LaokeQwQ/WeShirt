@@ -4,6 +4,7 @@ import { getSiteConfig } from './site.js'
 import { PERMISSION_RESOURCES,getUserPermissions,normalizePermissionOverrides } from '../packages/core/permissions.js'
 import { resolveMachineDorm } from '../packages/core/buildings.js'
 import { withOperationLock } from '../packages/core/operations.js'
+import { communitySnapshot } from './community-snapshot.js'
 
 const idOk=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(value)
 const readMethod=method=>['GET','HEAD','OPTIONS'].includes(method)
@@ -59,29 +60,30 @@ export function resourceFor(path,method='GET'){
 
 export function registerPermissionMiddleware(app,{store,env={},authenticate,checkSuperAdmin}){
   app.use('/api/*',async(c,next)=>{
+    const source=readMethod(c.req.method)&&c.req.path.startsWith('/api/messages')?communitySnapshot(c,store).store:store
     let resource=resourceFor(c.req.path,c.req.method)
     if(!resource||c.req.method==='OPTIONS')return next()
     if(await checkSuperAdmin?.(c))return next()
     const user=await authenticate(c)
     // Existing role guards remain authoritative; sparse rules only add restrictions.
     const temporary=c.get('temporaryAdminAccess')
-    if(!temporary && (!user || !await store.get('access:user:'+user.id,null)))return next()
+    if(!temporary && (!user || !await source.get('access:user:'+user.id,null)))return next()
     if(c.req.method==='DELETE'&&/^\/api\/messages\/[^/]+$/.test(c.req.path)){
       const messageId=c.req.path.split('/').at(-1)
       const messages=await store.get('messages:'+(env.BUILDING_ID||'b1'),[])
       const message=messages.find(row=>row.id===messageId)
       if(message&&message.userId!==user.id)resource='adminMessages'
     }
-    const site=await getSiteConfig(store),access=temporary||await getUserPermissions(store,user,site.buildings)
+    const site=c.get('communitySiteSnapshot')||await getSiteConfig(source),access=temporary||await getUserPermissions(source,user,site.buildings)
     c.set('userAccess',access)
-    const readNotice=c.req.method==='POST'&&/^\/api\/messages\/notices\/(?:[^/]+\/)?read$/.test(c.req.path)
+    const readNotice=c.req.method==='POST'&&(c.req.path==='/api/messages/read'||/^\/api\/messages\/notices\/(?:[^/]+\/)?read$/.test(c.req.path))
     const row=access.permissions[resource],mode=readMethod(c.req.method)||c.req.path==='/api/mcp'||readNotice?'view':'operate'
     if(!row?.[mode])return apiErr(user||temporary?'forbidden':'unauthorized','当前账号没有此功能的'+(mode==='view'?'查看':'操作')+'权限',user||temporary?403:401)
     const scope=row[mode+'Buildings']
     if(scope===null)return next()
     if(resource==='adminTelemetry'&&!c.req.query('dorm'))return apiErr('scope_required','请选择授权范围内的具体楼栋查看统计',403)
     const bid=env.BUILDING_ID||'b1'
-    const [cached,mapping]=await Promise.all([store.get('machines:'+bid,null),store.get('mapping:'+bid,{})])
+    const [cached,mapping]=await Promise.all([source.get('machines:'+bid,null),source.get('mapping:'+bid,{})])
     const machines=(cached?.board?.floors||[]).flatMap(f=>f.machines||[])
     const dormOf=machineId=>{const m=machines.find(m=>String(m.id)===String(machineId));return m?resolveMachineDorm(m,mapping?.mapping||{},site.buildings):null}
     const allowed=code=>typeof code==='string'&&scope.includes(code)
@@ -128,9 +130,9 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     }
     if(resource==='adminMachines'&&/^\/api\/admin\/machine\//.test(c.req.path))targetCodes.push(dormOf(c.req.path.split('/')[4]))
     if(resource==='adminMachines'&&/^\/api\/admin\/machine-time-calibration\/[^/]+$/.test(c.req.path))targetCodes.push(dormOf(suffix))
-    if(['messages','adminMessages'].includes(resource)&&/^\/api\/(?:messages|admin\/message)\//.test(c.req.path)&&!/^\/api\/messages\/(?:media|channels|notices|realtime)(?:\/|$)/.test(c.req.path)){
+    if(['messages','adminMessages'].includes(resource)&&/^\/api\/(?:messages|admin\/message)\//.test(c.req.path)&&!/^\/api\/messages\/(?:media|channels|notices|realtime|read)(?:\/|$)/.test(c.req.path)){
       const msgId=/\/(?:pin|report)$/.test(c.req.path)?c.req.path.split('/').at(-2):suffix
-      const messages=await store.get('messages:'+bid,[]),message=messages.find(m=>m.id===msgId)
+      const messages=await source.get('messages:'+bid,[]),message=messages.find(m=>m.id===msgId)
       if(message||isAdminWrite)targetCodes.push(message&&(message.channel||message.dormBuilding||dormOf(message.machineId)))
     }
     if(isWrite&&resource==='messages'&&!targetCodes.length)targetCodes.push(user?.dormBuilding||site.buildings[0]?.code)

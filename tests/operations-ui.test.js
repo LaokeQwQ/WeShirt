@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { ref, computed, watch, nextTick, reactive } from 'vue'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
 import { createMessageHold } from '../frontend/src/messageHold.js'
+import { createChannelReadTracker, visibleChannelMessageIds } from '../frontend/src/channelReadTracker.js'
 
 const sources = Object.fromEntries(await Promise.all([
   ['admin', '../frontend/src/components/AdminOperations.vue'],
@@ -19,7 +20,7 @@ const base = { ref, computed, watch, onMounted() {}, onUnmounted() {}, showToast
 // Transport has its own tests. Keep this view harness free of sockets, timers
 // and background refreshes so request ordering remains under each test's control.
 const messageBase = {
-  ...base, nextTick, createMessageHold,
+  ...base, nextTick, createMessageHold,createChannelReadTracker,visibleChannelMessageIds,
   document: { visibilityState: 'visible', querySelector: () => null, getElementById: () => null },
   createChannelTransport: ({ onState }) => ({
     start() { onState('polling') }, stop() { onState('stopped') }, visibilityChanged() {},
@@ -211,4 +212,23 @@ test('留言分页去重并防止重复加载，切换频道后迟到的旧页�
   assert.deepEqual(panel.messages.value.map((message) => message.id), ['new-channel'])
   assert.equal(panel.page.value, 1)
   assert.equal(panel.hasMore.value, false)
+})
+
+test('目录头像摘要不依赖机器接口，旧账号目录响应不能覆盖新账号且失败保留最新摘要', async () => {
+  const pending=[],dorm=reactive({code:'guiyuan',buildings:[{code:'guiyuan',name:'桂园'}]}),route=reactive({query:{}}),user=loggedInUser()
+  const panel=evaluate(sources.messages,{...messageBase,useRoute:()=>route,useRouter:()=>({push(){},replace(){}}),useDormStore:()=>dorm,useUserStore:()=>user,loadBoard:()=>assert.fail('directory must not query machines'),api:path=>{
+    if(path!=='/api/messages/channels')return Promise.resolve({notices:[]})
+    const job=deferred();pending.push(job);return job.promise
+  }},'({loadChannels,channelRows,channelPreview,channelsError})')
+  const old=panel.loadChannels();user.user={id:'new'};await nextTick()
+  assert.equal(pending.length,2,'同一账号的并发频道目录请求合并，切换账号才另发请求')
+  pending.at(-1).resolve({channels:[{code:'public',name:'公共频道',unreadCount:4,avatarData:'data:image/png;base64,fixture',summary:{nick:'李**同学',text:'你好',kind:'text'}}]});await nextTick();await nextTick()
+  pending.slice(0,-1).forEach(job=>job.resolve({channels:[{code:'public',name:'旧目录',unreadCount:99}]}));await old
+  assert.equal(panel.channelRows.value[0].name,'公共频道')
+  assert.equal(panel.channelRows.value[0].unreadCount,4)
+  assert.equal(panel.channelPreview(panel.channelRows.value[0]),'李**同学: 你好')
+  assert.equal(panel.channelPreview({summary:{nick:'王**同学',kind:'video',text:'private caption'}}),'王**同学: [视频]')
+  const failed=panel.loadChannels();pending.at(-1).reject(Error('offline'));await failed
+  assert.equal(panel.channelRows.value[0].unreadCount,4)
+  assert.match(panel.channelsError.value,/保留当前目录/)
 })

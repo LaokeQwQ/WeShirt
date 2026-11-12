@@ -1,6 +1,7 @@
 import { projectMachineTime } from './machine-time.js'
 import { upstreamQueryFailure } from './upstream-query.js'
 import { readMachineDocument, updateMachineDocument } from './machine-documents.js'
+import { projectMachinePlacement } from './machine-labels.js'
 
 const MINUTE = 60000
 const date = value => Date.parse(value || '')
@@ -18,8 +19,9 @@ export function publicCalibration(value = {}) {
     sampleCount: Array.isArray(value.samples) ? value.samples.length : 0, lastCalibratedAt: value.lastCalibratedAt || null }
 }
 
-export function projectCalibratedBoard(board, settings = {}, { now = Date.now(), tasksByMachine = new Map() } = {}) {
+export function projectCalibratedBoard(board, settings = {}, { now = Date.now(), tasksByMachine = new Map(), mapping = board?.slotMapping || {} } = {}) {
   if (!board) return board
+  board = projectMachinePlacement(board, mapping)
   return { ...board, floors: (board.floors || []).map(floor => ({ ...floor, machines: (floor.machines || []).map(machine => {
     const calibration = publicCalibration(settings.machines?.[machine.id])
     return { ...projectMachineTime(machine, { now, snapshotAt: board.updatedAt, task: tasksByMachine.get(String(machine.id)), timeOffsetMinutes: calibration.effectiveOffsetMinutes }), calibration }

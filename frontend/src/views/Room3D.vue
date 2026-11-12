@@ -153,7 +153,8 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { api } from '../api'
 import { useUserStore } from '../stores/user'
 import { track } from '../telemetry'
-import { normalizeQualityPreference, chooseInitialQuality, renderInterval, labelSignature, createPointerGesture } from '../room/strategy'
+import { normalizeQualityPreference, chooseInitialQuality, renderInterval, createPointerGesture } from '../room/strategy'
+import { createSlotPlate } from '../room/slotPlate'
 import { mergeStaticEnvironment, disposeObjectResources } from '../room/resources'
 import { createGarmentAssets, makeGarmentPile } from '../room/garments'
 import { roomDampingFactor } from '../room/motion'
@@ -724,28 +725,6 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath()
 }
 
-// 机器上方的编号牌（CanvasTexture → Sprite）
-// 分辨率从 256×140 提到 512×280：手机上编号牌原来明显发虚，
-// 是因为贴图只有 256px 宽、又被拉到近景。提高一档 + 各向异性 8 就清楚了。
-function createLabel(no) {
-  const canvas = document.createElement('canvas')
-  canvas.width = 512
-  canvas.height = 280
-  const ctx = canvas.getContext('2d')
-  const tex = new THREE.CanvasTexture(canvas)
-  tex.colorSpace = THREE.SRGBColorSpace
-  tex.anisotropy = 8
-  tex.minFilter = THREE.LinearMipmapLinearFilter
-  tex.magFilter = THREE.LinearFilter
-  tex.generateMipmaps = true
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false })
-  const sprite = new THREE.Sprite(mat)
-  // 尺寸按世界坐标定：0.40×0.219（原来是 0.46×0.251）。
-  // 缩小 13% 后，近处的 D1/D2 牌子不会顶到屏幕左侧之外，也不和 1/2 号牌压在一起。
-  sprite.scale.set(0.4, 0.219, 1)
-  return { canvas, ctx, tex, sprite }
-}
-
 // 通用小文字牌（开水机 / 电闸等设施标注）
 function makeFacilityTag(text, { w = 0.52, h = 0.24, color = '#cfe6ff', border = '#2a4a66' } = {}) {
   const canvas = document.createElement('canvas')
@@ -909,45 +888,6 @@ function buildDrumInterior(group, facing, doorR, isDryer) {
   return { drumBase: base, clothGroup, water, waterGroup, xMark }
 }
 
-function drawLabel(m) {
-  const { canvas, ctx, tex } = m.label
-  const state = m.data?.state || 'unknown'
-  const signature = labelSignature({ no: m.no, ...m.data, state })
-  if (m.label.signature === signature) return
-  m.label.signature = signature
-  const color = cssColor(state)
-  // 画布实际是 512×280，但下面的坐标都按 256×140 的设计稿写，
-  // 统一缩放到整数倍，避免每个数字都手改
-  const k = canvas.width / 256
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
-  ctx.setTransform(k, 0, 0, k, 0, 0)
-
-  // 底板
-  roundRect(ctx, 7, 7, 242, 126, 28)
-  ctx.fillStyle = 'rgba(8,13,23,0.88)'
-  ctx.fill()
-  ctx.lineWidth = 5
-  ctx.strokeStyle = color
-  ctx.stroke()
-
-  // 大号编号
-  ctx.fillStyle = '#e8f0fb'
-  ctx.font = '700 74px ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif'
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.fillText(String(m.no), 128, 58)
-
-  // 状态/剩余时间
-  const sub =
-    state === 'occupied' && m.data?.leftMin != null ? (m.data.leftMin > 0 ? `${m.data.estimated ? '约 ' : ''}${m.data.leftMin} 分钟` : '即将完成') : stateText(state)
-  ctx.font = '600 24px ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif'
-  ctx.fillStyle = color
-  ctx.fillText(sub, 128, 112)
-
-  tex.needsUpdate = true
-}
-
 // 造一台机器：washer 洗衣机 / dryer 烘干机
 function buildMachine(slot) {
   const group = new THREE.Group()
@@ -1105,13 +1045,9 @@ function buildMachine(slot) {
   // 机器后方配套：洗衣机 = 投放装置+液体盒+水龙头+水管+插座+空开；烘干机 = 只有空开
   buildBackUtility(group, facing, bodyH, isDryer)
 
-  // 编号牌：向走道内侧偏移（facing 指向走道），抬高到机器顶部之上；点它也能选中该机
-  // 高度从 bodyH+0.42 降到 +0.36：牌子离机器更近，一眼知道是哪台，也不容易撞到天花线
-  const label = createLabel(slot.no)
-  label.sprite.position.set(facing * 0.5, bodyH + 0.36, 0)
-  label.sprite.userData.machineNo = slot.no
-  clickTargets.push(label.sprite)
-  group.add(label.sprite)
+  const label = createSlotPlate(slot.no,{facing,bodyHeight:bodyH})
+  clickTargets.push(label.plate)
+  group.add(label.plate)
 
   // 拾取：只在舱门中心放一个隐形圆盘（手机上防止误触边缘/邻机）
   const hitDisc = new THREE.Mesh(
@@ -1150,7 +1086,6 @@ function buildMachine(slot) {
     data: null
   }
   machines.push(m)
-  drawLabel(m)
   return m
 }
 
@@ -3083,7 +3018,8 @@ async function performSyncData(force) {
     m.ringMat.color.setHex(hex)
     m.ringMat.emissive.setHex(hex)
     applyDrumVisual(m)
-    drawLabel(m)
+    // The physical slot number is static; state remains on its light ring and
+    // the selected machine panel, without a floating sign above the cabinet.
   }
 
   // 视觉回归用：?demo=1 强制确定性状态（4 占用 / D1 异常占用 / 3 故障 / 其余空闲）
@@ -3106,8 +3042,7 @@ async function performSyncData(force) {
       m.ringMat.color.setHex(hex)
       m.ringMat.emissive.setHex(hex)
       applyDrumVisual(m)
-      drawLabel(m)
-    }
+        }
   }
 
   updateQueueVisuals()
@@ -3274,8 +3209,7 @@ const countdownTimer = setInterval(() => {
     const left = Math.max(0, Math.ceil((end - clockNow.value) / 60000))
     if (left !== m.data.leftMin) {
       m.data.leftMin = left
-      drawLabel(m)
-      if (selected.value?.no === m.no) selected.value = { no: m.no, kind: m.kind, ...m.data }
+          if (selected.value?.no === m.no) selected.value = { no: m.no, kind: m.kind, ...m.data }
     }
   }
 }, 1000)

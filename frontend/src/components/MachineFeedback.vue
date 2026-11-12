@@ -34,4 +34,5 @@ onUnmounted(() => { disposed = true; generation++ })
 </script>
 <style scoped>
 .machine-feedback{margin-top:14px}.machine-feedback form{display:grid;gap:12px;margin-top:14px}.machine-feedback label{display:grid;gap:6px;font-size:13px}.machine-feedback select,.machine-feedback textarea{box-sizing:border-box;width:100%;min-width:0;background:var(--bg-card);color:var(--text);font:inherit;border:1px solid var(--border);border-radius:10px;padding:10px}.hint{font-size:12px;color:var(--text-dim);margin:0;line-height:1.6}.feedback-error,.receipt{font-size:12px;line-height:1.6;overflow-wrap:anywhere;margin:0}.feedback-error{color:var(--van-danger-color,#dc2626)}.receipt{color:var(--van-primary-color,#2563eb)}
+.machine-feedback>.van-button{min-height:44px;height:auto;padding:10px 12px;line-height:1.5;white-space:normal;color:var(--text);background:var(--bg-card);border-color:var(--border);border-radius:12px}
 </style>

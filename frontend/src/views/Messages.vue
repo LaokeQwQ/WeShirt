@@ -1,19 +1,20 @@
 <template>
   <div class="page messages" :class="{ 'has-channel': currentChannel }">
     <van-nav-bar :title="currentChannel ? currentChannel.name : '留言板'" :left-text="channelCode ? '频道' : ''" :left-arrow="Boolean(channelCode)" @click-left="openDirectory">
-      <template v-if="currentChannel" #title><button class="channel-title" type="button" :disabled="!currentChannel.permissions?.canManageAvatar" @click="avatarInput?.click()"><img v-if="currentChannel.avatarData" :src="currentChannel.avatarData" alt="频道头像" /><span v-else class="small-channel-icon">{{ isPublic ? '聊' : '楼' }}</span>{{ currentChannel.name }}</button></template>
+      <template v-if="currentChannel" #title><button class="channel-title" type="button" :disabled="!currentChannel.permissions?.canManageAvatar" @click="avatarInput?.click()"><ChannelAvatar :code="currentChannel.code" :src="currentChannel.avatarData" />{{ currentChannel.name }}</button></template>
       <template #right><button class="text-button" :disabled="loading || channelsLoading" @click="refresh">刷新</button></template>
     </van-nav-bar>
 
     <section v-if="!channelCode" class="channel-directory" aria-label="留言频道">
       <h1>选择留言频道</h1>
       <p class="directory-hint">公共频道面向全校，楼栋频道方便邻里交流。</p>
+      <p v-if="channelsLoading" class="directory-status" role="status">{{ channelRows.length ? '正在更新频道…' : '正在读取频道与最新消息…' }}</p>
       <button v-for="channel in orderedChannels" :key="channel.code" type="button" class="channel-card card" :data-channel="channel.code" @click="openChannel(channel.code)">
-        <img v-if="channel.avatarData" class="channel-icon" :src="channel.avatarData" alt="频道头像" /><span v-else class="channel-icon" aria-hidden="true">{{ channel.code === 'public' ? '聊' : '楼' }}</span>
-        <span class="channel-description"><strong>{{ channel.name }}<small v-if="channel.code === ownBuilding">我的住宿楼</small></strong><span>{{ channel.code === 'public' ? '校园交流与公共留言' : '楼内留言、机器交流与预约' }}</span></span>
-        <span v-if="mentionCounts[channel.code]" class="mention-channel-badge">有人@你 {{ mentionCounts[channel.code] }}</span><span class="channel-chevron" aria-hidden="true">›</span>
+        <ChannelAvatar :code="channel.code" :src="channel.avatarData" />
+        <span class="channel-description"><strong>{{ channel.name }}<small v-if="channel.code === ownBuilding">我的住宿楼</small></strong><span class="channel-preview" :class="{ empty: !channel.summary }">{{ channelPreview(channel) }}</span><span v-if="mentionCounts[channel.code]" class="directory-mention">有人@你</span></span>
+        <span class="channel-trailing"><time v-if="channel.summary?.at">{{ previewTime(channel.summary.at) }}</time><span v-if="channel.unreadCount > 0" class="channel-unread" :aria-label="`${channel.unreadCount}条未读消息`">{{ channel.unreadCount > 99 ? '99+' : channel.unreadCount }}</span><svg v-else viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5"/></svg></span>
       </button>
-      <p v-if="channelsError" class="hint">{{ channelsError }}</p>
+      <p v-if="channelsError" class="directory-error" role="alert">{{ channelsError }}<button type="button" class="text-button" :disabled="channelsLoading" @click="refresh">重试</button></p>
       <p class="directory-footnote">浏览其他频道不会更改你的住宿楼绑定。</p>
     </section>
 
@@ -29,8 +30,8 @@
       <van-pull-refresh v-model="refreshing" @refresh="refresh">
         <div v-if="loading && !messages.length" class="empty text-dim">加载中…</div>
         <div v-else-if="!messages.length" class="empty text-dim">这个频道还没有留言，来聊两句吧。</div>
-        <div class="msg-list">
-          <article v-for="message in visibleMessages" :id="'message-'+message.id" :key="message.id" class="msg card" tabindex="0" aria-label="消息，按回车打开操作" :class="{ pinned: message.pinned, 'mentions-me': message.mentionedMe || route.query.message === message.id }" @pointerdown="startHold($event,message)" @pointerup="cancelHold" @pointercancel="cancelHold" @pointermove="moveHold" @pointerleave="cancelHold" @click.capture="hold.suppressClick($event)" @contextmenu.prevent="messageContext($event,message)" @keydown="messageKey($event,message)">
+        <div ref="messageList" class="msg-list">
+          <article v-for="message in visibleMessages" :id="'message-'+message.id" :data-message-id="message.mine ? undefined : message.id" :key="message.id" class="msg card" tabindex="0" aria-label="消息，按回车打开操作" :class="{ pinned: message.pinned, 'mentions-me': message.mentionedMe || route.query.message === message.id }" @pointerdown="startHold($event,message)" @pointerup="cancelHold" @pointercancel="cancelHold" @pointermove="moveHold" @pointerleave="cancelHold" @click.capture="hold.suppressClick($event)" @contextmenu.prevent="messageContext($event,message)" @keydown="messageKey($event,message)">
             <button class="message-avatar" type="button" :aria-label="'长按@'+(message.nick || '这位成员')" :disabled="message.mine || !message.mentionRef" @pointerdown.stop="startAvatarHold($event,message)" @pointerup.stop="cancelHold" @pointercancel.stop="cancelHold" @pointermove.stop="moveHold" @pointerleave="cancelHold" @click.stop.prevent @contextmenu.stop.prevent="mentionAuthor(message)" @keydown.enter.stop.prevent="mentionAuthor(message)" @keydown.space.stop.prevent="mentionAuthor(message)"><Avatar :name="message.nick || '同学'" :src="message.avatarUrl" :size="34" /></button>
             <div class="msg-body">
               <div class="msg-head"><b>{{ message.nick || '同学' }}</b><span class="author-building">{{ authorBuildingName(message) }}</span><IdentityBadge :identity="message.identity" /></div>
@@ -59,7 +60,7 @@
         <label v-if="currentChannel.permissions?.canAnnounce" class="announcement-option"><input v-model="announcement" type="checkbox" />发布为置顶频道公告</label>
       </div>
     </template>
-    <div v-else class="empty text-dim">{{ channelsLoading ? '正在读取频道…' : '这个频道不存在或已关闭。' }}<button v-if="!channelsLoading" type="button" class="text-button" @click="openDirectory">返回频道列表</button></div>
+    <div v-else class="empty text-dim">{{ channelsLoading ? '正在读取频道…' : channelsError ? '暂时无法确认频道，请重试。' : '这个频道不存在或已关闭。' }}<button v-if="channelsError && !channelsLoading" type="button" class="text-button" @click="refresh">重新读取</button><button v-if="!channelsLoading" type="button" class="text-button" @click="openDirectory">返回频道列表</button></div>
 
     <van-action-sheet v-model:show="showMute" title="选择禁言时长" :actions="muteActions" cancel-text="取消" :close-on-click-action="false" @select="confirmMute">
       <div class="mute-reason"><van-field v-model="muteReason" label="原因" placeholder="选填，最多200字" maxlength="200" type="textarea" rows="2" /></div>
@@ -86,9 +87,11 @@ import Avatar from '../components/Avatar.vue'
 import IdentityBadge from '../components/IdentityBadge.vue'
 import QueuePanel from '../components/QueuePanel.vue'
 import CommunityMedia from '../components/CommunityMedia.vue'
+import ChannelAvatar from '../components/ChannelAvatar.vue'
 import { prepareCommunityFile, uploadCommunityMedia } from '../communityMedia'
 import { createChannelTransport } from '../channelTransport'
 import { createMessageHold } from '../messageHold'
+import { createChannelReadTracker, visibleChannelMessageIds } from '../channelReadTracker'
 
 const route = useRoute()
 const router = useRouter()
@@ -121,6 +124,7 @@ const machineId = computed({
 const machines = ref([])
 const selectedMachine = computed(() => machines.value.find((m) => String(m.id) === machineId.value))
 const messages = ref([])
+const messageList = ref(null)
 const visibleMessages = computed(() => [...messages.value].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))))
 const text = ref('')
 const reply = ref(null)
@@ -148,19 +152,37 @@ const muteTarget = ref(null)
 const muteReason = ref('')
 const muteActions = [{ name: '1 小时', minutes: 60 }, { name: '1 天', minutes: 1440 }, { name: '7 天', minutes: 10080 }, { name: '永久禁言', minutes: null, color: '#ef4444' }]
 const drafts = new Map()
-const scope = computed(() => JSON.stringify([user.user?.id || 'guest', channelCode.value, machineId.value]))
+const ownerKey = computed(() => JSON.stringify([user.user?.id || '', user.token || '']))
+const scope = computed(() => JSON.stringify([ownerKey.value, channelCode.value, machineId.value]))
 let generation = 0
 let machineGeneration = 0
 let channelGeneration = 0
 let ticker = null
 let activeScope = ''
 let disposed = false
+let readRepairScope = ''
+let channelsPending = null
+const reader = createChannelReadTracker({
+  context:()=>({key:scope.value,owner:user.isLoggedIn?ownerKey.value:'',channel:channelCode.value}),
+  visible:()=>document.visibilityState==='visible' && (!document.hasFocus || document.hasFocus()) && !showMute.value && !showReport.value && !showMentions.value && !showAdd.value && !showMessageActions.value,
+  visibleIds:()=>visibleChannelMessageIds(messageList.value,{
+    top:document.querySelector('.messages .van-nav-bar')?.getBoundingClientRect().bottom || 0,
+    bottom:document.querySelector('.composer-wrap')?.getBoundingClientRect().top || globalThis.innerHeight || 0,
+  }),
+  send:body=>api('/api/messages/read',{method:'POST',body,silent:true}),
+  onRead:()=>{readRepairScope='';loadChannels();loadNoticeCounts()},
+  // An article can be deleted between rendering and receipt. Refresh the
+  // actual message set before another attempt; do not loop an invalid batch.
+  onError:(error,view)=>{if(error.status===404 && readRepairScope!==view.key){readRepairScope=view.key;load(false)}},
+})
 
 function format(at) {
   const time = Date.parse(at || '')
   return Number.isFinite(time) ? new Date(time).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
 }
 function friendlyError(e, fallback) { return String(e?.message || fallback).split(' · ')[0] }
+function channelPreview(channel) { const summary=channel.summary;return summary ? `${summary.nick || '同学'}: ${summary.kind === 'image' ? '[图片]' : summary.kind === 'video' ? '[视频]' : summary.text || '新消息'}` : channelsLoading.value && !channelRows.value.length ? '正在读取最新消息…' : '暂无消息，来聊两句吧。' }
+function previewTime(at) { const value=Date.parse(at||'');if(!Number.isFinite(value))return '';const date=new Date(value),today=new Date(clock.value);return date.toDateString()===today.toDateString()?date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):date.toLocaleDateString('zh-CN',{month:'numeric',day:'numeric'}) }
 function machineName(machine) {
   const name = String(machine.displayName || machine.machineLabel || machine.name || '').trim()
   return name && name !== String(machine.id) ? name : machine.kind === 'dryer' ? '烘干机' : '洗衣机'
@@ -168,7 +190,7 @@ function machineName(machine) {
 function authorBuildingName(message) { return message.authorBuildingName || channels.value.find((row) => row.code === message.authorBuilding)?.name || '未绑定住宿楼' }
 function openDirectory() { router.push({ path: '/board' }) }
 function openChannel(code) { router.push({ path: '/board', query: { channel: code } }) }
-async function loadNoticeCounts() { if (!user.isLoggedIn) { mentionCounts.value = {}; return }; const owner = user.user?.id; try { const data = await api('/api/messages/notices', { silent: true }); if (owner !== user.user?.id || disposed) return; const counts = {}; for (const entry of data.notices || []) if (!entry.readAt) counts[entry.channel] = (counts[entry.channel] || 0) + 1; mentionCounts.value = counts } catch {} }
+async function loadNoticeCounts() { if (!user.isLoggedIn) { mentionCounts.value = {}; return }; const owner = ownerKey.value; try { const data = await api('/api/messages/notices', { silent: true }); if (owner !== ownerKey.value || disposed) return; const counts = {}; for (const entry of data.notices || []) if (!entry.readAt) counts[entry.channel] = (counts[entry.channel] || 0) + 1; mentionCounts.value = counts } catch {} }
 function requireLogin() { if (user.isLoggedIn) return true; router.push({ path: '/login', query: { to: route.fullPath } }); return false }
 function openAdd() { if (requireLogin()) showAdd.value = true }
 function chooseAttachment(action) { showAdd.value = false; if (action.kind === 'mention') { openMentions(); return }; (action.kind === 'video' ? videoInput.value : imageInput.value)?.click() }
@@ -200,16 +222,23 @@ function removeMention(item) { selectedMentions.value = selectedMentions.value.f
 function selectAll() { mentionAll.value = true; showMentions.value = false }
 
 async function loadChannels() {
+  const owner=ownerKey.value
+  if(channelsPending?.owner===owner)return channelsPending.job
+  const job=performLoadChannels(owner)
+  channelsPending={owner,job}
+  try{return await job}finally{if(channelsPending?.job===job)channelsPending=null}
+}
+async function performLoadChannels(owner) {
   const request = ++channelGeneration
   channelsLoading.value = true
   try {
     const result = await api('/api/messages/channels', { auth: 'optional' })
-    if (disposed || request !== channelGeneration) return
+    if (disposed || request !== channelGeneration || owner !== ownerKey.value) return
     if (Array.isArray(result.channels)) channelRows.value = result.channels
     currentBuilding.value = result.currentBuilding || null
     mute.value = result.mute || result.moderation || null
     channelsError.value = ''
-  } catch { if (!disposed && request === channelGeneration) channelsError.value = '频道列表暂未更新，已显示住宿楼目录。' }
+  } catch { if (!disposed && request === channelGeneration && owner === ownerKey.value) channelsError.value = '频道列表暂未更新，保留当前目录。' }
   finally { if (!disposed && request === channelGeneration) channelsLoading.value = false }
 }
 
@@ -231,6 +260,7 @@ async function load(append = false) {
     hasMore.value = Boolean(data.pagination?.hasMore)
     mute.value = data.mute || data.moderation || null
     if (route.query.message) nextTick(() => document.getElementById('message-' + route.query.message)?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
+    nextTick(() => reader.schedule())
   } catch (e) { if (!disposed && request === generation) error.value = friendlyError(e, '留言读取失败，请重试') }
   finally { if (!disposed && request === generation) { loading.value = false; refreshing.value = false } }
 }
@@ -250,7 +280,9 @@ async function loadMachines() {
 async function refresh() {
   if (!channelCode.value) return Promise.all([loadChannels(), loadNoticeCounts()])
   if (!currentChannel.value) { await loadChannels(); if (!currentChannel.value) return }
-  await Promise.all([load(false), loadMachines()])
+  // Message content does not wait for the slower equipment/queue interface.
+  if (!isPublic.value && !machines.value.length) loadMachines()
+  await load(false)
 }
 function replyTo(message) { if (!requireLogin()) return; reply.value = message; sendError.value = ''; nextTick(() => document.getElementById('message-composer')?.focus()) }
 
@@ -334,25 +366,30 @@ watch(scope, (next) => {
   attachment.value = draft?.attachment || null; selectedMentions.value = draft?.mentions || []; mentionAll.value = draft?.mentionAll || false; announcement.value = draft?.announcement || false
   cancelHold(); showAdd.value = false; showMentions.value = false; showMessageActions.value = false; showReport.value = false; participants.value = []
   generation++; machineGeneration++
+  reader.reset()
+  readRepairScope=''
   messages.value = []; machines.value = []; error.value = ''; sendError.value = ''; hasMore.value = false; page.value = 1
   loading.value = false; refreshing.value = false; showMute.value = false
   refresh()
 }, { immediate: true })
-watch(() => user.user?.id, () => { currentBuilding.value = null; mute.value = null; mentionCounts.value = {}; loadChannels(); loadNoticeCounts() })
+watch(ownerKey, () => { channelGeneration++; channelRows.value=[]; currentBuilding.value = null; mute.value = null; mentionCounts.value = {}; loadChannels(); loadNoticeCounts() }, {flush:'sync'})
 watch(() => Boolean(currentChannel.value), (available) => { if (available && channelCode.value && !messages.value.length && !loading.value) refresh() })
 const transport = createChannelTransport({ configure: (channel) => user.isLoggedIn ? api('/api/messages/realtime?channel=' + encodeURIComponent(channel), { silent: true }) : Promise.resolve({ enabled: false }), refresh: () => { if (!loading.value && !sending.value && page.value === 1) refresh() }, onState: (state) => { transportState.value = state } })
-watch(() => [channelCode.value, user.user?.id, Boolean(currentChannel.value)], () => { if (channelCode.value && currentChannel.value) transport.start(channelCode.value); else transport.stop() }, { immediate: true })
+watch(() => [channelCode.value, ownerKey.value, Boolean(currentChannel.value)], () => { if (channelCode.value && currentChannel.value) transport.start(channelCode.value); else transport.stop() }, { immediate: true })
 watch(text, (value, old) => { if (value.endsWith('@') && value.length > old.length) openMentions() })
-function onVisible() { cancelHold(); clock.value = Date.now(); transport.visibilityChanged(); if (document.visibilityState === 'visible' && !channelCode.value) refresh() }
-function onScroll() { cancelHold() }
+watch(()=>[showMute.value,showReport.value,showMentions.value,showAdd.value,showMessageActions.value],values=>{if(values.some(Boolean))reader.pause();else nextTick(()=>reader.schedule())})
+function onVisible() { cancelHold(); reader.reset(); clock.value = Date.now(); transport.visibilityChanged(); if (document.visibilityState === 'visible') { if(!channelCode.value)refresh();else reader.schedule() } }
+function onScroll() { cancelHold(); reader.schedule() }
 onMounted(() => {
   if (!channelsLoading.value && !channelRows.value.length) loadChannels()
   ticker = setInterval(() => { if (document.visibilityState === 'visible') clock.value = Date.now() }, 30000)
   document.addEventListener('visibilitychange', onVisible)
   document.addEventListener('scroll', onScroll, true)
   window.addEventListener('blur', cancelHold)
+  window.addEventListener('focus', onScroll)
+  window.addEventListener('resize', onScroll)
 })
-onUnmounted(() => { disposed = true; generation++; machineGeneration++; channelGeneration++; transport.stop(); cancelHold(); clearInterval(ticker); const previews = new Set([attachment.value?.preview, ...[...drafts.values()].map((draft) => draft.attachment?.preview)]); for (const url of previews) if (url) URL.revokeObjectURL(url); drafts.clear(); document.removeEventListener('visibilitychange', onVisible); document.removeEventListener('scroll', onScroll, true); window.removeEventListener('blur', cancelHold) })
+onUnmounted(() => { disposed = true; reader.dispose(); generation++; machineGeneration++; channelGeneration++; transport.stop(); cancelHold(); clearInterval(ticker); const previews = new Set([attachment.value?.preview, ...[...drafts.values()].map((draft) => draft.attachment?.preview)]); for (const url of previews) if (url) URL.revokeObjectURL(url); drafts.clear(); document.removeEventListener('visibilitychange', onVisible); document.removeEventListener('scroll', onScroll, true); window.removeEventListener('blur', cancelHold);window.removeEventListener('focus',onScroll);window.removeEventListener('resize',onScroll) })
 </script>
 
 <style scoped>
@@ -362,5 +399,6 @@ onUnmounted(() => { disposed = true; generation++; machineGeneration++; channelG
 .messages{min-height:100vh;padding-bottom:calc(65px + env(safe-area-inset-bottom))}.messages.has-channel{padding-bottom:calc(170px + env(safe-area-inset-bottom))}.text-button,.msg-actions button,.reply-target button{border:0;background:transparent;color:#93c5fd;font-size:12px;padding:7px;cursor:pointer}.text-button:disabled,.msg-actions button:disabled{opacity:.5;cursor:default}.channel-directory{padding:20px 14px}.channel-directory h1{font-size:20px;margin:0 0 8px}.directory-hint,.directory-footnote{font-size:12px;line-height:1.6;color:var(--text-dim)}.directory-hint{margin-bottom:20px}.directory-footnote{text-align:center;margin-top:20px}.channel-card{width:100%;display:flex;gap:12px;align-items:center;padding:16px;margin-bottom:10px;text-align:left;color:var(--text);border:1px solid var(--border);cursor:pointer}.channel-icon{display:grid;place-items:center;width:42px;height:42px;flex:none;border-radius:12px;background:rgba(59,130,246,.13);color:#93c5fd;font-weight:600}.channel-description{display:grid;gap:7px;flex:1;min-width:0}.channel-description strong{font-size:15px;overflow-wrap:anywhere}.channel-description small{display:inline-block;margin-left:7px;font-size:10px;font-weight:400;color:#86efac}.channel-description>span{font-size:12px;color:var(--text-dim)}.channel-chevron{font-size:25px;color:var(--text-dim)}.channel-intro{margin:14px;font-size:12px;line-height:1.6;color:var(--text-dim)}.filters{display:flex;gap:10px;align-items:end;padding:12px}.filters label{display:grid;gap:5px;min-width:0;flex:1;font-size:12px;color:var(--text-dim)}.filters select{min-height:38px;width:100%;padding:5px 10px;color:var(--text);background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color-scheme:dark}.queue-box{margin:0 12px 14px}.hint{padding:0 14px;font-size:12px;color:var(--text-dim)}.error{margin:12px;color:#fca5a5;font-size:12px;overflow-wrap:anywhere}.empty{text-align:center;padding:30px 12px;font-size:13px}.msg-list{display:grid;gap:10px;padding:0 12px}.msg{display:flex;gap:10px;padding:12px}.msg.pinned{border-color:rgba(251,191,36,.3)}.msg-body{min-width:0;flex:1}.msg-head{display:flex;flex-wrap:wrap;gap:5px 7px;align-items:center;font-size:12px}.msg-head b{max-width:100%;overflow-wrap:anywhere}.author-building{font-size:10px;color:var(--text-dim);overflow-wrap:anywhere}.msg-meta{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:5px;font-size:10px;color:var(--text-dim)}.machine-tag,.pinned-tag{color:#fbbf24}.pinned-tag{padding:1px 5px;border-radius:4px;background:rgba(245,158,11,.1)}.msg-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.6;margin:7px 0}blockquote{margin:8px 0;padding:6px 10px;border-left:2px solid var(--border);color:var(--text-dim);font-size:11px;overflow-wrap:anywhere}.msg-actions{display:flex;flex-wrap:wrap;gap:14px}.msg-actions button{min-height:32px;padding:4px 0}.composer-wrap{position:fixed;left:0;right:0;bottom:calc(50px + env(safe-area-inset-bottom));z-index:20;border-top:1px solid var(--border);background:var(--bg-elev)}.composer{display:flex;gap:8px;padding:10px 12px;align-items:end}.composer-input{flex:1;padding:0;max-height:130px;overflow-y:auto}.reply-target{display:flex;justify-content:space-between;gap:8px;padding:6px 14px;color:var(--text-dim);font-size:11px;overflow-wrap:anywhere}.reply-target button{padding:0 4px;font-size:18px;flex:none}.mute-notice,.send-error{margin:0;padding:8px 14px;font-size:11px;line-height:1.5;overflow-wrap:anywhere}.mute-notice{color:#fcd34d;background:rgba(245,158,11,.08)}.send-error{color:#fca5a5}.mute-reason{padding:0 12px 12px}.channel-card:focus-visible,.msg-actions button:focus-visible,.text-button:focus-visible{outline:2px solid #93c5fd;outline-offset:2px}
 </style>
 <style scoped>
+.directory-status{font-size:12px;color:var(--text-dim);margin:0 0 12px}.directory-error{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:var(--text-dim)}.channel-directory .channel-card{gap:12px;padding:14px;border-radius:18px;min-height:88px}.channel-description strong{display:flex;align-items:center;gap:6px;flex-wrap:wrap;line-height:1.4}.channel-description small{margin-left:0!important;border-radius:5px;background:color-mix(in srgb,#55a88e 12%,transparent);padding:2px 5px}.channel-description .channel-preview{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;line-height:1.6}.channel-preview.empty{padding:0;text-align:left}.channel-description .directory-mention{font-size:11px;color:#e58a38}.channel-trailing{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:9px;flex:none;min-width:28px;align-self:stretch}.channel-trailing time{font-size:10px;color:var(--text-dim);white-space:nowrap}.channel-unread{display:grid;place-items:center;min-width:20px;height:20px;border-radius:11px;background:#347f92;color:white;font-size:11px;padding:0 5px;font-variant-numeric:tabular-nums}.channel-trailing svg{width:17px;height:17px;stroke:var(--text-dim);stroke-width:1.5;fill:none}.channel-title :deep(.channel-avatar){width:28px;height:28px;border-radius:9px}.channel-title :deep(svg){width:19px;height:19px}@media(max-width:350px){.channel-directory{padding-inline:12px}.channel-directory .channel-card{gap:10px;padding:12px}.channel-description strong{font-size:14px}.channel-description>span{font-size:11px}.chat-topline{flex-wrap:wrap;gap:5px}}
 .composer{align-items:center;max-width:640px;margin:0 auto;gap:10px}.composer-input{padding:10px 14px;border:1px solid var(--border);border-radius:22px;background:var(--bg-card);min-height:42px;display:flex;align-items:center}.composer-input :deep(.van-field__control){line-height:22px;min-height:22px}.composer-input:after{border:0}.composer>.van-button{height:40px;min-width:58px;border-radius:20px;flex:none}.composer-plus{display:grid;place-items:center;width:36px;height:42px;padding:0;flex:none}.composer-wrap{padding-top:2px}.composer-input :deep(textarea){max-height:110px}
 </style>
