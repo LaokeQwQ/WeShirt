@@ -146,7 +146,11 @@ export function ingestRows(machines) {
       finishTime = new Date(time).toISOString()
     }
     const categoryCode = normalizeMachineCategory(machine.categoryCode)
-    return { id, name: String(machine.name ?? '').slice(0, 64), floorCode: String(machine.floorCode ?? '').slice(0, 8), state, finishTime, ...(categoryCode ? { categoryCode } : {}) }
+    const cleanLabel=value=>typeof value==='string'?value.replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,100):''
+    const originalName=cleanLabel(machine.originalName),remarkName=cleanLabel(machine.remarkName)
+    return { id, name: String(machine.name ?? '').slice(0, 64), floorCode: String(machine.floorCode ?? '').slice(0, 8), state, finishTime, ...(categoryCode ? { categoryCode } : {}),
+      ...(originalName&&originalName!==machine.name?{originalName}:{}),...(remarkName?{remarkName}:{}),
+      ...(machine.queryFailed===true?{queryFailed:true,queryStatus:Number.isInteger(machine.queryStatus)?machine.queryStatus:0}:{}) }
   })
 }
 

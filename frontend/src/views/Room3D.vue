@@ -49,9 +49,10 @@
         <header class="mp-head" :class="{ 'mp-machine-head': selected }">
           <div class="mp-no" :class="{ 'boiler-no': facility }" :style="selected ? { borderColor: cssColor(selected.state) } : {}">{{ selected?.no || (facility === 'boiler' ? '水' : '须') }}</div>
           <div class="mp-meta">
-            <h2 class="mp-name" :title="selected ? selected.rawName || selected.name : ''">{{ selected ? selected.rawName || selected.name : facility === 'boiler' ? '开水机' : `${facility === 'washer' ? '洗衣机' : '烘干机'}使用须知` }}</h2>
+            <h2 class="mp-name" :title="selected ? selected.displayName || selected.name : ''">{{ selected ? selected.displayName || selected.name : facility === 'boiler' ? '开水机' : `${facility === 'washer' ? '洗衣机' : '烘干机'}使用须知` }}</h2>
+            <small v-if="selected?.originalName && selected.originalName !== (selected.displayName || selected.name)" class="mp-original">原名：{{ selected.originalName }}</small>
             <div class="mp-state" :style="selected ? { color: cssColor(selected.state) } : {}">
-              <template v-if="selected">{{ selected.availabilityLabel || stateText(selected.state) }}<template v-if="selected.state === 'occupied' && selected.leftMin != null"> · {{ selected.leftMin > 0 ? (selected.estimated ? '估算剩余 ' : '剩余 ') + selected.leftMin + ' 分钟' : '结束时间待确认' }}</template></template>
+              <template v-if="selected">{{ selected.availabilityLabel || stateText(selected.state) }}<template v-if="selected.state === 'occupied' && selected.leftMin != null"> · {{ selected.leftMin > 0 ? (selected.estimated ? '估算剩余 ' : '剩余 ') + selected.leftMin + ' 分钟' : '即将完成' }}</template></template>
               <template v-else>使用须知</template>
             </div>
           </div>
@@ -101,6 +102,7 @@
                 <p v-if="selected.kind !== 'dryer'" class="mp-reminder-preview">预计 {{ previewEndText }} 提醒；设备确认结束后再通知取衣。</p>
               </template>
               <div v-if="selected.state === 'faulty'" class="mp-fault"><p class="mp-fault-hint">这台显示故障，请先现场确认。确认修好后可恢复正常。</p><van-button block type="primary" :loading="recovering" @click="recoverFault">现场已修好，恢复正常</van-button></div>
+              <MachineFeedback v-if="selected.machineId" :machine-id="String(selected.machineId)" :name="selected.displayName || selected.name" />
               <p v-if="selectedQueueCount" class="mp-queue-n">已有 {{ selectedQueueCount }} 人排队<template v-if="myQueueEntry?.position"> · 你第 {{ myQueueEntry.position }} 位</template></p>
             </div>
             <div v-show="panelTab === 'comments'" id="mp-comments" role="tabpanel" aria-labelledby="mp-comments-tab" class="mp-msgs">
@@ -143,6 +145,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import Avatar from '../components/Avatar.vue'
 import TaskDetailsForm from '../components/TaskDetailsForm.vue'
 import CareRecord from '../components/CareRecord.vue'
+import MachineFeedback from '../components/MachineFeedback.vue'
 import { availableRoomHeight } from '../room/panelViewport'
 import { loadBoard } from '../boardQuery'
 import { useDormStore } from '../stores/dorm'
@@ -937,7 +940,7 @@ function drawLabel(m) {
 
   // 状态/剩余时间
   const sub =
-    state === 'occupied' && m.data?.leftMin != null ? `${m.data.estimated ? '约 ' : ''}${m.data.leftMin} 分钟` : stateText(state)
+    state === 'occupied' && m.data?.leftMin != null ? (m.data.leftMin > 0 ? `${m.data.estimated ? '约 ' : ''}${m.data.leftMin} 分钟` : '即将完成') : stateText(state)
   ctx.font = '600 24px ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif'
   ctx.fillStyle = color
   ctx.fillText(sub, 128, 112)
@@ -2101,25 +2104,26 @@ function buildCorridorProps() {
     }
   ]
   cards.forEach((card, i) => {
-    const frame = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.42, 0.34), boardMat)
-    frame.position.set(0, 0, (i - 0.5) * 0.38)
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.56, 0.46), boardMat)
+    frame.position.set(0, 0, (i - 0.5) * 0.52)
     board.add(frame)
     const panel = textPanel({
-      w: 0.3,
-      h: 0.36,
+      w: 0.42,
+      h: 0.50,
       bg: '#f2ede0',
       fg: '#4a4238',
       title: card.title,
       titleColor: card.color,
       lines: card.lines
     })
-    panel.position.set(0.02, 0, (i - 0.5) * 0.38)
+    panel.position.set(0.02, 0, (i - 0.5) * 0.52)
     panel.rotation.y = Math.PI / 2
     panel.userData.notice = card.title === '洗衣机' ? 'washer' : 'dryer'
     clickTargets.push(panel)
     board.add(panel)
   })
-  board.position.set(-2.0, 1.55, 0.58)
+  // Leave the enlarged boards above the dosing box (top 1.605m), with 13.5cm clearance.
+  board.position.set(-2.0, 2.02, 0.58)
   scene.add(board)
 
   // ④ 开水机与 D2 之间的空水龙头。左墙是 x=-2.05 的平面，龙头必须探进房间，否则会埋进墙里看不见
@@ -3070,6 +3074,8 @@ async function performSyncData(force) {
           kind: hit.kind || m.kind,
           name: hit.name || wantedId,
           rawName: hit.name,
+          originalName: hit.originalName || hit.name,
+          displayName: hit.displayName || hit.remarkName || hit.name,
           machineId: hit.id
         }
       : { state: 'unknown', leftMin: null, name: boundId ? '绑定设备暂不可用' : '机位尚未绑定', rawName: null, machineId: '', kind: m.kind }
@@ -3217,7 +3223,7 @@ async function bootstrap() {
 }
 
 // 每 30s 拉一次看板，页面在前台时才轮询，后台标签页不打扰接口
-const POLL_MS = 45000
+const POLL_MS = 30000
 let pollTimer = null
 let pollBusy = false
 
@@ -3350,6 +3356,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.mp-original{display:block;font-size:11px;line-height:1.5;color:var(--text-dim);overflow-wrap:anywhere}
 .dorm-switch { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: transparent; color: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
 .room-page :deep(.van-nav-bar__title) { max-width: calc(100% - 132px); margin-left: 12px; margin-right: auto; text-align: left; }
 .nav-actions {

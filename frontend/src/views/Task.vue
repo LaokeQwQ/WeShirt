@@ -17,7 +17,7 @@
       <template v-if="mode === 'machine'">
         <div class="field-label">提醒时间</div>
         <div class="mode-row">
-          <span class="mode on">按机器剩余 {{ machineLeft }} 分钟提醒</span>
+          <span class="mode on">{{ machineLeft == null ? '结束时间待确认' : machineLeft > 0 ? `按机器剩余 ${machineLeft} 分钟提醒` : '即将完成' }}</span>
           <span class="mode" @click="mode = 'duration'">自己选</span>
         </div>
       </template>
@@ -74,7 +74,7 @@
       </div>
     </div>
 
-    <section v-if="pickups.length" class="tasks"><h2>朋友请我代取</h2><div v-for="p in pickups" :key="p.id" class="task-item card"><div><strong>{{ p.task?.machineName || p.task?.machineId }}</strong><p>{{ p.task?.leftMin > 0 ? `剩余 ${p.task.leftMin} 分钟` : '计时已结束，请现场确认' }}</p></div><van-button size="small" to="/social">处理</van-button></div></section>
+    <section v-if="pickups.length" class="tasks"><h2>朋友请我代取</h2><div v-for="p in pickups" :key="p.id" class="task-item card"><div><strong>{{ p.task?.machineName || p.task?.machineId }}</strong><p>{{ p.task?.done ? '已确认取衣' : p.task?.leftMin == null ? '结束时间待确认' : p.task.leftMin > 0 ? `剩余 ${p.task.leftMin} 分钟` : '即将完成，请等机器结束后取衣' }}</p></div><van-button size="small" to="/social">处理</van-button></div></section>
     <section class="tasks history-tasks" aria-labelledby="history-title">
       <h2 id="history-title">历史洗衣记录</h2>
       <p class="form-tip">登记满 72 小时自动归档，满 336 小时自动清除。</p>
@@ -135,6 +135,7 @@ const takingId = ref('')
 let timer = null
 let clockTimer = null
 const now = ref(Date.now())
+let clockOffset = 0
 const partition = computed(() => splitTaskHistory(tasks.value, now.value))
 const activeTasks = computed(() => partition.value.activeTasks)
 const taskHistory = computed(() => partition.value.history)
@@ -193,17 +194,19 @@ function stateText(s) {
 function stateTextOf(t) {
   if (t.takeState === 'taken' || t.done) return '已取'
   const end = t.endAt ? new Date(t.endAt).getTime() : NaN
-  if (t.takeState === 'pending' || (Number.isFinite(end) && end <= now.value)) {
+  if (t.completionConfirmed === true) return '平台已确认完成 · 等待取衣'
+  if (t.takeState === 'pending' || (t.timingSource !== 'upstream' && Number.isFinite(end) && end <= now.value)) {
     const over = Number.isFinite(end) ? Math.max(0, Math.floor((now.value - end) / 60000)) : Number(t.overdueMin) || 0
     return over > 0 ? `登记计时结束${agoText(over)} · 请确认机器和衣物` : '登记计时已到 · 请现场确认'
   }
-  if (Number.isFinite(end)) return `登记计时剩余 ${Math.max(1, Math.ceil((end - now.value) / 60000))} 分`
+  if (Number.isFinite(end)) { const left = Math.max(0, Math.ceil((end - now.value) / 60000)); return left > 0 ? `${t.timingSource === 'upstream' ? '平台' : '预计'}剩余 ${left} 分` : '即将完成' }
   const left = Number(t.leftMin)
   if (Number.isFinite(left) && left > 0) return `登记计时剩余 ${left} 分`
   return '结束时间待确认'
 }
 
 function reminderSource(task) {
+  if (task.timingSource === 'upstream') return '按最新平台时间同步' + (task.timeOffsetMinutes ? ` · 校准 ${task.timeOffsetMinutes > 0 ? '+' : ''}${task.timeOffsetMinutes} 分钟` : '')
   if (task.mode === 'machine') return task.estimated ? '按估算时间提醒；请核对现场状态' : '按机器时间提醒 · 程序未提供'
   if (task.program === 'self_clean') return '自行选择桶自洁 · 6分钟提醒'
   return `自行设置${task.minutes ? ' ' + task.minutes + ' 分钟' : ''}提醒；不代表机器远端状态`
@@ -212,7 +215,7 @@ function reminderSource(task) {
 function canTake(t) {
   if (t.archived || t.done || t.takeState === 'taken') return false
   const end = t.endAt ? new Date(t.endAt).getTime() : NaN
-  return t.takeState === 'pending' || (Number.isFinite(end) && end <= now.value)
+  return t.completionConfirmed === true || t.takeState === 'pending' || (t.timingSource !== 'upstream' && Number.isFinite(end) && end <= now.value)
 }
 
 function stateClass(t) {
@@ -327,7 +330,9 @@ async function loadMachines(force = false) {
     const data = await loadBoard({ force, dorm: code })
     if (disposed || dorm.code !== code) return
     board.value = data.board
-    now.value = Date.now()
+    const server = Date.parse(data.freshness?.serverNow || '')
+    if (Number.isFinite(server)) clockOffset = server - Date.now()
+    now.value = Date.now() + clockOffset
     machineError.value = ''
   } catch (e) {
     machineError.value = e?.message || '请稍后再试'
@@ -347,6 +352,9 @@ async function loadTasks() {
     const data = await api('/api/tasks')
     if (disposed) return
     tasks.value = data.tasks || []
+    const server = Date.parse(data.serverNow || '')
+    if (Number.isFinite(server)) clockOffset = server - Date.now()
+    now.value = Date.now() + clockOffset
   } catch (e) {
     if (disposed) return
     if (e?.message === NEED_LOGIN) router.replace({ path: '/login', query: { to: '/task' } })
@@ -362,9 +370,9 @@ watch(() => dorm.code, () => { board.value = null; selected.value = ''; machineE
 
 async function loadPickups() { try { const d = await api('/api/social/pickups'); if (!disposed) pickups.value = (d.received || d.pickups || []).filter((p)=>['pending','accepted'].includes(p.state)) } catch {} }
 function refresh() { return Promise.all([loadMachines(), loadTasks(), loadPickups()]) }
-function startPoll() { stopPoll(); if (document.visibilityState === 'visible') timer = setInterval(refresh, 60000) }
+function startPoll() { stopPoll(); if (document.visibilityState === 'visible') timer = setInterval(refresh, 30000) }
 function stopPoll() { if (timer) clearInterval(timer); timer = null }
-function onVis() { if (document.visibilityState === 'visible') { now.value = Date.now(); refresh(); startPoll() } else stopPoll() }
+function onVis() { if (document.visibilityState === 'visible') { now.value = Date.now() + clockOffset; refresh(); startPoll() } else stopPoll() }
 
 onMounted(async () => {
   await refresh()
@@ -375,12 +383,16 @@ onMounted(async () => {
   }
   startPoll()
   document.addEventListener('visibilitychange', onVis)
-  clockTimer = setInterval(() => { now.value = Date.now() }, 1000)
+  window.addEventListener('online', onVis)
+  window.addEventListener('pageshow', onVis)
+  clockTimer = setInterval(() => { now.value = Date.now() + clockOffset }, 1000)
 })
 onUnmounted(() => {
   disposed = true
   stopPoll()
   document.removeEventListener('visibilitychange', onVis)
+  window.removeEventListener('online', onVis)
+  window.removeEventListener('pageshow', onVis)
   if (clockTimer) clearInterval(clockTimer)
 })
 </script>

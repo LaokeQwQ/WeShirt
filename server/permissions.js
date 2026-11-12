@@ -21,15 +21,17 @@ const SCOPED_ADMIN_WRITES=[
   ['adminMessages','PATCH',/^\/api\/admin\/community-reports\/[^/]+$/],
   ['adminAnnouncements','POST',/^\/api\/admin\/announcements$/],
   ['adminAnnouncements','DELETE',/^\/api\/admin\/announcements\/[^/]+$/],
+  ['adminMachines','PATCH',/^\/api\/admin\/machine-feedback\/[^/]+$/],
+  ['adminMachines','PATCH',/^\/api\/admin\/machine-time-calibration\/[^/]+$/],
 ]
 const scopedAdminWriteAllowed=(resource,method,path)=>SCOPED_ADMIN_WRITES.some(([key,verb,pattern])=>key===resource&&verb===method&&pattern.test(path))
 export function resourceFor(path,method='GET'){
-  if(/^\/api\/admin\/(?:login|logout|session|permissions)(?:\/|$)/.test(path)||path==='/api/user/permissions')return null
+  if(/^\/api\/admin\/(?:login|logout|session|permissions|access-codes)(?:\/|$)/.test(path)||path==='/api/user/permissions')return null
   if(path.startsWith('/api/admin/')){
     const part=path.slice(11).split('/')[0]
     if(part==='status')return 'adminDashboard'
-    if(/^(?:user|users|backfill-ding-profile)$/.test(part))return 'adminUsers'
-    if(/^(?:machine|machines)$/.test(part))return 'adminMachines'
+    if(/^(?:user|users|users\.csv|backfill-ding-profile)$/.test(part))return 'adminUsers'
+    if(/^(?:machine|machines|machine-feedback|machine-time-calibration)$/.test(part))return 'adminMachines'
     if(/^(?:message|messages|community-reports)$/.test(part))return 'adminMessages'
     if(part==='operations'||part.startsWith('notify'))return 'adminOperations'
     if(part==='telemetry')return 'adminTelemetry'
@@ -62,18 +64,19 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     if(await checkSuperAdmin?.(c))return next()
     const user=await authenticate(c)
     // Existing role guards remain authoritative; sparse rules only add restrictions.
-    if(!user || !await store.get('access:user:'+user.id,null))return next()
+    const temporary=c.get('temporaryAdminAccess')
+    if(!temporary && (!user || !await store.get('access:user:'+user.id,null)))return next()
     if(c.req.method==='DELETE'&&/^\/api\/messages\/[^/]+$/.test(c.req.path)){
       const messageId=c.req.path.split('/').at(-1)
       const messages=await store.get('messages:'+(env.BUILDING_ID||'b1'),[])
       const message=messages.find(row=>row.id===messageId)
       if(message&&message.userId!==user.id)resource='adminMessages'
     }
-    const site=await getSiteConfig(store),access=await getUserPermissions(store,user,site.buildings)
+    const site=await getSiteConfig(store),access=temporary||await getUserPermissions(store,user,site.buildings)
     c.set('userAccess',access)
     const readNotice=c.req.method==='POST'&&/^\/api\/messages\/notices\/(?:[^/]+\/)?read$/.test(c.req.path)
     const row=access.permissions[resource],mode=readMethod(c.req.method)||c.req.path==='/api/mcp'||readNotice?'view':'operate'
-    if(!row?.[mode])return apiErr(user?'forbidden':'unauthorized','当前账号没有此功能的'+(mode==='view'?'查看':'操作')+'权限',user?403:401)
+    if(!row?.[mode])return apiErr(user||temporary?'forbidden':'unauthorized','当前账号没有此功能的'+(mode==='view'?'查看':'操作')+'权限',user||temporary?403:401)
     const scope=row[mode+'Buildings']
     if(scope===null)return next()
     if(resource==='adminTelemetry'&&!c.req.query('dorm'))return apiErr('scope_required','请选择授权范围内的具体楼栋查看统计',403)
@@ -86,6 +89,9 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     if(explicit.some(code=>!allowed(code)))return apiErr('forbidden','该楼栋不在授权范围内',403)
     if(c.req.query('machineId')&&!allowed(dormOf(c.req.query('machineId'))))return apiErr('forbidden','该机器不在授权范围内',403)
     const isWrite=mode==='operate'
+    // These handlers recheck the current principal and every selected target;
+    // CSV cannot be safely filtered by the generic JSON response projection.
+    if(resource==='adminUsers' && (c.req.path==='/api/admin/users.csv' && !isWrite || c.req.path==='/api/admin/users/batch' && c.req.method==='POST'))return next()
     const isAdminWrite=isWrite&&resource.startsWith('admin')
     if(isAdminWrite&&!scopedAdminWriteAllowed(resource,c.req.method,c.req.path))return apiErr('forbidden','此批量操作需要全部楼栋权限，请选择具体楼栋目标',403)
     if(isAdminWrite&&c.req.query('building')&&c.req.query('building')!==bid)return apiErr('forbidden','该数据源不在授权操作范围内',403)
@@ -121,6 +127,7 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
       if(isAdminWrite&&Object.hasOwn(body||{},'dormBuilding'))targetCodes.push(body.dormBuilding)
     }
     if(resource==='adminMachines'&&/^\/api\/admin\/machine\//.test(c.req.path))targetCodes.push(dormOf(c.req.path.split('/')[4]))
+    if(resource==='adminMachines'&&/^\/api\/admin\/machine-time-calibration\/[^/]+$/.test(c.req.path))targetCodes.push(dormOf(suffix))
     if(['messages','adminMessages'].includes(resource)&&/^\/api\/(?:messages|admin\/message)\//.test(c.req.path)&&!/^\/api\/messages\/(?:media|channels|notices|realtime)(?:\/|$)/.test(c.req.path)){
       const msgId=/\/(?:pin|report)$/.test(c.req.path)?c.req.path.split('/').at(-2):suffix
       const messages=await store.get('messages:'+bid,[]),message=messages.find(m=>m.id===msgId)
@@ -136,6 +143,10 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
     if(resource==='adminMessages'&&isAdminWrite&&/^\/api\/admin\/community-reports\/[^/]+$/.test(c.req.path)){
       const reports=await store.get('community:reports:'+bid,[])
       targetCodes.push(reports.find(row=>row.id===suffix)?.channel)
+    }
+    if(resource==='adminMachines'&&isAdminWrite&&/^\/api\/admin\/machine-feedback\/[^/]+$/.test(c.req.path)){
+      const rows=await store.get('machine-feedback:'+bid,[])
+      targetCodes.push(rows.find(row=>row.id===suffix)?.dormBuilding)
     }
     if(resource==='adminAnnouncements'&&isWrite){
       if(c.req.method==='POST')targetCodes.push(body?.dormBuilding||null)
@@ -168,7 +179,7 @@ export function registerPermissionMiddleware(app,{store,env={},authenticate,chec
 }
 
 export function registerPermissionRoutes(app,{store,authenticate,checkSuperAdmin}){
-  const highest=async c=>await checkSuperAdmin?.(c)||(await getUserPermissions(store,await authenticate(c),(await getSiteConfig(store)).buildings)).identity.role==='super'
+  const highest=async c=>!c.get('temporaryAdminAccess')&&(await checkSuperAdmin?.(c)||(await getUserPermissions(store,await authenticate(c),(await getSiteConfig(store)).buildings)).identity.role==='super')
   const snapshot=async(c,selectedId)=>{
     const site=await getSiteConfig(store),q=(c.req.query('q')||'').trim().toLowerCase()
     const entries=await store.list('user:'),members=await store.get('meta:siteAdmins',[])
@@ -178,7 +189,7 @@ export function registerPermissionRoutes(app,{store,authenticate,checkSuperAdmin
     if(user){const access=await getUserPermissions(store,user,site.buildings);selected={user:{id:user.id,nick:user.nick||'同学',role:access.identity.role},base:access.base,permissions:access.permissions,overrides:access.overrides}}
     return {canManage:true,resources:PERMISSION_RESOURCES,buildings:site.buildings,users,selected}
   }
-  app.get('/api/user/permissions',async c=>{const user=await authenticate(c);if(!user)return apiErr('unauthorized','请先登录',401);const access=await getUserPermissions(store,user,(await getSiteConfig(store)).buildings);return json({identity:access.identity,adminVisible:access.adminVisible,permissions:access.permissions},200,{'cache-control':'no-store'})})
+  app.get('/api/user/permissions',async c=>{const temporary=c.get('temporaryAdminAccess');const user=await authenticate(c);if(!user&&!temporary)return apiErr('unauthorized','请先登录',401);const access=temporary||await getUserPermissions(store,user,(await getSiteConfig(store)).buildings);return json({identity:access.identity,adminVisible:access.adminVisible,permissions:access.permissions},200,{'cache-control':'no-store'})})
   app.get('/api/admin/permissions',async c=>{if(!await highest(c))return apiErr('forbidden','仅总管可管理个人权限',403);return json(await snapshot(c,c.req.query('userId')),200,{'cache-control':'no-store'})})
   app.patch('/api/admin/permissions/:id',async c=>{
     if(!await highest(c))return apiErr('forbidden','仅总管可管理个人权限',403)

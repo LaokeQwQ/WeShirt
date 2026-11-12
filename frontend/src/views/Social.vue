@@ -170,7 +170,7 @@ function taskTime(task) {
   const end = task.endAt ? new Date(task.endAt).getTime() : NaN
   if (!Number.isFinite(end)) return '结束时间待确认，请以现场为准'
   const left = Math.max(0, Math.ceil((end - now.value) / 60000))
-  return left > 0 ? `预计还有 ${left} 分钟，请等机器结束后取衣` : '计时已结束，请到现场确认后再取衣'
+  return left > 0 ? `预计还有 ${left} 分钟，请等机器结束后取衣` : '即将完成，请等机器结束后取衣'
 }
 async function respondPickup(request, action) {
   if (actingId.value) return

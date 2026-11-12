@@ -69,11 +69,13 @@ export function registerAuditMiddleware(app, { store, env = {}, authenticate, ch
         const eventId = typeof suppliedId === 'string' && /^[A-Za-z0-9_-]{8,100}$/.test(suppliedId) ? suppliedId : crypto.randomUUID()
         const status = failed ? 500 : c.res.status
         const { target, targetType } = requestTarget(c, route)
+        const temporary=c.get('temporaryAdminAccess')
+        const effectiveActor=temporary?{actorId:temporary.id,actorNick:'临时管理员',actorKind:'temporaryAdmin'}:actor
         await logEvent(store, {
           type: 'operation', action: method + ' ' + route,
-          actorId: actor.actorId, actorNick: actor.actorNick, target,
+          actorId: effectiveActor.actorId, actorNick: effectiveActor.actorNick, target,
           level: status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info',
-          detail: { method, route, status, outcome: status >= 200 && status < 400 ? 'success' : 'failure', actorKind: actor.actorKind, eventId, targetType, replayed: c.get('idempotencyReplay') === true, durationMs: Math.max(0, Math.min(3600000, Date.now() - started)) },
+          detail: { method, route, status, outcome: status >= 200 && status < 400 ? 'success' : 'failure', actorKind: effectiveActor.actorKind, eventId, targetType, replayed: c.get('idempotencyReplay') === true, durationMs: Math.max(0, Math.min(3600000, Date.now() - started)) },
         })
       } catch { /* 审计失败不改变业务结果，不打印请求内容或凭据。 */ }
     }

@@ -52,6 +52,7 @@ import { showToast } from 'vant'
 import { useDormStore } from '../stores/dorm'
 import { filterDormFloors, boardAgeMinutes } from '../boardQuery'
 import { useDormBoard } from '../useDormBoard'
+import { platformNow } from '../platformClock'
 import FloorTabs from '../components/FloorTabs.vue'
 import MachineCard from '../components/MachineCard.vue'
 
@@ -65,7 +66,7 @@ watch(()=>user.user?.id,loadFavorites,{immediate:true})
 const { sourceBoard, now, error, refreshing, load } = useDormBoard(dorm)
 const floors = computed(() => filterDormFloors(sourceBoard.value, dorm.code, dorm.buildings).map((f) => ({ ...f, machines: (f.machines || []).map((m) => {
   const end = m.finishAt ? new Date(m.finishAt).getTime() : NaN
-  return Number.isFinite(end) ? { ...m, leftMin: Math.max(0, Math.ceil((end - now.value) / 60000)) } : m
+  return Number.isFinite(end) ? { ...m, leftMin: Math.max(0, Math.ceil((end - platformNow(sourceBoard.value, now.value)) / 60000)) } : m
 }) })))
 const board = computed(() => {
   if (!sourceBoard.value) return null

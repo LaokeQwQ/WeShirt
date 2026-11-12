@@ -35,10 +35,9 @@ test('only current queue head receives one lead notice and retries failed DM', a
   await store.put('queue-reminder-state:b1', { machines: {} })
   await processQueueReminders({ store, board: estimated, now: AT, notify: async () => ({ ok: true }) })
   result = await processQueueReminders({ store, board: estimated, now: AT + 2 * 60000, notify: async (uid, notice) => { sent.push([uid, notice]); return { ok: true } } })
-  assert.equal(result.created, 1)
-  assert.equal(result.sent, 1)
-  assert.equal(sent.at(-1)[1].phase, 'end', 'estimated end is explicitly uncertain')
-  assert.match(sent.at(-1)[1].text, /预计计时结束/)
+  assert.equal(result.created, 0)
+  assert.equal(result.sent, 0)
+  assert.equal(sent.at(-1)[1].phase, 'lead', 'a running machine cannot emit an end notice from its timer')
 })
 
 test('confirmed idle end notice is once per machine cycle and a new run gets a new cycle', async () => {
@@ -101,7 +100,7 @@ test('two waiters: no queue shifting and only first active reservation gets lead
   assert.equal((await readQueueNotices(store, 'u2')).length, 0)
 })
 
-test('estimated finish anchor and phase stay stable when remaining-countdown estimates move', async () => {
+test('latest finish time supersedes an old estimate without announcing completion while running', async () => {
   const store = await fixture()
   const first = board('occupied', AT + 2 * 60000)
   first.floors[0].machines[0].estimated = true
@@ -115,15 +114,14 @@ test('estimated finish anchor and phase stay stable when remaining-countdown est
   await processQueueReminders({ store, board: shifted, now: AT + 60000, notify })
   const later = (await store.get('queue-reminder-state:b1')).machines.m1
   assert.equal(later.id, original.id)
-  assert.equal(later.finishAt, AT + 2 * 60000)
+  assert.equal(later.finishAt, AT + 3 * 60000)
   assert.equal(sent.length, 1)
   await processQueueReminders({ store, board: shifted, now: AT + 2 * 60000, notify })
-  assert.equal(sent.length, 2)
-  assert.match(sent[1].text, /预计计时结束/)
-  assert.equal(sent[1].confirmed, false)
+  assert.equal(sent.length, 1)
   const idle = { ...board('idle', null), updatedAt: new Date(AT + 3 * 60000).toISOString() }
   await processQueueReminders({ store, board: idle, now: AT + 3 * 60000, notify })
-  assert.equal(sent.length, 2, 'end already sent as estimate; no duplicate idle upgrade')
+  assert.equal(sent.length, 2, 'the actual idle snapshot, rather than the estimate, unlocks completion')
+  assert.equal(sent[1].confirmed,true)
 })
 
 test('real finish updates do not reset phase, and actual deadline alone does not assert idle', async () => {

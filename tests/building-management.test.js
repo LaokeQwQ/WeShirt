@@ -148,6 +148,7 @@ test('first selection is free, parallel changes consume exactly one allowance, a
 test('protected ingest hourly broadcast excludes disabled building machines without deleting diagnostic snapshots',async t=>{
  t.mock.timers.enable({apis:['Date'],now:Date.UTC(2026,10,10,0,1)})
  const {call,store,sent}=await fixture(t,{broadcast:true})
+ await store.put('operations:broadcast-review:b1',{hourKey:'2026-11-10T08',snapshotAt:Date.UTC(2026,10,9,23,59),checkedAt:Date.UTC(2026,10,9,23,59)})
  const ingested=await call('/api/cron/ingest',{bootstrap:true,method:'POST',body:{raws:[
   {id:'g1',name:'桂园启用机器',floorCode:'1F',state:1,categoryCode:'00',finishTime:null},
   {id:'l_named',name:'柳园停用机器',floorCode:'1F',state:1,categoryCode:'00',finishTime:null},
@@ -157,7 +158,7 @@ test('protected ingest hourly broadcast excludes disabled building machines with
  assert.equal(JSON.stringify(sent).includes('柳园停用机器'),false,'disabled machine must not enter a broadcast payload')
  assert.equal(sent[0].msgtype,'markdown')
  assert.match(sent[0].markdown.text,/空闲 1 台 · 使用中 0 台/,'summary counts must exclude disabled devices')
- assert.match(sent[0].markdown.text,/仅统计桂园楼下机器/)
+ assert.doesNotMatch(sent[0].markdown.text,/仅统计/)
  assert.equal((await store.get('machines:b1')).board.floors.flatMap(f=>f.machines).length,2,'diagnostic raw snapshot remains complete')
 })
 

@@ -51,8 +51,9 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     const uid = typeof authenticated === 'string' ? authenticated : authenticated?.id
     const found = uid ? await store.get('user:' + uid, null) : null
     const user = found?.disabled || found?.blocked ? null : found
-    const identity = await checkSuperAdmin?.(c) ? { role: 'super', label: '总管', buildings: [] } : await getUserIdentity(store, user?.id)
-    const rules = (!freshRules && c.get('userAccess')?.permissions) || (user ? (await getUserPermissions(store, user, (await getSiteConfig(store)).buildings)).permissions : undefined)
+    const temporary=c.get('temporaryAdminAccess')
+    const identity = temporary?.identity || (await checkSuperAdmin?.(c) ? { role: 'super', label: '总管', buildings: [] } : await getUserIdentity(store, user?.id))
+    const rules = temporary?.permissions || (!freshRules && c.get('userAccess')?.permissions) || (user ? (await getUserPermissions(store, user, (await getSiteConfig(store)).buildings)).permissions : undefined)
     const moderationRules = rules?.adminMessages
     const canManage = canModerate(identity) && (!moderationRules || moderationRules.operate && (moderationRules.operateBuildings === null || moderationRules.operateBuildings?.length > 0))
     if (required && !user?.id) fail('unauthorized', '请先登录', 401)
@@ -78,7 +79,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     return channel || dorm || null
   }
   function allowed(requester, channel, mode = 'view') {
-    if (!requester.user?.id && requester.identity.role !== 'super') return mode === 'view' && channel === 'public'
+    if (!requester.user?.id && !canModerate(requester.identity)) return mode === 'view' && channel === 'public'
     if (!permittedAt(requester.rules?.messages, channel, mode)) return false
     return ['super', 'admin'].includes(requester.identity.role) || channel === 'public' || channel === requester.user?.dormBuilding
   }

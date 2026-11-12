@@ -56,12 +56,12 @@ test('hourly Markdown has a title and separate idle/running lists, escapes sourc
   const source = board(AT, 'occupied')
   source.floors[0].machines = [{ ...source.floors[0].machines[0], name: '[假的链接](https://invalid.test)' }]
   const notice = buildHourlyGroupNotice(source, { name: '桂园', hourKey: '2026-11-10T08', now: AT })
-  assert.match(notice.markdown, /^### 桂园/)
+  assert.match(notice.markdown, /^### 🧺 桂园/)
   assert.match(notice.markdown, /08:00 · 空闲 0 台 · 使用中 1 台/)
-  assert.match(notice.markdown, /\*\*空闲机器\*\*[\s\S]*\*\*使用中\*\*/)
+  assert.match(notice.markdown, /\*\*✅ 空闲机器\*\*[\s\S]*\*\*⏳ 使用中\*\*/)
   assert.ok(notice.markdown.includes('\\[假的链接\\]'))
   assert.match(notice.markdown, /结束时间待更新/)
-  assert.match(notice.markdown, /仅统计桂园楼下机器/)
+  assert.doesNotMatch(notice.markdown, /仅统计/)
 })
 
 test('internal group API sends sampleMarkdown for a rich notice and keeps text compatibility', async () => {

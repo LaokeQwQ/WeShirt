@@ -6,7 +6,7 @@ import { createMemoryStore } from '../packages/core/store.js'
 import { diffEvents } from '../packages/core/machines.js'
 
 const NOW = Date.parse('2026-11-10T00:00:00Z')
-const START = new Date(NOW - 5 * 60000).toISOString()
+const START = new Date(NOW - 60000).toISOString()
 const END = new Date(NOW + 25 * 60000).toISOString()
 const machine = (overrides = {}) => ({ id: 'm1', name: '测试洗衣机', state: 'idle', rawState: 1, finishAt: null, leftMin: null, ...overrides })
 const board = (m = machine(), now = NOW) => ({ updatedAt: new Date(now).toISOString(), floors: [{ code: '1', machines: [m] }] })
@@ -53,6 +53,13 @@ test('legacy records require the exact original start; taskId presence never fal
   assert.equal(first(project({ o: entry({ taskId: undefined, startAt: undefined }) })).state, 'idle')
   assert.equal(first(project({ o: entry({ taskId: undefined, startAt: 'different' }) })).state, 'idle')
   assert.equal(first(project({ o: entry({ taskId: 'absent' }) })).state, 'idle')
+})
+
+test('registration never overrides a confirmed platform finish and startup protection expires after two minutes',()=>{
+ const complete=first(project({t:task({platformSeenRunning:true})}))
+ assert.equal(complete.state,'idle');assert.equal(complete.platformCompletionConfirmed,true)
+ const expired=first(project({t:task({startAt:new Date(NOW-3*60000).toISOString()})}))
+ assert.equal(expired.state,'idle');assert.equal(expired.registrationPending,undefined)
 })
 
 test('actual occupied, abnormal, fault, unknown and stale projections always preserve hardware/health state', () => {

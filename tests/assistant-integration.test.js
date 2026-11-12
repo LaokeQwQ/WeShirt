@@ -53,3 +53,23 @@ test('integrated AI config is unavailable to normal user; admins see key presenc
   const mcp = await app.request('/api/mcp', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'register_task', arguments: {} } }) })
   assert.equal((await mcp.json()).error.code, -32602)
 })
+
+test('DingTalk account admin reads AI configuration without bootstrap token; model discovery stays super-only',async()=>{
+  const store=createMemoryStore()
+  for(const id of ['chief','manager'])await store.put('user:'+id,{id,nick:id,dormBuilding:'guiyuan'})
+  await store.put('meta:siteAdmins',[{userId:'chief',role:'super'},{userId:'manager',role:'admin'}])
+  const app=createApp({store,env})
+  const chief=await issueToken('chief',secret),manager=await issueToken('manager',secret)
+  const read=await app.request('/api/admin/assistant',{headers:{authorization:'Bearer '+manager}})
+  assert.equal(read.status,200);assert.equal((await read.json()).keyConfigured,true)
+  const forbidden=await app.request('/api/admin/assistant/models',{method:'POST',headers:{authorization:'Bearer '+manager,'content-type':'application/json'},body:JSON.stringify({endpoint:'https://provider.vendor.net/v1'})})
+  assert.equal(forbidden.status,403);const error=(await forbidden.json()).error;assert.ok(error.eventId);assert.equal(error.status,403)
+  const original=globalThis.fetch
+  globalThis.fetch=async(url,options)=>{assert.equal(url,'https://provider.vendor.net/v1/models');assert.equal(options.redirect,'error');return new Response(JSON.stringify({data:[{id:'fixture-discovered'}]}))}
+  try{
+    const discoveryApp=createApp({store,env})
+    const discover=await discoveryApp.request('/api/admin/assistant/models',{method:'POST',headers:{authorization:'Bearer '+chief,'content-type':'application/json'},body:JSON.stringify({endpoint:'https://provider.vendor.net/v1',apiKey:'explicit-provider-fixture-key'})})
+    assert.equal(discover.status,200);assert.equal((await discover.json()).models[0].id,'fixture-discovered')
+    assert.equal((await store.get('assistant:config',{})).endpoint,undefined)
+  }finally{globalThis.fetch=original}
+})

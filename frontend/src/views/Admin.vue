@@ -172,6 +172,7 @@
       <AdminOperations />
       <AdminAnnouncements />
       <AdminAI />
+      <AdminAccessCodes />
 
       <section class="block card">
         <header>
@@ -398,6 +399,7 @@ import AdminTelemetry from '../components/AdminTelemetry.vue'
 import AdminOperations from '../components/AdminOperations.vue'
 import AdminAnnouncements from '../components/AdminAnnouncements.vue'
 import AdminAI from '../components/AdminAI.vue'
+import AdminAccessCodes from '../components/AdminAccessCodes.vue'
 import { DORM_BUILDINGS } from '../../../packages/core/buildings.js'
 
 const router = useRouter()
@@ -412,6 +414,7 @@ const unlocking = ref(false)
 const gateError = ref('')
 const sessionExpAt = ref(0)
 let tickTimer = null
+let boardRefreshTimer = null
 
 // 会话剩余时间（每分钟刷新一次，到点自动回到口令页）
 const nowTick = ref(Date.now())
@@ -1014,6 +1017,7 @@ async function sendTestMsg(target) {
 }
 
 onMounted(async () => {
+  boardRefreshTimer = setInterval(()=>{if(authed.value && !document.hidden && !loading.value && !syncing.value && !savingMap.value)load()},30000)
   // 每分钟刷一次「剩余有效期」，到点自动收起后台
   tickTimer = setInterval(() => {
     nowTick.value = Date.now()
@@ -1039,6 +1043,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (codeTimer) clearInterval(codeTimer)
   if (tickTimer) clearInterval(tickTimer)
+  if (boardRefreshTimer) clearInterval(boardRefreshTimer)
 })
 
 onBeforeRouteLeave(async () => {

@@ -1,6 +1,9 @@
 import { issueTicket, verifyTicket } from './auth.js'
 import { withOperationLock } from './operations.js'
 import { retainedTasks } from './task-retention.js'
+import { applyRegisteredAvailability } from './availability.js'
+import { resolveMachineTime } from './machine-time.js'
+import { projectCalibratedBoard, readCalibrationSettings } from './machine-time-calibration.js'
 
 export const CONTACT_TEMPLATES = Object.freeze({
   forgot: '你好，机器里似乎还有你的衣物，方便时请来确认并取走。',
@@ -37,7 +40,7 @@ function mutate(store, fn) {
   return work
 }
 
-export function createSocialService({ store, env = {}, notify = async () => ({ ok: false }) }) {
+export function createSocialService({ store, env = {}, getBoard, notify = async () => ({ ok: false }) }) {
   const building = env.BUILDING_ID || 'b1'
   const secret = String(env.AUTH_SECRET || '').trim()
   const read = async (key, fallback = null) => clone(await store.get(key, fallback))
@@ -224,11 +227,19 @@ export function createSocialService({ store, env = {}, notify = async () => ({ o
     const tasks = array(await read(`tasks:${ownerId}`, []))
     const task = tasks.find((t) => t.id === taskId)
     if (!task) return { id: taskId, unavailable: true }
-    const entry = await read(`machines:${task.buildingId || building}`)
-    const machine = array(entry?.board?.floors).flatMap((f) => array(f.machines)).find((m) => String(m.id) === String(task.machineId))
-    const endAt = task.mode === 'machine' && machine?.finishAt ? machine.finishAt : task.endAt
-    const finish = endAt ? new Date(endAt).getTime() : NaN
-    return { id: task.id, machineId: task.machineId, machineName: machine?.displayName || task.machineLabel || machine?.name || task.machineName || '机器', kind: machine?.kind || task.kind || 'washer', floorCode: machine?.floorCode || task.floorCode || '', state: machine?.state || 'unknown', endAt, leftMin: Number.isFinite(finish) ? Math.max(0, Math.ceil((finish - Date.now()) / 60000)) : null, done: !!task.done, takenAt: task.takenAt || null }
+    const bid=task.buildingId || building,now=Date.now()
+    const [supplied,occupancy]=await Promise.all([
+      getBoard?getBoard({buildingId:bid}):Promise.all([read(`machines:${bid}`),readCalibrationSettings(store,bid)]).then(([entry,settings])=>({board:projectCalibratedBoard(entry?.board,settings,{now})})),
+      read(`occupancy:${bid}`,{}),
+    ])
+    const board=applyRegisteredAvailability(supplied?.board || supplied,{occupancy,tasksByUser:new Map([[ownerId,tasks]]),now})
+    const machine = array(board?.floors).flatMap((f) => array(f.machines)).find((m) => String(m.id) === String(task.machineId))
+    const holder=occupancy?.[task.machineId]
+    // Owner alone cannot associate a previous pickup with their next cycle.
+    const currentTask=!task.done&&!task.takenAt&&holder?.userId===ownerId&&(holder.taskId?holder.taskId===task.id:Boolean(holder.startAt&&task.startAt&&holder.startAt===task.startAt))
+    const time=resolveMachineTime(currentTask?machine || {}:{},{task,now,snapshotAt:board?.updatedAt})
+    const completionConfirmed=currentTask&&time.confirmedFinished&&Boolean(task.platformSeenRunning||machine?.platformCompletionConfirmed||task.mode==='machine')
+    return { id: task.id, machineId: task.machineId, machineName: machine?.displayName || task.machineLabel || machine?.name || task.machineName || '机器', kind: machine?.kind || task.kind || 'washer', floorCode: machine?.floorCode || task.floorCode || '', state: currentTask?machine?.state || 'unknown':'unknown', endAt:time.deadline || task.endAt, leftMin:time.remainingMinutes, timingSource:time.source, estimated:time.source!=='upstream', timeStale:time.stale, completionConfirmed, timeOffsetMinutes:time.timeOffsetMinutes, done: !!task.done, takenAt: task.takenAt || null }
   }
   async function pickupView(uid, request) {
     const other = request.ownerId === uid ? request.friendId : request.ownerId

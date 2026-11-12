@@ -33,7 +33,7 @@
             :class="'bg-' + stateClass(m.state)"
           >
             <span class="d-m-name">{{ m.displayName || m.name || m.id }}</span>
-            <span class="d-m-state" v-if="m.suspectedUncollected">疑似未取</span><span class="d-m-state" v-else-if="m.state === 'occupied'">{{ m.leftMin == null ? '剩余时间待确认' : `剩${m.leftMin}分` }}</span>
+            <span class="d-m-state" v-if="m.suspectedUncollected">疑似未取</span><span class="d-m-state" v-else-if="m.state === 'occupied'">{{ m.leftMin == null ? '剩余时间待确认' : m.leftMin > 0 ? `剩${m.leftMin}分` : '即将完成' }}</span>
           </div>
         </div>
       </div>
@@ -47,13 +47,14 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { filterDormFloors, boardAgeMinutes } from '../boardQuery'
 import { useDormBoard } from '../useDormBoard'
 import { useDormStore } from '../stores/dorm'
+import { platformNow } from '../platformClock'
 
 const dorm = useDormStore()
 const { sourceBoard, error, now, load } = useDormBoard(dorm)
 const staleMinutes = computed(() => boardAgeMinutes(sourceBoard.value, now.value))
 const floors = computed(() => filterDormFloors(sourceBoard.value, dorm.code, dorm.buildings).map((f) => ({ ...f, machines: (f.machines || []).map((m) => {
   const end = m.finishAt ? new Date(m.finishAt).getTime() : NaN
-  return Number.isFinite(end) ? { ...m, leftMin: Math.max(0, Math.ceil((end - now.value) / 60000)) } : m
+  return Number.isFinite(end) ? { ...m, leftMin: Math.max(0, Math.ceil((end - platformNow(sourceBoard.value, now.value)) / 60000)) } : m
 }) })))
 const board = computed(() => {
   if (!sourceBoard.value) return null

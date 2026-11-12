@@ -85,6 +85,14 @@ test('normalizeMachines 兼容 deviceId 与缺失字段', () => {
   assert.equal(out[0].finishAt, null)
 })
 
+test('upstream original and remark labels survive repeated normalization with bounded plain text',()=>{
+  const source={id:'fixture',name:'现有别名',deviceName:'设备原名',remark:'楼下\n自清洁机'+'长'.repeat(120),state:2}
+  const once=normalizeMachines([source])[0],twice=normalizeMachines([once])[0]
+  assert.equal(once.name,'现有别名');assert.equal(once.originalName,'设备原名')
+  assert.equal(once.remarkName.length,100);assert.equal(once.remarkName.includes('\n'),false)
+  assert.equal(twice.originalName,once.originalName);assert.equal(twice.remarkName,once.remarkName)
+})
+
 // 4) finishTime 按北京时间解析
 test('parseBeijing 把北京时间解析为 ISO', () => {
   assert.equal(parseBeijing('2026-10-18 08:00:00'), '2026-10-18T00:00:00.000Z')

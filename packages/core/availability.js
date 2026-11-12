@@ -4,6 +4,7 @@ const MAX_REPORTED_MS = 4 * 60 * 60000
 function clearOldProjection(machine) {
   if (machine.availabilitySource !== 'user_report') return machine
   const { availabilitySource, registrationPending, availabilityLabel, ...clean } = machine
+  if (clean.timeSource === 'user_report') delete clean.timeSource
   // 持久看板可能带有上一轮登记投影；关联失效时不能沿用它的估计计时。
   if (!['occupied', 'abnormal'].includes(clean.upstreamState)) {
     clean.finishAt = null
@@ -29,7 +30,8 @@ function activeRegistration(machine, occupancy, tasksByUser, now) {
   if ((task.userId != null && task.userId !== entry.userId) || (task.ownerId != null && task.ownerId !== entry.userId)) return null
   const end = Date.parse(task.endAt || '')
   if (!Number.isFinite(end) || end <= now || end - now > MAX_REPORTED_MS) return null
-  return { end, endAt: new Date(end).toISOString() }
+  return { end, endAt: new Date(end).toISOString(), task,
+    startedAt:Date.parse(task.createdAt || task.startAt || '') }
 }
 
 /** tasksByUser: Map<occupancy.userId, Task[]>。返回纯投影，不公开用户或任务标识。 */
@@ -41,6 +43,10 @@ export function applyRegisteredAvailability(board, { occupancy = {}, tasksByUser
         || machine.health?.stale || machine.health?.confirmedFault || machine.health?.suspectedFault) return machine
       const active = activeRegistration(machine, occupancy, tasksByUser, now)
       if (!active) return machine
+      // Registration is only a short startup bridge. Once the platform has
+      // actually run this cycle, its return to idle outranks a later local timer.
+      if (active.task.platformSeenRunning || active.task.mode === 'machine' || machine.platformCompletionConfirmed) return {...machine,platformCompletionConfirmed:true}
+      if (Number.isFinite(active.startedAt) && now - active.startedAt > 2 * 60000) return machine
       return { ...machine, state: 'occupied', upstreamState: 'idle', finishAt: active.endAt,
         leftMin: Math.max(1, Math.ceil((active.end - now) / 60000)), estimated: true,
         availabilitySource: 'user_report', registrationPending: true,

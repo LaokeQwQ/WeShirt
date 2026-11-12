@@ -56,6 +56,7 @@ test('input and skill identity validated before consuming quota', async () => {
 
 test('daily count persists across router recreation; minute rate and daily bound enforced separately', async () => {
   const { req, store } = await fixture()
+  await store.put('assistant:config',{dailyLimit:20,minuteLimit:3})
   for (let i = 0; i < 3; i++) assert.equal((await req('/api/assistant/chat', { input: 'hi' })).status, 200)
   assert.equal((await req('/api/assistant/chat', { input: 'too fast' })).status, 429)
   const old = await store.get('assistant:usage:u_a')
@@ -137,16 +138,16 @@ test('custom skill sharing contains template only, signed import creates owned c
   assert.equal((await req('/api/assistant/skills/' + id, undefined, 'DELETE')).status, 200)
 })
 
-test('history is own-only, input context at most eight rounds and inactive account cleanup removes expired data', async () => {
+test('history is own-only, input context keeps recent rounds within the budget and inactive account cleanup removes expired data', async () => {
   let sent
   const { req, store } = await fixture({ fetchImpl: async (_, options) => { sent = JSON.parse(options.body); return result() } })
   const at = new Date().toISOString()
   await store.put('assistant:history:u_a', Array.from({ length: 20 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: String(i), at })))
   await store.put('assistant:history:u_b', [{ role: 'user', content: 'other-secret', at }])
   await req('/api/assistant/chat', { input: 'new' })
-  assert.equal(sent.input.length, 17)
+  assert.equal(sent.input.length, 21)
   assert.equal(JSON.stringify(sent).includes('other-secret'), false)
-  assert.equal((await req('/api/assistant/history')).data.messages.length, 20)
+  assert.equal((await req('/api/assistant/history')).data.messages.length, 22)
   await store.put('assistant:history:inactive', [{ role: 'user', content: 'expired', at: '2000-01-01T00:00:00Z' }])
   assert.equal((await pruneAssistantStorage(store)).pruned, 1)
   assert.equal(await store.get('assistant:history:inactive', null), null)
