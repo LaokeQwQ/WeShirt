@@ -50,7 +50,7 @@ test('图片/视频预览阻止刷新后背后消息已读，关闭后完整等�
       if(path==='/api/messages/notices')return {notices:[]}
       return {messages:[{id:serverId}],pagination:{}}
     },
-  },'({reader,load,loadChannels,messageList,messages,setMediaPreview,mediaPreviews,draftVideoFullscreen,onFullscreenChange})')
+  },'({reader,load,loadChannels,messageList,messages,setMediaPreview,mediaPreviews,draftVideoFullscreen,onFullscreenChange,openAdd,showAdd,chooseAttachment,cameraInput,imageInput,videoInput})')
   panel.messageList.value={querySelectorAll:()=>panel.messages.value.map(row=>({dataset:{messageId:row.id},getBoundingClientRect:()=>({top:120,bottom:240,width:200,height:120})}))}
   const image=Symbol('image'),video=Symbol('video')
   panel.setMediaPreview(true,image)
@@ -76,6 +76,10 @@ test('图片/视频预览阻止刷新后背后消息已读，关闭后完整等�
   await nextTick();await advance(1000);assert.equal(receipts.length,4,'late teardown from the old account cannot clear the new overlay')
   panel.setMediaPreview(false,nextImage);await nextTick();await advance(449);assert.equal(receipts.length,4)
   await advance(1);assert.equal(receipts.length,5)
+  serverId='tools-hidden';panel.openAdd();assert.equal(panel.showAdd.value,true);await panel.load();await advance(1000);assert.equal(receipts.length,5,'expanded inline tool panel keeps behind-composer messages unread')
+  let camera=0,imageClicks=0,videoClicks=0;panel.cameraInput.value={click:()=>camera++};panel.imageInput.value={click:()=>imageClicks++};panel.videoInput.value={click:()=>videoClicks++}
+  panel.chooseAttachment({kind:'camera'});assert.equal(camera,1);assert.equal(imageClicks,0);assert.equal(videoClicks,0);assert.equal(panel.showAdd.value,false)
+  await nextTick();await advance(449);assert.equal(receipts.length,5);await advance(1);assert.equal(receipts.length,6)
   panel.reader.dispose()
 })
 

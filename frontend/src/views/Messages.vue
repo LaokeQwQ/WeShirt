@@ -56,7 +56,14 @@
         <div v-if="attachment" class="attachment-draft"><img v-if="attachment.kind==='image'" :src="attachment.preview" alt="待发送图片" /><video v-else :src="attachment.preview" controls playsinline preload="metadata" @webkitbeginfullscreen="draftVideoFullscreen=true" @webkitendfullscreen="draftVideoFullscreen=false" /><span>{{ attachment.kind==='video' ? '短视频 · 最多30秒' : '图片' }}</span><button type="button" @click="clearAttachment">移除</button></div>
         <div v-if="selectedMentions.length || mentionAll" class="mention-draft"><button v-for="item in selectedMentions" :key="item.ref" type="button" @click="removeMention(item)">@{{ item.nick }} ×</button><button v-if="mentionAll" type="button" @click="mentionAll=false">@全体成员 ×</button></div>
         <div v-if="reply" class="reply-target">回复 {{ reply.nick || '同学' }}：{{ reply.text.slice(0, 40) }}<button type="button" @click="reply = null" aria-label="取消回复">×</button></div>
-        <div class="composer"><button class="composer-plus" type="button" aria-label="添加附件或提及成员" :disabled="sending || isMuted || preparing" @click="openAdd">＋</button><label class="visually-hidden" for="message-composer">留言内容</label><van-field id="message-composer" v-model="text" class="composer-input" placeholder="消息 / 输入@提及成员" maxlength="200" type="textarea" autosize rows="1" /><van-button type="primary" size="small" :disabled="(!text.trim() && !attachment) || sending || isMuted || preparing" :loading="sending || preparing" @click="send">发送</van-button></div>
+        <div class="composer"><button class="composer-plus" type="button" aria-label="添加附件或提及成员" :aria-expanded="showAdd" aria-controls="composer-tools" :disabled="sending || isMuted || preparing" @click="openAdd">{{ showAdd ? '×' : '＋' }}</button><label class="visually-hidden" for="message-composer">留言内容</label><van-field id="message-composer" v-model="text" class="composer-input" placeholder="消息 / 输入@提及成员" maxlength="200" type="textarea" autosize rows="1" /><van-button type="primary" size="small" :disabled="(!text.trim() && !attachment) || sending || isMuted || preparing" :loading="sending || preparing" @click="send">发送</van-button></div>
+        <div v-if="showAdd" id="composer-tools" class="composer-tools" aria-label="消息工具">
+          <button type="button" @click="chooseAttachment({kind:'image'})"><van-icon name="photo-o"/><span>图片</span></button>
+          <button type="button" @click="chooseAttachment({kind:'video'})"><van-icon name="video-o"/><span>视频</span></button>
+          <button type="button" @click="chooseAttachment({kind:'camera'})"><van-icon name="photograph"/><span>拍摄</span></button>
+          <button type="button" @click="chooseAttachment({kind:'mention'})"><van-icon name="friends-o"/><span>提及</span></button>
+          <p>视频最长 30 秒，最大 4MB</p>
+        </div>
         <label v-if="currentChannel.permissions?.canAnnounce" class="announcement-option"><input v-model="announcement" type="checkbox" />发布为置顶频道公告</label>
       </div>
     </template>
@@ -65,11 +72,11 @@
     <van-action-sheet v-model:show="showMute" title="选择禁言时长" :actions="muteActions" cancel-text="取消" :close-on-click-action="false" @select="confirmMute">
       <div class="mute-reason"><van-field v-model="muteReason" label="原因" placeholder="选填，最多200字" maxlength="200" type="textarea" rows="2" /></div>
     </van-action-sheet>
-    <van-action-sheet v-model:show="showAdd" title="添加到消息" :actions="[{name:'图片',kind:'image'},{name:'短视频（≤30秒、4MB）',kind:'video'},{name:'提及成员 / @全体',kind:'mention'}]" cancel-text="取消" @select="chooseAttachment" />
     <van-action-sheet v-model:show="showMessageActions" title="消息操作" :actions="messageActions" cancel-text="取消" @select="actOnMessage" />
     <van-popup v-model:show="showReport" position="bottom" round :closeable="!reporting" :close-on-click-overlay="!reporting"><section class="report-form"><h3>举报消息</h3><p>举报仅供管理员处理，不会在频道内公开你的身份。</p><blockquote>{{ reportTarget?.text || '附件消息' }}</blockquote><label>举报原因<select v-model="reportReason"><option value="spam">广告或垃圾信息</option><option value="abuse">辱骂或骚扰</option><option value="privacy">泄露个人信息</option><option value="unsafe">不当或危险内容</option><option value="other">其他原因</option></select></label><van-field v-model="reportDetail" type="textarea" rows="3" maxlength="300" show-word-limit placeholder="补充说明（其他原因必填）" /><p v-if="reportError" class="error" role="alert">{{ reportError }}</p><van-button block type="primary" :loading="reporting" :disabled="reporting" @click="submitReport">提交举报</van-button></section></van-popup>
     <van-popup v-model:show="showMentions" position="bottom" round closeable><section class="mention-picker"><h3>@频道成员</h3><p>可选择此频道近期发言的成员</p><button v-if="currentChannel?.permissions?.canMentionAll" type="button" @click="selectAll">@全体成员<span>每频道每小时一次</span></button><button v-for="item in participants" :key="item.ref" type="button" @click="selectMention(item)">{{ item.nick }}<IdentityBadge :identity="item.identity" /></button><p v-if="!participants.length">{{ participantsLoading ? '正在读取成员…' : '暂无近期发言成员' }}</p></section></van-popup>
     <input ref="imageInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" @change="pickAttachment($event,'image')" />
+    <input ref="cameraInput" class="visually-hidden" type="file" accept="image/*" capture="environment" @change="pickAttachment($event,'image')" />
     <input ref="videoInput" class="visually-hidden" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" @change="pickAttachment($event,'video')" />
     <input ref="avatarInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="pickAvatar" />
   </div>
@@ -132,7 +139,7 @@ const attachment = ref(null), preparing = ref(false), announcement = ref(false)
 const selectedMentions = ref([]), mentionAll = ref(false), mentionCounts = ref({}), participants = ref([]), participantsLoading = ref(false)
 const showMentions = ref(false), showAdd = ref(false), showMessageActions = ref(false), heldMessage = ref(null)
 const mediaPreviews = ref(new Set()), draftVideoFullscreen = ref(false)
-const imageInput = ref(null), videoInput = ref(null), avatarInput = ref(null), transportState = ref('polling')
+const imageInput = ref(null), videoInput = ref(null), cameraInput = ref(null), avatarInput = ref(null), transportState = ref('polling')
 const messageActions = computed(() => [{ name: '回复', action: 'reply' }, ...(!heldMessage.value?.mine ? [{ name: '举报', action: 'report', color: '#ef4444' }] : [])])
 const hold = createMessageHold()
 const showReport = ref(false), reportTarget = ref(null), reportReason = ref('spam'), reportDetail = ref(''), reportError = ref(''), reporting = ref(false)
@@ -195,8 +202,8 @@ function openDirectory() { router.push({ path: '/board' }) }
 function openChannel(code) { router.push({ path: '/board', query: { channel: code } }) }
 async function loadNoticeCounts() { if (!user.isLoggedIn) { mentionCounts.value = {}; return }; const owner = ownerKey.value; try { const data = await api('/api/messages/notices', { silent: true }); if (owner !== ownerKey.value || disposed) return; const counts = {}; for (const entry of data.notices || []) if (!entry.readAt) counts[entry.channel] = (counts[entry.channel] || 0) + 1; mentionCounts.value = counts } catch {} }
 function requireLogin() { if (user.isLoggedIn) return true; router.push({ path: '/login', query: { to: route.fullPath } }); return false }
-function openAdd() { if (requireLogin()) showAdd.value = true }
-function chooseAttachment(action) { showAdd.value = false; if (action.kind === 'mention') { openMentions(); return }; (action.kind === 'video' ? videoInput.value : imageInput.value)?.click() }
+function openAdd() { if (requireLogin()) showAdd.value = !showAdd.value }
+function chooseAttachment(action) { showAdd.value = false; if (action.kind === 'mention') { openMentions(); return }; (action.kind === 'video' ? videoInput.value : action.kind === 'camera' ? cameraInput.value : imageInput.value)?.click() }
 function clearAttachment() { if (attachment.value?.preview) URL.revokeObjectURL(attachment.value.preview); attachment.value = null }
 async function pickAttachment(event, kind) { const file = event.target.files?.[0]; event.target.value = ''; if (!file) return; const target = scope.value; preparing.value = true; try { const blob = await prepareCommunityFile(file); if (target !== scope.value || disposed) return; clearAttachment(); attachment.value = { blob, kind, preview: URL.createObjectURL(blob), media: null } } catch (e) { showToast(e.message) } finally { preparing.value = false } }
 async function pickAvatar(event) { const file = event.target.files?.[0]; event.target.value = ''; if (!file || !currentChannel.value?.permissions?.canManageAvatar) return; const channel = channelCode.value; preparing.value = true; try { const blob = await prepareCommunityFile(file, true); await uploadCommunityMedia(blob, channel, true); await loadChannels(); showToast('频道头像已更新') } catch (e) { showToast(e.message) } finally { preparing.value = false } }
@@ -396,6 +403,7 @@ onMounted(() => {
 })
 onUnmounted(() => { disposed = true; reader.dispose(); generation++; machineGeneration++; channelGeneration++; transport.stop(); cancelHold(); clearInterval(ticker); const previews = new Set([attachment.value?.preview, ...[...drafts.values()].map((draft) => draft.attachment?.preview)]); for (const url of previews) if (url) URL.revokeObjectURL(url); drafts.clear(); document.removeEventListener('visibilitychange', onVisible); document.removeEventListener('fullscreenchange', onFullscreenChange); document.removeEventListener('webkitfullscreenchange', onFullscreenChange); document.removeEventListener('scroll', onScroll, true); window.removeEventListener('blur', cancelHold);window.removeEventListener('focus',onScroll);window.removeEventListener('resize',onScroll) })
 </script>
+<style scoped>.composer-tools{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:16px 4px 4px}.composer-tools button{display:flex;flex-direction:column;align-items:center;gap:8px;min-height:74px;padding:12px 4px;border:1px solid var(--border);border-radius:16px;background:var(--bg);color:var(--text);font-size:12px;cursor:pointer}.composer-tools .van-icon{font-size:25px;color:var(--primary)}.composer-tools p{grid-column:1/-1;margin:0;color:var(--text-dim);text-align:center;font-size:11px}</style>
 
 <style scoped>
 .message-avatar{display:grid;place-items:center;flex:none;width:40px;height:40px;margin:-3px;border:0;padding:0;background:none;border-radius:50%;touch-action:pan-y;color:inherit}.message-avatar:disabled{opacity:1}.message-avatar:focus-visible,.msg:focus-visible{outline:2px solid #93c5fd;outline-offset:3px}.msg{touch-action:pan-y;-webkit-touch-callout:none}.report-form{padding:20px 18px max(26px,env(safe-area-inset-bottom));max-height:80vh;overflow:auto}.report-form h3{margin:0 0 10px}.report-form>p{font-size:12px;color:var(--text-dim);line-height:1.7}.report-form label{display:grid;gap:8px;font-size:13px;margin:16px 0}.report-form select{width:100%;min-height:42px;padding:8px 12px;border:1px solid var(--border);border-radius:12px;color:var(--text);background:var(--bg-card)}.report-form blockquote{max-height:100px;overflow:auto}.report-form .van-button{margin-top:16px;border-radius:20px}

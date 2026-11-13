@@ -78,8 +78,8 @@
         </template>
       </van-cell>
       <van-cell
-        title="发一条测试提醒"
-        label="给自己发一次：钉钉私聊 + 浏览器推送"
+        title="测试当前浏览器通知"
+        label="只向当前浏览器的 Web Push 订阅发送测试"
       >
         <template #value>
           <van-button size="small" :loading="testLoading" @click="sendTest">发送</van-button>
@@ -88,10 +88,9 @@
       <div v-if="testResult" class="test-result" :class="{ bad: !testResult.ok }">
         <div>{{ testResult.hint }}</div>
         <div class="test-detail">
-          钉钉：{{ testResult.dm?.ok ? '已送达' : testResult.dm?.skipped ? '未绑定' : testResult.dm?.err || '失败' }}
-          <br />
-          推送：{{ testResult.push?.ok ? '已送达' : testResult.push?.err || '失败' }}
+          {{ testResult.ok ? '已提交推送服务，请确认本设备是否出现通知。系统设置与省电策略可能影响显示。' : testResult.push?.err || '' }}
         </div>
+        <van-button v-if="testResult.action === 'subscribe'" size="small" :loading="pushLoading" @click="subscribePush">开启通知</van-button>
       </div>
     </van-cell-group>
 
@@ -129,6 +128,7 @@ import FavoriteSettings from '../components/FavoriteSettings.vue'
 import { findBannedWord } from '../nick'
 import { telemetryEnabled, setTelemetryEnabled } from '../telemetry'
 import { randomNickExcept } from '../../../packages/core/profile.js'
+import { currentWebPushTarget } from '../webPushTest'
 
 const router = useRouter()
 const route = useRoute()
@@ -175,24 +175,28 @@ const notifyLabel = computed(() =>
     : '已关闭，洗完不会提醒你'
 )
 
-// 测试提醒：发一条真实的取衣通知（钉钉卡片 + Web Push），
-// 让用户自己确认「没收到提醒」是设置问题还是通道问题
+// 仅测试本浏览器已同意的订阅，不向其它设备或钉钉发送。
 const testLoading = ref(false)
 const testResult = ref(null)
 async function sendTest() {
   if (testLoading.value) return
   testLoading.value = true
   testResult.value = null
+  const owner = JSON.stringify([userStore.user?.id, userStore.token])
   try {
-    const r = await api('/api/user/test-notify', { method: 'POST', body: {} })
+    const body = await currentWebPushTarget()
+    if (disposed || owner !== JSON.stringify([userStore.user?.id, userStore.token])) return
+    const r = await api('/api/user/test-notify', { method: 'POST', body })
+    if (disposed || owner !== JSON.stringify([userStore.user?.id, userStore.token])) return
     testResult.value = r
-    showToast(r?.hint || '已发送')
+    showToast(r?.ok ? '测试已提交，请查看本设备通知' : r?.hint || '未能提交测试通知')
   } catch (e) {
+    if (disposed || owner !== JSON.stringify([userStore.user?.id, userStore.token])) return
     if (e?.message === NEED_LOGIN) {
       router.replace({ path: '/login', query: { to: '/settings' } })
     } else {
       showToast(e?.message || '发送失败')
-      testResult.value = { ok: false, hint: e?.message || '发送失败', dm: {}, push: {} }
+      testResult.value = { ok: false, hint: e?.message || '发送失败', action: e?.code === 'not_subscribed' ? 'subscribe' : '', push: {} }
     }
   } finally {
     testLoading.value = false

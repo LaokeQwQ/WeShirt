@@ -33,6 +33,7 @@ import { registerAdminRoutes } from './admin.js'
 import { createAdminAccessCodes } from '../packages/core/admin-access-codes.js'
 import { registerAdminAccessCodeRoutes } from './admin-access-codes.js'
 import { registerTelemetryRoutes } from './telemetry.js'
+import { registerClientPushTestRoute } from './client-push-test.js'
 import { registerAnnouncementRoutes } from './announcements.js'
 import { registerAssistantRoutes, pruneAssistantStorage } from './assistant.js'
 import { registerSiteRoutes,checkSiteAdmin,getSiteConfig,loadSiteRuntime } from './site.js'
@@ -2589,106 +2590,7 @@ export function createApp({ store, env, mobile = {} }) {
     }
   })
 
-  // 给自己发一条测试提醒（鉴权）：Web Push + 钉钉私聊各发一次
-  //
-  // 为什么要这个：用户判断不了「没收到提醒」是没登记、还是通知通道坏了。
-  // 点一下就知道，也顺便验证 Web Push 订阅还有没有效。
-  app.post('/api/user/test-notify', async (c) => {
-    try {
-      const userId = await bearerUser(c, env)
-      if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
-      const user = await getUserOrRebuild(store, userId)
-      const buildingId = env.BUILDING_ID || 'b1'
-
-      // 拿一台真实机器来拼示例文案（没有就编一个），让用户看到的效果和真提醒一致
-      const board = await store.get(`machines:${buildingId}`, null).catch(() => null)
-      const m = board?.board?.floors?.flatMap((f) => f.machines)?.find((x) => x.state === 'occupied') ||
-        board?.board?.floors?.flatMap((f) => f.machines)?.[0]
-
-      const noticeMod = await import('../packages/core/notice.js').catch(() => null)
-      const notice =
-        noticeMod && typeof noticeMod.buildTakeNotice === 'function'
-          ? noticeMod.buildTakeNotice({
-              machineName: m?.name || '桂园1楼7号机（示例）',
-              floorCode: m?.floorCode,
-              leftMin: m?.leftMin != null && m.leftMin > 0 ? m.leftMin : 12,
-              endAt: new Date(Date.now() + 12 * 60000).toISOString(),
-            })
-          : { title: '等衣测试提醒', markdown: '', text: '【等衣】这是一条测试提醒' }
-
-      const out = { push: { ok: false, err: '' }, dm: { ok: false, err: '', skipped: false } }
-
-      // Web Push
-      try {
-        const subs = (await store.get('subs', [])) || []
-        const mine = (Array.isArray(subs) ? subs : []).filter((s) => s.userId === userId)
-        if (!mine.length) {
-          out.push.err = '没有订阅（先点「开启 Web Push」并允许通知）'
-        } else {
-          const mod = await import('../packages/core/webpush.js').catch(() => null)
-          if (!mod || typeof mod.createWebPush !== 'function') out.push.err = '推送模块未就绪'
-          else {
-            const wp = mod.createWebPush(env)
-            let ok = 0
-            let gone = 0
-            for (const s of mine) {
-              const sub = s.subscription || { endpoint: s.endpoint, keys: s.keys }
-              const r = await wp.send(sub, { type: 'done', text: notice.text }).catch(() => null)
-              if (r && r.ok) ok++
-              if (r && r.gone) {
-                gone++
-                const idx = subs.indexOf(s)
-                if (idx >= 0) subs.splice(idx, 1)
-              }
-            }
-            if (gone) await store.put('subs', subs).catch(() => {})
-            out.push.ok = ok > 0
-            if (!ok) out.push.err = gone ? '订阅已失效，重新开启推送' : '推送发送失败'
-          }
-        }
-      } catch (e) {
-        out.push.err = safeErrorCategory(e)
-      }
-
-      // 钉钉私聊
-      try {
-        if (!user.dingUserId) {
-          out.dm.skipped = true
-          out.dm.err = '还没绑定钉钉'
-        } else {
-          const mod = await import('../packages/core/dingtalk.js').catch(() => null)
-          if (!mod || typeof mod.createDingTalk !== 'function') out.dm.err = '钉钉模块未就绪'
-          else {
-            const r = await mod.createDingTalk(env).sendSingle(user.dingUserId, notice)
-            out.dm.ok = Boolean(r && r.ok)
-            if (!out.dm.ok) out.dm.err = String((r && r.err) || '发送失败').slice(0, 80)
-          }
-        }
-      } catch (e) {
-        out.dm.err = safeErrorCategory(e)
-      }
-
-      await audit(store, {
-        type: 'notify',
-        action: '测试提醒',
-        actorId: userId,
-        actorNick: user.nick,
-        level: out.push.ok || out.dm.ok ? 'info' : 'warn',
-        detail: { push: out.push.ok, dm: out.dm.ok, pushErr: out.push.err || undefined },
-      })
-
-      const anyOk = out.push.ok || out.dm.ok
-      return json({
-        ok: anyOk,
-        ...out,
-        hint: anyOk
-          ? '已发出：' + [out.dm.ok ? '钉钉私聊' : '', out.push.ok ? '浏览器推送' : ''].filter(Boolean).join(' + ')
-          : '两条通道都没发出去，看下面的原因',
-      })
-    } catch (e) {
-      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
-    }
-  })
+  registerClientPushTestRoute(app, { store, env, authenticate: c => bearerUser(c, env), mobileAuth, mobilePush })
 
   // 公告（公开读）
   app.get('/api/notices', async (c) => {
