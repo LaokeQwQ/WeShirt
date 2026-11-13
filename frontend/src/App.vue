@@ -12,10 +12,11 @@
       <span>我的住宿楼 · {{ dorm.name }}</span><span>切换 ›</span>
     </button>
     <AnnouncementSplash />
-    <QueueNotices />
-    <ChannelMentions />
-    <InspectionShortcut />
-    <router-view v-if="route.meta.full || dorm.code" />
+    <QueueNotices v-if="userStore.ready" />
+    <ChannelMentions v-if="userStore.ready" />
+    <InspectionShortcut v-if="userStore.ready" />
+    <div v-if="route.meta.login && !userStore.ready" class="dorm-wait" role="status">正在验证账号，洗衣房状态仍可查看。</div>
+    <router-view v-else-if="route.meta.full || dorm.code" :key="route.meta.login ? privateSession : route.name" />
     <div v-else class="dorm-wait">{{ userStore.ready ? '选择住宿楼，查看身边的机器' : '正在恢复你的偏好…' }}</div>
 
     <van-popup :show="showDormPicker" position="bottom" round :close-on-click-overlay="Boolean(dorm.code)" @update:show="dorm.showPicker = $event">
@@ -45,7 +46,7 @@
 </template>
 
 <script setup>
-import { computed, watch, ref } from 'vue'
+import { computed, watch, ref, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showConfirmDialog, showToast } from 'vant'
 import { api } from './api'
@@ -55,11 +56,21 @@ import ChannelMentions from './components/ChannelMentions.vue'
 import InspectionShortcut from './components/InspectionShortcut.vue'
 import { useUserStore } from './stores/user'
 import { useDormStore } from './stores/dorm'
+import { assistantData } from './assistantData'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const dorm = useDormStore()
+const privateSession = computed(() => `${userStore.user?.id || ''}:${userStore.token || ''}`)
+let assistantWarmup
+watch(() => userStore.ready ? privateSession.value : '', () => {
+  clearTimeout(assistantWarmup)
+  const verified = userStore.ready && userStore.isLoggedIn
+  assistantData.setSession(verified ? userStore.user.id : '', verified ? userStore.token : '')
+  if (verified) assistantWarmup = setTimeout(() => assistantData.prefetch(), 600)
+}, { immediate: true, flush: 'sync' })
+onUnmounted(() => clearTimeout(assistantWarmup))
 const showDormPicker = computed(() => route.name !== 'login' && !route.path.startsWith('/admin') && userStore.ready && (!dorm.code || dorm.showPicker))
 
 async function selectDorm(code) {
@@ -106,7 +117,7 @@ const TAKE_WINDOW_MIN = 180
 const checked = ref(false)
 
 async function checkTakeConfirm() {
-  if (checked.value || !userStore.isLoggedIn || route.path === '/task' || route.meta.full) return
+  if (checked.value || !userStore.ready || !userStore.isLoggedIn || route.path === '/task' || route.meta.full) return
   checked.value = true
   try {
     const d = await api('/api/tasks')
@@ -138,7 +149,7 @@ async function checkTakeConfirm() {
 
 // 登录态就绪后再检查一次（刷新页面时 bootstrap 是异步的）
 watch(
-  () => userStore.isLoggedIn,
+  () => userStore.ready && userStore.isLoggedIn,
   (v) => {
     if (v) checkTakeConfirm()
   },

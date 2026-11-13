@@ -183,10 +183,12 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
   }))
   app.get('/api/assistant/status', wrap(async (c) => {
     const user = await userFor(c)
-    const catalog = (await getSiteConfig(store)).buildings
-    const config = await loadConfig()
+    const [site, config, memory] = await Promise.all([
+      getSiteConfig(store), loadConfig(), store.get(memoryKey(user.id), emptyMemory()),
+    ])
     const usage = await readUsage(user.id,config)
-    return json({ enabled: config.enabled, ready: publicAssistantConfig(config).ready, dormBuilding: normalizeDormBuilding(user.dormBuilding, catalog), buildingName: dormBuildingName(user.dormBuilding, catalog), usage: visibleUsage(usage), limits: { input: ASSISTANT_LIMITS.input, history: ASSISTANT_LIMITS.history, retentionDays: 14,context:128000,minuteHardLimit:30 },skillsEnabled:true,mcpEnabled:true,readonlyTools:[MACHINE_TOOL.name], memoryEnabled: cleanMemory(await store.get(memoryKey(user.id), emptyMemory())).enabled })
+    const catalog = site.buildings
+    return json({ enabled: config.enabled, ready: publicAssistantConfig(config).ready, dormBuilding: normalizeDormBuilding(user.dormBuilding, catalog), buildingName: dormBuildingName(user.dormBuilding, catalog), usage: visibleUsage(usage), limits: { input: ASSISTANT_LIMITS.input, history: ASSISTANT_LIMITS.history, retentionDays: 14,context:128000,minuteHardLimit:30 },skillsEnabled:true,mcpEnabled:true,readonlyTools:[MACHINE_TOOL.name], memoryEnabled: cleanMemory(memory).enabled })
   }))
   app.get('/api/assistant/history', wrap(async (c) => json({ messages: await readHistory(await userFor(c)) })))
   app.delete('/api/assistant/history', wrap(async (c) => {
