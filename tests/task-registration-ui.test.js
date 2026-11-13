@@ -154,13 +154,26 @@ test('Task到期仅声称登记计时到点；公共卡片优先展示登记来�
   const panel = taskPanel()
   assert.match(panel.stateTextOf({ endAt: after(-2), takeState: 'pending' }), /登记计时结束.*请确认机器和衣物/)
   const props = reactive({ machine: washer({ finishAt: after(-1), leftMin: 0 }), favorite: false })
-  const card = evaluate(sources.MachineCard, { computed, ref, watch, defineProps: () => props, defineEmits: () => () => {}, useRouter: () => ({ push() {} }), useDormStore: () => ({ code: 'example' }), api: async () => ({}) }, '({ status, detail })')
+  const card = evaluate(sources.MachineCard, { computed, ref, watch, defineProps: () => props, defineEmits: () => () => {}, useRouter: () => ({ push() {} }), useDormStore: () => ({ code: 'example' }), useUserStore: () => ({ready:true,isLoggedIn:true,user:{id:'fixture'},token:'fixture-token'}), api: async () => ({}) }, '({ status, detail })')
   assert.equal(card.status.value.text, '运行中')
   assert.match(card.detail.value, /即将完成/)
   assert.doesNotMatch(card.detail.value, /0\s*分钟/)
   props.machine = washer({ state: 'occupied', estimated: true, registrationPending: true, availabilityLabel: '用户已登记，等待设备状态更新' })
   assert.equal(card.status.value.text, '用户已登记，等待设备状态更新')
   assert.doesNotMatch(card.detail.value, /可前往现场使用|运行中/)
+})
+
+test('公共机器卡片在账号恢复期间不登记或收藏，验证就绪后恢复操作', async () => {
+  const props=reactive({machine:washer(),favorite:false})
+  const user=reactive({ready:false,isLoggedIn:true,user:{id:'fixture'},token:'fixture-token'})
+  const writes=[],pushes=[],events=[]
+  const card=evaluate(sources.MachineCard,{computed,ref,watch,defineProps:()=>props,defineEmits:()=>event=>events.push(event),useRouter:()=>({push:target=>pushes.push(target)}),useDormStore:()=>({code:'example'}),useUserStore:()=>user,api:async(path,options)=>{writes.push({path,options});return {}}},'({register,toggleFavorite})')
+  card.register();await card.toggleFavorite()
+  assert.equal(pushes.length,0);assert.equal(writes.length,0);assert.equal(events.length,0)
+  user.ready=true;card.register();await card.toggleFavorite()
+  assert.deepEqual(pushes,[{path:'/task',query:{machine:'washer'}}])
+  assert.deepEqual(writes.map(row=>row.path),['/api/user/favorites/toggle'])
+  assert.deepEqual(events,['favorite'])
 })
 
 test('真实Task选中可信6分钟运行机默认跟随余时，POST不标成标准洗或桶自洁', async () => {

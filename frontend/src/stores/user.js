@@ -127,10 +127,11 @@ export const useUserStore = defineStore('user', {
     // 退出登录
     async logout() {
       this.profileRevision++
-      await apiLogout()
+      // Clear private UI/cache immediately, even while device revocation is offline.
       this.token = ''
       this.user = null
       writeCached(null)
+      await apiLogout()
     },
     // 取衣提醒偏好：on 开关、leadMin 提前分钟
     async setNotify(patch) {

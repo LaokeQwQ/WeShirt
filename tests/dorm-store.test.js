@@ -161,7 +161,7 @@ test('大屏允许首次选楼和主动切换；登录与后台页面不弹选�
   const route = reactive({ path: '/display', name: 'display', meta: { full: true } })
   const script = appSource.match(/<script setup>([\s\S]*?)<\/script>/)[1]
   const popup = evaluate(script, {
-    computed, ref, watch: () => {},
+    computed, ref, watch: () => {}, onUnmounted: () => {}, assistantData: { setSession() {}, prefetch() {} },
     useRoute: () => route, useRouter: () => ({ push() {}, replace() {} }),
     useUserStore: f.useUserStore, useDormStore: f.useDormStore,
     showConfirmDialog: () => {}, showToast: () => {}, api: () => {},
@@ -177,4 +177,35 @@ test('大屏允许首次选楼和主动切换；登录与后台页面不弹选�
   route.path = '/admin/users'
   route.name = 'admin-users'
   assert.equal(popup.value, false)
+})
+
+test('只有设备密钥、token尚未恢复时也从上次账号楼栋立即展示公开机器且不写账号', async () => {
+  const f = fixture({ready:false,remote:'guiyuan',preferences:{'user:A':{code:'liuyuan',pending:false}}})
+  f.user.token = ''
+  await f.dorm.reconcile()
+  assert.equal(f.dorm.code,'liuyuan')
+  assert.equal(f.requests.length,0)
+  assert.equal(f.dorm.activeScope,'')
+  await assert.rejects(f.dorm.select('meiyuan'),/恢复账号/)
+  switchUser(f.user,'B','meiyuan');f.user.ready=true
+  await f.dorm.reconcile()
+  assert.equal(f.dorm.code,'meiyuan')
+  assert.equal(f.requests.length,0,'cached A public preview must never become a B profile update')
+})
+
+test('资料已清理但浏览器记住公开楼栋时恢复账号不挡住首屏，也不会据此设置账号楼栋',async()=>{
+  const f=fixture({id:null,ready:false})
+  f.storage.setItem('ws_last_public_dorm','guiyuan')
+  await f.dorm.reconcile()
+  assert.equal(f.dorm.code,'guiyuan');assert.equal(f.requests.length,0)
+  switchUser(f.user,'B','liuyuan');f.user.ready=true
+  await f.dorm.reconcile()
+  assert.equal(f.dorm.code,'liuyuan');assert.equal(f.requests.length,0)
+})
+
+test('设备恢复未成功时继续展示上次公开洗衣房，不把已显示的机器重新藏回选楼弹窗',async()=>{
+  const f=fixture({id:null,ready:false});f.storage.setItem('ws_last_public_dorm','guiyuan')
+  await f.dorm.reconcile();f.user.ready=true
+  await f.dorm.reconcile()
+  assert.equal(f.dorm.code,'guiyuan');assert.equal(f.dorm.activeScope,'guest');assert.equal(f.requests.length,0)
 })

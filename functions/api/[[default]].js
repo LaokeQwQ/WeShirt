@@ -78,5 +78,10 @@ export async function onRequest(context) {
     env.__STORE_INFO__ = _storeInfo
     _app = createApp({ store: _store, env })
   }
-  return _app.fetch(context.request)
+  // Preserve Pages' task lifetime through Hono. Without this bridge a stale
+  // board waits for the fallback timeout and background sync can be discarded.
+  const executionCtx = typeof context.waitUntil === 'function'
+    ? { waitUntil: task => context.waitUntil(task) }
+    : undefined
+  return _app.fetch(context.request, undefined, executionCtx)
 }

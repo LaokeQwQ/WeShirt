@@ -31,6 +31,7 @@
         <van-button size="small" type="primary" @click="load(true)">重试</van-button>
       </div>
       <!-- 兜底：空态 -->
+      <div v-else-if="refreshing && !sourceBoard" class="empty text-dim" role="status">正在读取本楼机器…</div>
       <div v-else-if="!currentMachines.length" class="empty text-dim">{{ onlyFavorites ? '当前楼栋或筛选下没有收藏机器，可切换“查看全部机器”。' : dorm.code ? '这栋楼暂无符合筛选的机器' : '先选择住宿楼' }}</div>
       <div v-else class="grid">
         <MachineCard v-for="m in currentMachines" :key="m.id" :machine="m" :slot="machineSlot(sourceBoard?.slotMapping,m.id)" :favorite="favorites.includes(String(m.id))" @favorite="loadFavorites" />
@@ -62,8 +63,8 @@ const dorm = useDormStore()
 const user=useUserStore()
 const favorites=ref([]),onlyFavorites=ref(false)
 let favoritesGeneration=0
-async function loadFavorites(){const generation=++favoritesGeneration,owner=user.user?.id;favorites.value=[];if(!user.isLoggedIn)return;try{const d=await api('/api/user/laundry-preferences');if(generation===favoritesGeneration&&owner===user.user?.id)favorites.value=d.preferences?.favorites||d.favorites||[]}catch{}}
-watch(()=>user.user?.id,loadFavorites,{immediate:true})
+async function loadFavorites(){const generation=++favoritesGeneration,owner=user.user?.id;favorites.value=[];if(!user.ready||!user.isLoggedIn)return;try{const d=await api('/api/user/laundry-preferences');if(generation===favoritesGeneration&&owner===user.user?.id)favorites.value=d.preferences?.favorites||d.favorites||[]}catch{}}
+watch(()=>`${user.ready}:${user.user?.id || ''}:${user.token || ''}`,loadFavorites,{immediate:true})
 
 const { sourceBoard, now, error, refreshing, load } = useDormBoard(dorm)
 const floors = computed(() => filterDormFloors(sourceBoard.value, dorm.code, dorm.buildings).map((f) => ({ ...f, machines: (f.machines || []).map((m) => {
@@ -121,4 +122,5 @@ function goRoom() { router.push('/') }
 .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 0 12px; }
 .empty { text-align: center; padding: 40px 16px; }
 .grid{grid-template-columns:repeat(2,minmax(0,1fr))}.kind-filter{flex-wrap:wrap}.kind-filter button{min-height:40px;flex:1;white-space:nowrap}.sort-note{align-items:center;gap:10px;padding:4px 12px 10px}.sort-note>span{white-space:nowrap}.sort-note>button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:8px 12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);font:inherit;font-size:12px;white-space:nowrap}.sort-note>button.on{border-color:var(--primary);background:color-mix(in srgb,var(--primary) 12%,var(--bg-card));color:var(--primary)}.sort-note svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6}.sort-note .on svg{fill:currentColor}.sort-note>button>span{font-size:11px;color:var(--text-dim)}.board-heading{gap:12px}.board-heading h2{min-width:0;overflow-wrap:anywhere}.board-heading>span{flex:none}
+.grid{grid-template-columns:minmax(0,1fr);gap:10px;padding:0 12px 18px}.board-heading{flex-wrap:wrap}.kind-filter button{white-space:normal}.kind-filter{padding-top:8px}.board-heading>span{font-size:12px}@media(min-width:1000px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:380px){.stats{gap:5px;padding-inline:10px}.stat-label{font-size:11px}.sort-note{flex-wrap:wrap}.kind-filter button{padding-inline:9px}}
 </style>

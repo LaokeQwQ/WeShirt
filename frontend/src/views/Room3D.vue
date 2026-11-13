@@ -337,6 +337,7 @@ async function onProofPick(e, kind) {
 }
 
 async function submitProof() {
+  if (!userStore.ready) { showToast('正在恢复账号，请稍等'); return }
   if (proofSending.value || !proofConfirm.value || !proofOcc.value || !proofAround.value) return
   proofSending.value = true
   try {
@@ -406,6 +407,7 @@ function stuckMinFor(id) {
 onUnmounted(() => clearInterval(stuckTimer))
 
 async function quickStartDryer() {
+  if (!userStore.ready) { showToast('正在恢复账号，请稍等'); return }
   return submitRegistration('dryer')
 }
 
@@ -452,6 +454,7 @@ const selectedOccupier = computed(() => {
 
 // 提醒取衣：每台 5 分钟可点一次；累计第 3 次会返回对方手机号
 async function urgeOccupier() {
+  if (!userStore.ready) { showToast('正在恢复账号，请稍等'); return }
   if (!selected.value?.machineId || urgeSending.value) return
   urgeSending.value = true
   try {
@@ -479,6 +482,7 @@ async function urgeOccupier() {
 
 // 故障机：二次确认后才视为已恢复，并重新允许上报（登记洗衣）
 async function recoverFault() {
+  if (!userStore.ready) { showToast('正在恢复账号，请稍等'); return }
   if (!selected.value?.machineId || recovering.value) return
   recovering.value = true
   try {
@@ -3063,6 +3067,7 @@ async function performSyncData(force) {
 
 // 登记洗衣保存公开备注与消毒液选项，开洗自动退出自己的排队。
 async function quickStart() {
+  if (!userStore.ready) { showToast('正在恢复账号，请稍等'); return }
   return submitRegistration('washer')
 }
 
@@ -3077,6 +3082,7 @@ const machineMessages = computed(() => {
 
 // 给当前选中的机器留言
 async function postMachineMessage() {
+  if (!userStore.ready) { showToast('正在恢复账号，请稍等'); return }
   const t = msgText.value.trim()
   if (!t || !selected.value?.machineId) return
   try {
@@ -3108,6 +3114,7 @@ const selectedQueueCount = computed(() => {
 })
 
 async function toggleQueue() {
+  if (!userStore.ready) { showToast('正在恢复账号，请稍等'); return }
   if (!selected.value?.machineId) return
   queueSubmitting.value = true
   try {

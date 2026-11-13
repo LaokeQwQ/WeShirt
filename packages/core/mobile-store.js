@@ -48,17 +48,35 @@ export function createRemoteMobileAtomicStore(env = {}, fetcher = fetch) {
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search || typeof secret !== 'string' || secret.length < 32 || secret.length > 512 || /[\r\n]/.test(secret)) return null
   async function call(payload) {
     assertKey(payload.key)
-    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 8000)
-    try {
-      const response = await fetcher(url.href, { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + secret }, body: JSON.stringify(payload), signal: controller.signal })
-      if (!response.ok) throw error()
-      const bytes = await readStreamBytes(response.body, 65536)
-      if (!bytes) throw error()
-      let data
-      try { data = JSON.parse(new TextDecoder().decode(bytes)) } catch { throw error() }
-      if (data?.protocolVersion !== 1 || data.ok !== true || !Object.hasOwn(data, 'result')) throw error()
-      return data.result
-    } finally { clearTimeout(timeout) }
+    // Only reads are safe to repeat after an uncertain transport outcome. A CAS
+    // may already have committed, so its response must never be replayed here.
+    const read = payload.op === 'get', deadline = Date.now() + 8000
+    for (let attempt = 0; ; attempt++) {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), Math.min(read && attempt === 0 ? 4000 : 8000, Math.max(1, deadline - Date.now())))
+      let transient = false
+      try {
+        let response
+        try { response = await fetcher(url.href, { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + secret }, body: JSON.stringify(payload), signal: controller.signal }) }
+        catch { transient = true; throw error() }
+        if (!response.ok) {
+          transient = [408, 500, 502, 503, 504].includes(response.status)
+          await response.body?.cancel().catch(() => {})
+          throw error()
+        }
+        let bytes
+        try { bytes = await readStreamBytes(response.body, 65536) }
+        catch { transient = true; throw error() }
+        if (!bytes) throw error()
+        let data
+        try { data = JSON.parse(new TextDecoder().decode(bytes)) } catch { throw error() }
+        if (data?.protocolVersion !== 1 || data.ok !== true || !Object.hasOwn(data, 'result')) throw error()
+        return data.result
+      } catch {
+        if (!read || attempt !== 0 || !transient || Date.now() + 100 >= deadline) throw error()
+      } finally { clearTimeout(timeout) }
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
   }
   return {
     consistency: 'linearizable', durable: true,
