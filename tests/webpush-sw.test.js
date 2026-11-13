@@ -65,7 +65,7 @@ test('SW reads legacy text and deduplicates each task with a stable tag', async 
 
 test('SW bounds notification text and rejects external or malformed destinations', async () => {
   const sw = worker();
-  for (const url of ['https://evil.example/x', '//evil.example/x', '/\\evil.example', '/api/users', '/?token=secret#/task', '/#/settings']) {
+  for (const url of ['https://evil.example/x', '//evil.example/x', '/\\evil.example', '/api/users', '/?token=secret#/task']) {
     await sw.push({ title: '\n' + '衣'.repeat(90), text: 'a'.repeat(1400), url });
     const notice = sw.notifications.at(-1);
     assert.equal(notice.data.url, '/#/task');
@@ -79,6 +79,17 @@ test('SW bounds notification text and rejects external or malformed destinations
   assert.match(sw.notifications.at(-1).body, /等衣提醒/);
   await sw.push({ url: 123 });
   assert.equal(sw.notifications.at(-1).data.url, '/#/task');
+});
+
+test('client push test opens notification settings without replacing a laundry reminder', async () => {
+  const sw = worker();
+  await sw.push({ type: 'test', text: '测试当前浏览器', url: '/#/settings?token=ignored' });
+  assert.equal(sw.notifications.at(-1).data.url, '/#/settings');
+  assert.equal(sw.notifications.at(-1).tag, 'weshirt-client-push-test');
+  await sw.push({ type: 'done', taskId: 'task_1' });
+  assert.notEqual(sw.notifications[0].tag, sw.notifications[1].tag);
+  await sw.click('/#/settings');
+  assert.deepEqual(sw.opened, ['/#/settings']);
 });
 
 test('notification click navigates only same-origin windows and preserves thread routing', async () => {

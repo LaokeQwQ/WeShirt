@@ -60,6 +60,7 @@ function targetUrl(raw, fallback = '/#/task') {
     const url = new URL(raw, self.location.origin)
     if (url.origin !== self.location.origin || url.pathname !== '/' || url.search) return fallback
     const [route, query = ''] = url.hash.slice(1).split('?')
+    if (route === '/settings') return '/#/settings'
     if(route==='/board'){
       const params=new URLSearchParams(query),channel=params.get('channel'),message=safeId(params.get('message'))
       if(channel&&!/^(?:public|[a-z][a-z0-9_-]{0,31})$/.test(channel))return '/#/board'
@@ -81,6 +82,7 @@ self.addEventListener('push', (event) => {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) payload = {}
   const social = payload.type === 'social' || typeof payload.url === 'string' && payload.url.startsWith('/#/social')
   const mention=payload.type==='mention'
+  const test = payload.type === 'test'
   const task = safeId(payload.taskId)
   const thread = safeId(payload.threadId)
   const fallback = mention ? '/#/board' : social ? '/#/social' : '/#/task'
@@ -89,7 +91,7 @@ self.addEventListener('push', (event) => {
     body: line(payload.body, 1200) || line(payload.text, 1200) || '你有一条等衣提醒，点开查看详情。',
     icon: '/icon-192.png',
     badge: '/icon-192.png',
-    tag: mention ? 'weshirt-mention-'+(safeId(payload.noticeId)||safeId(payload.channel)||'channel') : social ? 'weshirt-social' + (thread ? '-' + thread : '') : 'weshirt-task' + (task ? '-' + task : ''),
+    tag: test ? 'weshirt-client-push-test' : mention ? 'weshirt-mention-'+(safeId(payload.noticeId)||safeId(payload.channel)||'channel') : social ? 'weshirt-social' + (thread ? '-' + thread : '') : 'weshirt-task' + (task ? '-' + task : ''),
     renotify: false,
     data: { url: targetUrl(proposed, fallback) }
   }

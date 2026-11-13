@@ -7,6 +7,7 @@
       <span class="login-bar-btn">去登录</span>
     </div>
 
+    <div v-if="!userStore.ready && !route.meta.full" class="session-restoring" role="status" aria-live="polite">正在恢复账号…</div>
     <button v-if="!route.meta.full && dorm.code" class="dorm-bar" type="button" @click="dorm.showPicker = true">
       <span>我的住宿楼 · {{ dorm.name }}</span><span>切换 ›</span>
     </button>
@@ -36,6 +37,7 @@
     <van-tabbar v-if="!route.meta.full" :model-value="activeTab" safe-area-inset-bottom @change="onTab">
       <van-tabbar-item name="/" icon="orders-o">看板</van-tabbar-item>
       <van-tabbar-item name="/task" icon="clock-o">我的洗衣</van-tabbar-item>
+      <van-tabbar-item name="/assistant" icon="chat-o">AI 助手</van-tabbar-item>
       <van-tabbar-item name="/board" icon="comment-o">留言</van-tabbar-item>
       <van-tabbar-item name="/settings" icon="setting-o">设置</van-tabbar-item>
     </van-tabbar>
@@ -72,7 +74,7 @@ watch(() => [dorm.code, route.name], () => {
 
 // 登录页 / 大屏 / 管理页不显示（大屏是公开展示，管理页有自己的口令）
 const showLoginBar = computed(
-  () => !userStore.isLoggedIn && !route.meta.full && route.name !== 'login'
+  () => userStore.ready && !userStore.isLoggedIn && !route.meta.full && route.name !== 'login'
 )
 
 function goLogin() {
@@ -83,11 +85,12 @@ function goLogin() {
 // 以前点「设置」会自动建一个临时匿名账号（青柠君那种），现在这条路堵死了。
 const activeTab = computed(() => {
   const p = route.path
-  return ['/', '/task', '/board', '/settings'].includes(p) ? p : '/'
+  return ['/', '/task', '/assistant', '/board', '/settings'].includes(p) ? p : '/'
 })
 
 function onTab(name) {
   const needLogin = name !== '/'
+  if (needLogin && !userStore.ready) { showToast('正在恢复账号，请稍等'); return }
   if (needLogin && !userStore.isLoggedIn) {
     showToast('先登录才能用')
     router.push({ path: '/login', query: { to: name } })
@@ -147,6 +150,7 @@ watch(
 .app-root.room-layout { height:100vh; height:100dvh; display:flex; flex-direction:column; }
 .room-layout :deep(.room-page) { flex:1; min-height:0; height:auto; }
 .login-bar, .dorm-bar { flex:none; }
+.session-restoring{flex:none;padding:9px 14px;min-height:37px;color:var(--text-dim);background:var(--bg-card);border-bottom:1px solid var(--border);font-size:12px}
 .login-bar {
   position: sticky;
   top: 0;

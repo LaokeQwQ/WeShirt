@@ -50,48 +50,13 @@ test('测试提醒：未登录 401', async () => {
   assert.equal(r.status, 401)
 })
 
-test('测试提醒：没绑定钉钉、没订阅推送 → 明确报两条原因', async () => {
-  const { call } = await makeApp(async (s) => {
-    await s.put('user:u_1', { id: 'u_1', nick: '没绑定', avatar: 'av1', takeCode: '000000' })
-  })
-  const tok = await issueToken('u_1', SECRET)
-  const r = await call('POST', '/api/user/test-notify', {
-    body: {},
-    headers: { authorization: 'Bearer ' + tok },
-  })
-  assert.equal(r.status, 200)
-  assert.equal(r.j.ok, false)
-  assert.equal(r.j.dm.skipped, true)
-  assert.match(r.j.push.err, /没有订阅/)
-  assert.match(r.j.hint, /都没发出去/)
-})
-
-test('测试提醒：有钉钉但发送失败也会如实回报', async () => {
-  const { call } = await makeApp(async (s) => await seedUser(s))
-  const tok = await issueToken('u_1', SECRET)
-  const r = await call('POST', '/api/user/test-notify', {
-    body: {},
-    headers: { authorization: 'Bearer ' + tok },
-  })
-  assert.equal(r.status, 200)
-  // 测试环境没有钉钉凭证 → 必然失败，但结构必须完整
-  assert.equal(typeof r.j.dm.ok, 'boolean')
-  assert.ok(r.j.dm.err)
-  assert.equal(typeof r.j.push.ok, 'boolean')
-})
-
-test('测试提醒会写一条审计', async () => {
-  const { store, call } = await makeApp(async (s) => await seedUser(s))
-  const tok = await issueToken('u_1', SECRET)
-  await call('POST', '/api/user/test-notify', {
-    body: {},
-    headers: { authorization: 'Bearer ' + tok },
-  })
-  const entries = await store.list('auditlog:')
-  assert.equal(entries.length, 1)
-  const logs = entries[0].value
-  assert.equal(logs[0].action, '测试提醒')
-  assert.equal(logs[0].level, 'warn', '两条都没通应该是 warn')
+test('测试提醒：旧客户端没有指定目标时拒绝，不再发送钉钉', async () => {
+  const { call } = await makeApp(async s => seedUser(s))
+  const token = await issueToken('u_1', SECRET)
+  const r = await call('POST', '/api/user/test-notify', { body: {}, headers: { authorization: 'Bearer ' + token } })
+  assert.equal(r.status, 400)
+  assert.equal(r.j.error.code, 'bad_param')
+  assert.ok(r.j.error.eventId)
 })
 
 // ---------- 后台测试消息 ----------

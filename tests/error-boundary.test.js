@@ -104,14 +104,14 @@ test('上游诊断成功200中的逐端点异常不回显异常或栈', async (t
   await f.assertNoLeak(result)
 })
 
-test('用户通知自检200中的存储失败也使用固定嵌套错误', async (t) => {
+test('用户通知自检的存储失败返回带事件的固定503', async (t) => {
   const f = await fixture(t)
+  await f.store.put('user:student', {id:'student',nick:'测试同学',dormBuilding:'guiyuan',notifyOn:true})
   f.failures.add('subs')
-  const result = await f.call('/api/user/test-notify', { user: true, method: 'POST', body: {} })
-  assert.equal(result.status, 200)
+  const result = await f.call('/api/user/test-notify', { user: true, method: 'POST', body: {channel:'web', endpoint:'https://fcm.googleapis.com/fcm/send/fixture'} })
+  assert.equal(result.status, 503)
   assert.ok(f.hits.get('subs'))
-  assert.equal(result.data.push.ok, false)
-  assert.ok(result.data.push.err)
+  assert.equal(result.data.error.code, 'push_provider_unavailable')
   await f.assertNoLeak(result)
 })
 

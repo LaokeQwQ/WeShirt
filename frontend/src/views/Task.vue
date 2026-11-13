@@ -4,9 +4,10 @@
       <template #right><button class="dorm-switch" @click="dorm.showPicker = true">{{ dorm.name || '选择住宿楼' }} ▾</button></template>
     </van-nav-bar>
 
-    <div class="task-links"><van-button class="friend-link" size="small" plain to="/social">朋友与代取</van-button><van-button class="assistant-link" size="small" plain to="/assistant">洗衣助手</van-button></div>
+    <header class="laundry-intro"><div><h1>洗衣安排</h1><p>登记提醒，洗完及时取衣。</p></div><van-button class="friend-link" size="small" plain icon="friends-o" to="/social">朋友与代取</van-button></header>
     <!-- 登记表单 -->
     <div class="form card">
+      <div class="form-heading"><h2>新增登记</h2><span>提醒时间以机器状态为准</span></div>
       <div class="field-label">选择机器</div>
       <van-cell :title="selectedName || (machines.length ? '选台机器' : '暂无可选机器')" is-link @click="openMachinePicker" />
       <div v-if="machineError" class="form-tip">机器数据加载失败，<button @click="loadMachines(true)">重试</button></div>
@@ -50,6 +51,7 @@
 
     <!-- 任务列表 -->
     <div class="tasks">
+      <div class="section-heading"><h2>近期洗衣</h2><span>{{ activeTasks.length }} 条登记</span></div>
       <div v-if="loading && !tasks.length" class="empty text-dim">加载中…</div>
       <div v-else-if="!activeTasks.length" class="empty text-dim">暂无近期洗衣登记</div>
       <div v-for="t in activeTasks" :key="t.id" class="task-item card" :class="{ done: t.done }">
@@ -396,6 +398,10 @@ onUnmounted(() => {
   if (clockTimer) clearInterval(clockTimer)
 })
 </script>
+<style scoped>
+.laundry-intro{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:22px 16px 8px}.laundry-intro h1{margin:0 0 6px;font-size:23px;letter-spacing:.02em}.laundry-intro p{margin:0;font-size:12px;color:var(--text-dim)}.laundry-intro>.van-button{flex:none;min-height:42px;border-radius:13px;color:var(--text);background:var(--bg-card);border-color:var(--border)}.task .quick .van-button{border-radius:11px}.task .quick .van-button--default{background:var(--bg);border-color:var(--border);color:var(--text)}
+.form-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:7px}.form-heading{padding:2px 2px 16px;border-bottom:1px solid var(--border);margin-bottom:16px}.form-heading h2,.section-heading h2{font-size:16px;margin:0}.form-heading span,.section-heading span{font-size:11px;color:var(--text-dim)}.task .form{padding:18px 16px;border-radius:20px}.task .tasks{margin-top:20px;gap:12px}.task .task-item{border-radius:18px;padding:16px}.task .ti-name{font-size:16px;line-height:1.5;overflow-wrap:anywhere}.task .task-details{line-height:1.7}.task .ti-time{font-size:15px;font-weight:600;line-height:1.6;margin:8px 0}.task .ti-ops{padding-top:10px;border-top:1px solid var(--border)}.task .ti-ops>.van-button{border-radius:10px;min-height:40px}.task .form>.van-button{border-radius:13px;min-height:46px;margin-top:14px}.task .mode-row{flex-wrap:wrap}.task .mode{line-height:1.6}.task .history-tasks{padding:20px 16px 30px;border-top:1px solid var(--border)}@media(min-width:700px){.task .form,.task .tasks,.laundry-intro{max-width:760px;margin-left:auto;margin-right:auto}.task .form{margin-top:16px}.task .ti-ops{border-top:0;border-left:1px solid var(--border);padding:0 0 0 14px}.task .tasks{padding-inline:12px}}@media(max-width:350px){.laundry-intro{padding-inline:12px;gap:8px}.laundry-intro h1{font-size:21px}.laundry-intro>.van-button{font-size:11px;padding-inline:8px}}
+</style>
 
 <style scoped>
 .task-note{font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0;color:var(--text)}.task-details{font-size:11px;color:var(--text-dim);margin-top:5px}

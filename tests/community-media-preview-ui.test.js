@@ -5,20 +5,22 @@ import { ref } from 'vue'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
 
 const source = await readFile(new URL('../frontend/src/components/CommunityMedia.vue', import.meta.url), 'utf8')
-function fixture({ fail = false } = {}) {
+function fixture({ fail = false, kind = 'video', fetchMedia = async () => assert.fail('previewing loaded media must not fetch it again'), observe = false } = {}) {
   const events = [], previews = [], mounted = [], unmounted = [], listeners = new Map(), revoked = []
   const document = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) }
   const bindings = {
-    ref, defineProps: () => ({ media: { kind: 'image' } }), defineEmits: () => (...args) => events.push(args),
+    ref, defineProps: () => ({ media: { kind } }), defineEmits: () => (...args) => events.push(args),
     onMounted: fn => mounted.push(fn), onUnmounted: fn => unmounted.push(fn), document,
     showImagePreview: options => { if (fail) throw Error('preview unavailable'); const item = { options, closed: 0, close() { this.closed++ } }; previews.push(item); return item },
-    fetchCommunityMedia: async () => assert.fail('previewing loaded media must not fetch it again'),
-    URL: { revokeObjectURL: url => revoked.push(url) },
+    fetchCommunityMedia: fetchMedia,
+    URL: { createObjectURL: () => 'blob:inline-image', revokeObjectURL: url => revoked.push(url) },
+    IntersectionObserver: observe ? class { constructor(fn) { document.intersect=fn } observe() {} disconnect() {} } : undefined,
   }
   const script = source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]*\n/gm, '')
-  const panel = new Function(...Object.keys(bindings), script + '\nreturn {url,video,preview,setVideoFullscreen,error}')( ...Object.values(bindings))
+  const panel = new Function(...Object.keys(bindings), script + '\nreturn {url,video,container,loading,load,preview,setVideoFullscreen,error}')( ...Object.values(bindings))
+  if(observe)panel.container.value={}
   mounted.forEach(fn => fn())
-  panel.url.value = 'blob:private-test'
+  if(kind!=='image')panel.url.value = 'blob:private-test'
   return { panel, events, previews, document, listeners, revoked, unmount: () => unmounted.forEach(fn => fn()) }
 }
 
@@ -27,6 +29,20 @@ test('media preview component and native fullscreen bindings compile', () => {
   assert.deepEqual(errors, [])
   const script = compileScript(descriptor, { id: 'media-preview' })
   assert.deepEqual(compileTemplate({ source: descriptor.template.content, filename: 'CommunityMedia.vue', id: 'media-preview', compilerOptions: { bindingMetadata: script.bindings } }).errors, [])
+})
+
+test('visible images load inline automatically while distant attachments wait, failure permits retry and teardown cannot create leaked URLs', async () => {
+  let calls=0,fail=true,resolve
+  const f=fixture({kind:'image',observe:true,fetchMedia:async()=>{calls++;if(fail)throw Error('offline');return {}}})
+  assert.equal(calls,0)
+  f.document.intersect([{isIntersecting:false}]);assert.equal(calls,0)
+  f.document.intersect([{isIntersecting:true}]);await Promise.resolve();await Promise.resolve()
+  assert.equal(calls,1);assert.equal(f.panel.error.value,'offline')
+  fail=false;await f.panel.load();assert.equal(f.panel.url.value,'blob:inline-image');assert.equal(calls,2)
+  f.unmount();assert.deepEqual(f.revoked,['blob:inline-image'])
+  const pending=fixture({kind:'image',fetchMedia:()=>new Promise(done=>resolve=done)})
+  pending.unmount();resolve({});await Promise.resolve();await Promise.resolve()
+  assert.equal(pending.panel.url.value,'','a completed request after unmount does not allocate a blob URL')
 })
 
 test('image preview reports occlusion until fully closed and cleans up its owned overlay on unmount', () => {

@@ -255,6 +255,25 @@ export function createMobilePush({ store, env = {}, atomicStore = createRemoteMo
   }
   return {
     providers, register, remove,
+    async testInstallation(uid, installationId, sessionId, claim) {
+      if (!providers.length) throw new MobileError('mobile_push_unavailable', '原生推送尚未完成配置', 503)
+      const key = 'mobile:installation:' + installationId
+      const row = await atomicStore.get(key), device = row?.value
+      if (!device || device.userId !== uid || device.sessionId !== sessionId) throw new MobileError('installation_not_owned', '请先完成当前设备的通知注册', 409)
+      if (!device.notificationsEnabled || !device.token || !providers.includes(device.provider) || !await validUser(uid)) throw new MobileError('notifications_disabled', '请先开启本机系统通知并完成注册', 409)
+      await claim()
+      // Read once more after claiming the rate slot, so a concurrent logout or
+      // account replacement cannot send a test with the previous device token.
+      const current = await atomicStore.get(key)
+      if (!current || current.version !== row.version || !await validUser(uid)) throw new MobileError('installation_changed', '通知注册已变化，请刷新后重试', 409)
+      const data = await mobileNoticeData({ nativeKind: 'ANNOUNCEMENT', nativeEventKey: 'test:' + crypto.randomUUID(), title: 'WeShirt 通知测试', text: '这是一条当前设备的测试通知。收到说明系统通知可用。' })
+      let result
+      try { result = await transports[device.provider](device.token, data) } catch { result = { ok: false } }
+      if (result.gone) {
+        if (await atomicStore.compareAndSet(key, row.version, { ...device, notificationsEnabled: false, token: null, provider: null }, { expiresAt: expiresAt() })) await remove(uid, installationId, sessionId)
+      }
+      return { accepted: result.ok === true, provider: device.provider }
+    },
     async notify(uid, notice) {
       if (!providers.length || !await validUser(uid)) return { ok: false, skipped: true }
       const data = await mobileNoticeData(notice)
