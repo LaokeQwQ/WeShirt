@@ -45,7 +45,7 @@ Android 包名为 `com.laoke.weshirt`。界面、3D、通知和小组件均由�
 {"accessToken":"ma1.session.secret","tokenType":"Bearer","expiresIn":900,"refreshToken":"mr1.session.secret","refreshExpiresIn":2592000,"user":{"id":"u_example","nick":"用户昵称","avatar":null,"avatarUrl":null,"dormBuilding":null}}
 ```
 
-访问令牌最长 15 分钟；刷新会话绝对寿命 30 天。刷新请求为 `POST /api/mobile/auth/refresh`，内容 `{installationId,refreshToken}`，响应格式同上。刷新同时替换访问和刷新令牌；并发刷新只有一个成功，旧令牌立即失效。客户端必须串行刷新并原子保存整组新凭据。响应丢失后重新授权，不能循环重试旧刷新令牌。
+访问令牌最长 15 分钟。刷新凭据在 30 天内有效，成功续期后重新计算这 30 天，距首次登录最多 90 天。刷新请求为 `POST /api/mobile/auth/refresh`，内容 `{installationId,refreshToken}`，响应格式同上。刷新同时替换访问和刷新令牌；并发刷新只有一个成功，旧令牌立即失效。客户端必须串行刷新并原子保存整组新凭据。响应丢失后重新授权，不能循环重试旧刷新令牌。
 
 退出使用 `POST /api/mobile/auth/logout`，内容 `{installationId,refreshToken}`。成功后会话立即失效，并清除该会话持有的推送凭据、释放账号绑定；旧会话重复退出不会注销同安装中新会话的登记。客户端清除本地凭据、通知、小组件数据与私有缓存。
 

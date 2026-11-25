@@ -6,6 +6,8 @@ import { createDingTalk } from './dingtalk.js'
 export const MOBILE_PACKAGE = 'com.laoke.weshirt'
 export const MOBILE_ACCESS_SECONDS = 900
 export const MOBILE_REFRESH_SECONDS = 30 * 24 * 60 * 60
+const MOBILE_SESSION_MAX_MS = 90 * 24 * 60 * 60 * 1000
+const MOBILE_REFRESH_MS = MOBILE_REFRESH_SECONDS * 1000
 const CHALLENGE_SECONDS = 180
 const enc = new TextEncoder()
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -139,8 +141,8 @@ export function createMobileAuth({ store, env = {}, atomicStore, identityProvide
       if (!challenge || challenge.consumed || challenge.expiresAt <= now() || !timingSafeEqual(challenge.state, body.state) || !timingSafeEqual(challenge.codeChallenge, await mobileDigest(body.codeVerifier))) fail('invalid_challenge', '登录验证已失效，请重新登录', 400)
       if (!await cas(key, row, { ...challenge, consumed: true }, challenge.expiresAt)) fail('invalid_challenge', '登录验证已使用，请重新登录', 409)
       const identity = await provider.exchange(body.authCode), user = await knownUser(identity)
-      const sessionId = random(), access = random(), refresh = random(), at = now(), expiresAt = at + MOBILE_REFRESH_SECONDS * 1000
-      const session = { sessionId, userId: user.id, installationId: challenge.installationId, accessHash: await mobileDigest(access), accessExpiresAt: at + MOBILE_ACCESS_SECONDS * 1000, refreshHash: await mobileDigest(refresh), refreshExpiresAt: expiresAt, revoked: false }
+      const sessionId = random(), access = random(), refresh = random(), at = now(), expiresAt = at + MOBILE_REFRESH_MS
+      const session = { sessionId, userId: user.id, installationId: challenge.installationId, accessHash: await mobileDigest(access), accessExpiresAt: at + MOBILE_ACCESS_SECONDS * 1000, refreshHash: await mobileDigest(refresh), refreshExpiresAt: expiresAt, hardExpiresAt: at + MOBILE_SESSION_MAX_MS, revoked: false }
       if (!await cas('mobile:session:' + sessionId, null, session, expiresAt)) fail('mobile_busy', '登录未完成，请重新登录', 503)
       return response(sessionId, access, refresh, user)
     },
@@ -157,13 +159,21 @@ export function createMobileAuth({ store, env = {}, atomicStore, identityProvide
       const key = 'mobile:session:' + parsed.sessionId, row = await atomicStore.get(key), session = row?.value
       if (!session || session.revoked || session.installationId !== body.installationId || !Number.isFinite(session.refreshExpiresAt) || session.refreshExpiresAt <= now() || !timingSafeEqual(session.refreshHash, await mobileDigest(parsed.secret))) invalidRefresh()
       const user = await store.get('user:' + session.userId, null)
+      // A missing profile can be a transient KV read across regions. Keep the
+      // current refresh credential usable until the account can be checked.
+      if (!user) fail('mobile_identity_unavailable', '账号资料暂未同步，请稍后重试', 503)
       if (user?.id !== session.userId || user.disabled || user.blocked) invalidRefresh()
       const access = random(), refresh = random(), at = now()
+      // Existing sessions all used a fixed 30-day expiry, so its original
+      // issue time can be recovered until the first successful rotation.
+      const hardExpiresAt = session.hardExpiresAt ?? session.refreshExpiresAt - MOBILE_REFRESH_MS + MOBILE_SESSION_MAX_MS
+      const refreshExpiresAt = Math.min(at + MOBILE_REFRESH_MS, hardExpiresAt)
+      if (session.refreshExpiresAt <= at || refreshExpiresAt <= at) invalidRefresh()
       // Rotate both credentials in one durable CAS. Exactly one concurrent
       // refresh wins. A lost response requires login; stale tokens never win.
-      const next = { ...session, accessHash: await mobileDigest(access), accessExpiresAt: at + MOBILE_ACCESS_SECONDS * 1000, refreshHash: await mobileDigest(refresh) }
-      if (!await cas(key, row, next, session.refreshExpiresAt)) invalidRefresh()
-      return { ...response(parsed.sessionId, access, refresh, user), refreshExpiresIn: Math.max(0, Math.floor((session.refreshExpiresAt - at) / 1000)) }
+      const next = { ...session, accessHash: await mobileDigest(access), accessExpiresAt: Math.min(at + MOBILE_ACCESS_SECONDS * 1000, refreshExpiresAt), refreshHash: await mobileDigest(refresh), refreshExpiresAt, hardExpiresAt }
+      if (!await cas(key, row, next, refreshExpiresAt)) invalidRefresh()
+      return { ...response(parsed.sessionId, access, refresh, user), expiresIn: Math.floor((next.accessExpiresAt - at) / 1000), refreshExpiresIn: Math.floor((refreshExpiresAt - at) / 1000) }
     },
     async logout(body) {
       requireEnabled()

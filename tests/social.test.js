@@ -24,7 +24,8 @@ async function pending(service, store) {
   return (await service.contact('a', { toUserId: 'b', template: 'forgot', machineId: 'm1' })).thread
 }
 async function ownTask(store, extra = {}) {
-  const task = { id: 'task-a', machineId: 'm1', machineName: '旧设备名称', mode: 'machine', buildingId: 'b1', startAt: '2026-11-01T09:00:00Z', endAt: new Date(Date.now() + 20 * 60000).toISOString(), done: false, ...extra }
+  const now = Date.now()
+  const task = { id: 'task-a', machineId: 'm1', machineName: '旧设备名称', mode: 'machine', buildingId: 'b1', startAt: new Date(now - 10 * 60000).toISOString(), endAt: new Date(now + 20 * 60000).toISOString(), done: false, ...extra }
   await store.put('tasks:a', [task])
   await store.put('occupancy:b1', { m1: { userId: 'a', taskId: task.id, startAt: task.startAt, endAt: task.endAt } })
   return task
