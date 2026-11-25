@@ -1007,12 +1007,12 @@ export function registerAdminRoutes(app, { store, env, authorize }) {
       const dorm = c.req.query('dorm') || ''
       const buildings = (await getSiteConfig(store)).buildings
       if (dorm && dorm !== 'unbound' && !normalizeKnownDormBuilding(dorm,buildings)) return apiErr('bad_param', '住宿楼筛选无效')
-      const [entry, occ, queue, mapping] = await Promise.all([
-        store.get(`machines:${bid}`, null), store.get(`occupancy:${bid}`, {}),
-        store.get(`queue:${bid}`, []), store.get(`mapping:${bid}`, null),
+      const [[entry, calibration], occ, queue, mapping] = await Promise.all([
+        store.get(`machines:${bid}`, null).then(async entry => [entry, entry?.board ? await readCalibrationSettings(store, bid) : null]),
+        store.get(`occupancy:${bid}`, {}), store.get(`queue:${bid}`, []), store.get(`mapping:${bid}`, null),
       ])
       const slotMap = mapping?.mapping || {}
-      const board = entry?.board ? projectCalibratedBoard(entry.board, await readCalibrationSettings(store,bid), { mapping: slotMap }) : null
+      const board = entry?.board ? projectCalibratedBoard(entry.board, calibration, { mapping: slotMap }) : null
       const slotsById = new Map()
       for (const [slot, id] of Object.entries(slotMap)) {
         if (!id) continue

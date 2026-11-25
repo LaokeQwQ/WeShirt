@@ -82,6 +82,34 @@ test('tokens expire and disabled accounts cannot authenticate or refresh', async
   await assert.rejects(f.auth.refresh({ installationId: install, refreshToken: refreshed.refreshToken }), error => error.status === 401)
 })
 
+test('refresh extends an active legacy session and never passes the original 90-day limit', async () => {
+  const start = 1794300000000, day = 86400000
+  let at = start
+  const f = await setup({ now: () => at })
+  let session = await f.session()
+  const key = 'mobile:session:' + session.accessToken.split('.')[1]
+  delete f.atomicStore.records.get(key).value.hardExpiresAt
+  for (const days of [29, 58, 87]) {
+    at = start + days * day
+    session = await f.auth.refresh({ installationId: install, refreshToken: session.refreshToken })
+    assert.equal(session.refreshExpiresIn, Math.min(30, 90 - days) * 86400)
+    assert.equal(await f.auth.verifyAccessToken(session.accessToken), 'u_native')
+  }
+  at = start + 90 * day
+  await assert.rejects(f.auth.refresh({ installationId: install, refreshToken: session.refreshToken }), { code: 'invalid_refresh_token' })
+})
+
+test('a temporarily missing user record does not consume the valid refresh credential', async () => {
+  const f = await setup(), session = await f.session()
+  const user = await f.store.get('user:u_native')
+  const request = { installationId: install, refreshToken: session.refreshToken }
+  await f.store.del('user:u_native')
+  await assert.rejects(f.auth.refresh(request), { status: 503, code: 'mobile_identity_unavailable' })
+  await f.store.put('user:u_native', user)
+  const refreshed = await f.auth.refresh(request)
+  assert.equal(await f.auth.verifyAccessToken(refreshed.accessToken), 'u_native')
+})
+
 test('native installation updates are bound to the login installation and an older logout cannot disable its replacement', async () => {
   const f = await setup(), older = await f.session(), newer = await f.session()
   const app = createApp({ store: f.store, env: { ...env, MOBILE_PUSH_ENABLED: 'true' }, mobile: { atomicStore: f.atomicStore, identityProvider: f.identityProvider, pushTransports: { fcm: async () => ({ ok: true }) } } })

@@ -43,7 +43,7 @@ createApp({ store, env, mobile: { atomicStore: createCloudBasePostgresAtomicStor
 
 同时在钉钉平台登记 `com.laoke.weshirt` 和实际自签发行证书指纹。使用新 `ddopenauth` SDK、`scope=openid` 和统一 OAuth 用户令牌接口，不使用旧 SNS 临时码，不回退复用网页登录凭据。
 
-`GET /api/mobile/config` 公布能力；`POST /api/mobile/auth/challenge`、`exchange`、`refresh`、`logout` 负责挑战与会话。挑战有效 180 秒，访问令牌有效 15 分钟，刷新会话绝对有效期 30 天。并发刷新只有一个成功；响应丢失后重新授权，不能继续重试旧令牌。客户端须原子保存整组新凭据。
+`GET /api/mobile/config` 公布能力；`POST /api/mobile/auth/challenge`、`exchange`、`refresh`、`logout` 负责挑战与会话。挑战有效 180 秒，访问令牌有效 15 分钟，刷新凭据在 30 天内有效。成功续期后重新计算这 30 天，距首次登录最多 90 天。并发刷新只有一个成功；响应丢失后重新授权，不能继续重试旧令牌。客户端须原子保存整组新凭据。
 
 首版只关联已有可信钉钉账号，按已验证的 `unionId` 或企业通讯录映射核实身份，禁止按昵称或手机号合并。网站账号目录仍在 KV，原生单独建立新身份会导致网页和原生首次并发注册时分裂账号；需先让用户通过网站登记，或将两种注册入口一起迁移到统一身份事务。未关联时返回 `409 account_link_required`。
 

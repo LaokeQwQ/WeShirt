@@ -56,7 +56,7 @@ import { createRemoteMobileAtomicStore } from '../packages/core/mobile-store.js'
 import { createMobilePush, mobileNoticeData } from '../packages/core/mobile-push.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { registerPermissionMiddleware, registerPermissionRoutes } from './permissions.js'
-import { registerAuditMiddleware } from './audit-middleware.js'
+import { persistAudit, registerAuditMiddleware } from './audit-middleware.js'
 import { registerRequestSafety } from './request-safety.js'
 import { registerTaskMutationLock, withTaskMutation } from './task-mutation-lock.js'
 import { processFavoriteReminders } from '../packages/core/favorites.js'
@@ -1817,8 +1817,10 @@ export function createApp({ store, env, mobile = {} }) {
       if (Object.hasOwn(body, 'useDisinfectant') && typeof useDisinfectant !== 'boolean') return apiErr('bad_param', '是否使用消毒液须为布尔值')
       if (Object.hasOwn(body, 'selfCleaned') && typeof selfCleaned !== 'boolean') return apiErr('bad_param', '自清洁记录须为布尔值')
       const buildingId = env.BUILDING_ID || 'b1'
-      const entry = await store.get(`machines:${buildingId}`, null)
-      const savedMapping = await store.get(`mapping:${buildingId}`, null)
+      const [entry, savedMapping] = await Promise.all([
+        store.get(`machines:${buildingId}`, null),
+        store.get(`mapping:${buildingId}`, null),
+      ])
       const found = entry?.board?.floors
         ?.flatMap((f) => f.machines)
         ?.find((m) => String(m.id) === String(machineId))
@@ -1873,10 +1875,11 @@ export function createApp({ store, env, mobile = {} }) {
       if (found) machineName = found.name || machineId
 
       // 并发优化：下面几次读互不依赖，一次性并发取，减少串行往返
-      const [user, occ, qList] = await Promise.all([
+      const [user, occ, qList, list] = await Promise.all([
         getUserOrRebuild(store, userId),
         store.get(`occupancy:${buildingId}`, {}),
         store.get(`queue:${buildingId}`, []),
+        store.get(`tasks:${userId}`, []),
       ])
 
       const current = occ && typeof occ === 'object' ? occ[machineId] : null
@@ -1904,7 +1907,6 @@ export function createApp({ store, env, mobile = {} }) {
         done: false,
         notified: false,
       }
-      const list = await store.get(`tasks:${userId}`, [])
       const tasks = retainedTasks(list)
       tasks.push(task)
       await store.put(`tasks:${userId}`, tasks)
@@ -1934,7 +1936,7 @@ export function createApp({ store, env, mobile = {} }) {
         store.del(`urge:${buildingId}:${machineId}`),
       ])
 
-      await audit(store, {
+      await persistAudit(c, audit(store, {
         type: 'task',
         action: '登记洗衣',
         actorId: userId,
@@ -1948,7 +1950,7 @@ export function createApp({ store, env, mobile = {} }) {
           useDisinfectant: task.useDisinfectant,
           selfCleaned: task.selfCleaned,
         },
-      })
+      }))
       return json({
         task: {
           id: task.id,
