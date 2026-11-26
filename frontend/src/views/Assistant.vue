@@ -35,15 +35,18 @@
       </section>
 
       <section class="conversation card" aria-label="与洗衣助手对话">
-        <div class="section-head"><h2>对话</h2><button type="button" class="text-button" :disabled="sending || clearing || !messages.length" @click="clearHistory">清空对话</button></div>
+        <div class="section-head"><h2>对话</h2><button type="button" class="text-button" :disabled="sending || clearing || (!messages.length && !partialTurn)" @click="clearHistory">清空对话</button></div>
         <p class="hint text-dim">回答仅供安排参考；登记、排队与提醒请前往相应页面确认。聊天保留 14 天，最多 256 条；接近128k上下文时自动提取压缩早期对话。</p>
         <p v-if="contextInfo?.compressed" class="hint text-dim" role="status">较早的对话已自动压缩，近期问题保留原文；需要时请补充细节。</p>
         <div ref="messageList" class="messages" aria-live="polite" aria-relevant="additions text" :aria-busy="sending">
-          <div v-if="!messages.length && !sending && !resources.history.loading" class="empty-state"><span aria-hidden="true">◌</span><p>可以问我「现在有空闲烘干机吗？」</p></div>
+          <div v-if="!messages.length && !draftTurn && !partialTurn && !resources.history.loading" class="empty-state"><span aria-hidden="true">◌</span><p>可以问我「现在有空闲烘干机吗？」</p></div>
           <article v-for="(message, index) in messages" :key="message.at + '-' + index" class="message" :class="message.role"><span class="speaker">{{ message.role === 'user' ? '你' : '洗衣助手' }}</span><p>{{ message.content }}</p><button v-if="message.role === 'assistant'" type="button" class="text-button copy-answer" @click="copy(message.content)">复制回答</button></article>
-          <article v-if="sending" class="message assistant pending" role="status"><span class="speaker">洗衣助手</span><p>正在查看并整理建议…</p></article>
+          <template v-if="draftTurn || partialTurn">
+            <article class="message user"><span class="speaker">你</span><p>{{ (draftTurn || partialTurn).input }}</p></article>
+            <article class="message assistant" :class="{ pending: !draftTurn?.text && !partialTurn?.text }"><span class="speaker">洗衣助手<span v-if="partialTurn"> · {{ partialTurn.stopped ? '已停止' : '连接中断' }}，未保存</span><span v-else-if="draftTurn?.text"> · 正在生成</span></span><p>{{ (draftTurn || partialTurn).text || (draftTurn ? '正在查看并整理建议…' : '没有收到完整回答。') }}</p></article>
+          </template>
         </div>
-        <form class="composer" @submit.prevent="send"><label class="sr-only" for="assistant-input">向洗衣助手提问</label><textarea id="assistant-input" v-model="input" rows="3" maxlength="1000" :disabled="!canChat || sending" placeholder="输入问题（最多 1000 字）" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send" /><div><span class="text-dim hint">{{ input.length }}/1000 · Ctrl / ⌘ + Enter 发送</span><van-button type="primary" native-type="submit" size="small" :disabled="!canSend" :loading="sending">发送</van-button></div></form>
+        <form class="composer" @submit.prevent="send"><label class="sr-only" for="assistant-input">向洗衣助手提问</label><textarea id="assistant-input" v-model="input" rows="3" maxlength="1000" :disabled="!canChat || sending" placeholder="输入问题（最多 1000 字）" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send" /><div><span class="text-dim hint">{{ input.length }}/1000 · Ctrl / ⌘ + Enter 发送</span><van-button v-if="sending" native-type="button" size="small" @click="stopAnswer">停止生成</van-button><van-button v-else type="primary" native-type="submit" size="small" :disabled="!canSend">发送</van-button></div></form>
         <p v-if="status?.ready && !status.usage.dailyRemaining" class="hint text-dim">今日额度已用完，明天再来；看板仍可正常查询。</p>
       </section>
 
@@ -63,7 +66,7 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showToast, showConfirmDialog } from 'vant'
-import { api, BASE } from '../api'
+import { api, BASE, streamAssistantChat } from '../api'
 import QRCode from '../components/QRCode.vue'
 import { dormBuildingName } from '../../../packages/core/buildings.js'
 import { useUserStore } from '../stores/user'
@@ -76,13 +79,17 @@ const failedResources = computed(() => resourceLabels.filter(row => resources[ro
 const status = ref(null), messages = ref([]), skills = ref([]), memory = ref(null), memoryNote = ref(''), input = ref(''), error = ref('')
 const loading = ref(false), sending = ref(false), clearing = ref(false), memorySaving = ref(false), busySkill = ref(false), showSkills = ref(false), importTicket = ref(''), share = ref(null), messageList = ref(null)
 const preferences=ref(null),promptSaving=ref(false),contextInfo=ref(null)
+const draftTurn = ref(null), partialTurn = ref(null)
 const activePrompt=computed(()=>preferences.value?.promptProfiles.find(row=>row.id===preferences.value.activePromptId))
 const draft = reactive({ title: '', description: '', prompt: '' })
 let alive = true
+let activeRequest = null
 const sessionIdentity = {id:userStore.user?.id,token:userStore.token}
 function currentSession(){return alive && userStore.ready && userStore.isLoggedIn && sessionIdentity.id===userStore.user?.id && sessionIdentity.token===userStore.token}
 watch(() => [userStore.ready,userStore.user?.id,userStore.token], () => {
   if (currentSession()) return
+  activeRequest?.abort(); activeRequest = null
+  sending.value = false; draftTurn.value = null; partialTurn.value = null
   status.value=null;messages.value=[];skills.value=[];memory.value=null;memoryNote.value='';preferences.value=null;input.value='';share.value=null;contextInfo.value=null;error.value=''
   Object.assign(draft,{title:'',description:'',prompt:''})
 }, {flush:'sync'})
@@ -92,7 +99,12 @@ const canSend = computed(() => canChat.value && !sending.value && !clearing.valu
 const habitText = computed(() => memory.value?.habits?.count ? `常用时段（北京时间）：${memory.value.habits.commonHours.map((hour) => String(hour).padStart(2, '0') + ':00').join('、')}，来自你近 14 天的 ${memory.value.habits.count} 次登记。` : '登记记录积累后，会显示你的常用洗衣时段。')
 const mcpUrl = computed(() => new URL((BASE || '') + '/api/mcp', window.location.origin).href)
 function showError(e, fallback) { if (currentSession()) error.value = e?.message || fallback }
-async function scrollMessages() { await nextTick(); const el = messageList.value; if (el) el.scrollTop = el.scrollHeight }
+async function scrollMessages({ follow = false } = {}) {
+  const list = messageList.value
+  if (follow && list && list.scrollHeight - list.scrollTop - list.clientHeight > 80) return
+  await nextTick()
+  if (messageList.value) messageList.value.scrollTop = messageList.value.scrollHeight
+}
 function applyResource(key, value) {
   if(value !== null && !currentSession()) return
   const data = value == null ? null : JSON.parse(JSON.stringify(value))
@@ -126,26 +138,51 @@ function addPrompt(){const row={id:'personal-'+crypto.randomUUID(),name:'我的�
 function removePrompt(){preferences.value.promptProfiles=preferences.value.promptProfiles.filter(row=>row.id!==preferences.value.activePromptId);preferences.value.activePromptId=preferences.value.promptProfiles[0].id}
 async function resetPreferences(){if(promptSaving.value||sending.value||!await confirm('恢复平台默认提示词？','将删除当前账号的自定义提示词，可重新编辑。'))return;promptSaving.value=true;try{const data=await api('/api/assistant/preferences',{method:'PATCH',retry:false,body:{reset:true}});if(currentSession())publish('preferences',data)}catch(e){showError(e,'恢复失败')}finally{if(currentSession())promptSaving.value=false}}
 async function send() {
-  if(!currentSession())return
-  if (!canSend.value) return
+  if (!currentSession() || !canSend.value) return
   const text = input.value.trim()
+  const controller = new AbortController()
+  activeRequest = controller
+  const ownsRequest = () => currentSession() && activeRequest === controller
   sending.value = true; error.value = ''
-  const oldMessages = messages.value
-  messages.value = [...oldMessages, { role: 'user', content: text, at: new Date().toISOString() }]
+  partialTurn.value = null
+  draftTurn.value = { input: text, text: '' }
   scrollMessages()
   try {
-    const data = await api('/api/assistant/chat', { method: 'POST', body: { input: text }, retry: false, timeout: 20000 })
-    if (currentSession()) { publish('history',{messages:data.messages}); contextInfo.value=data.context; input.value = ''; publish('status',{ ...status.value, usage: data.usage }); scrollMessages() }
-  } catch (e) {
-    if (currentSession()) { messages.value = oldMessages; showError(e, '提问失败，内容已保留'); api('/api/assistant/status', { retry: false, silent: true }).then((data) => { if (currentSession()) publish('status',data) }).catch(() => {}) }
-  } finally { if (currentSession()) sending.value = false }
+    const data = await streamAssistantChat({ input: text }, {
+      signal: controller.signal,
+      onDelta: delta => {
+        if (!ownsRequest()) return
+        draftTurn.value.text += delta
+        scrollMessages({ follow: true })
+      },
+      onReset: () => { if (ownsRequest()) draftTurn.value.text = '' },
+    })
+    if (!ownsRequest()) return
+    publish('history', { messages: data.messages })
+    contextInfo.value = data.context
+    input.value = ''
+    publish('status', { ...status.value, usage: data.usage })
+    scrollMessages({ follow: true })
+  } catch (problem) {
+    if (!ownsRequest()) return
+    const stopped = controller.signal.aborted
+    if (draftTurn.value.text || stopped) {
+      partialTurn.value = { ...draftTurn.value, stopped }
+      scrollMessages({ follow: true })
+    }
+    if (!stopped) showError(problem, '提问失败，内容已保留')
+    void loadResource('status', true)
+  } finally {
+    if (ownsRequest()) { activeRequest = null; draftTurn.value = null; sending.value = false }
+  }
 }
+function stopAnswer() { activeRequest?.abort() }
 async function confirm(title, message) { try { await showConfirmDialog({ title, message }); return currentSession() } catch { return false } }
 async function clearHistory() {
   if(!currentSession())return
   if (sending.value || clearing.value || !await confirm('清空对话？', '会删除当前账号保存的聊天记录，个人记忆单独管理。')) return
   clearing.value = true; error.value = ''
-  try { await api('/api/assistant/history', { method: 'DELETE', retry: false }); if (currentSession()) publish('history',{messages:[]}) }
+  try { await api('/api/assistant/history', { method: 'DELETE', retry: false }); if (currentSession()) { partialTurn.value = null; publish('history',{messages:[]}) } }
   catch (e) { showError(e, '清空失败') }
   finally { if (currentSession()) clearing.value = false }
 }
@@ -211,7 +248,7 @@ async function copy(text) {
   catch { showError(null, '当前浏览器无法自动复制，请长按文字复制') }
 }
 onMounted(() => { if (typeof route.query.skill === 'string' && route.query.skill.length <= 10000) { importTicket.value = route.query.skill; showSkills.value = true } for(const key of ['status','history','skills','memory','preferences'])loadResource(key) })
-onUnmounted(() => { alive = false })
+onUnmounted(() => { alive = false; activeRequest?.abort(); activeRequest = null })
 </script>
 
 <style scoped>

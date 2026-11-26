@@ -57,7 +57,7 @@ import { createMobilePush, mobileNoticeData } from '../packages/core/mobile-push
 import { getUserIdentity } from '../packages/core/identity.js'
 import { registerPermissionMiddleware, registerPermissionRoutes } from './permissions.js'
 import { persistAudit, registerAuditMiddleware } from './audit-middleware.js'
-import { registerRequestSafety } from './request-safety.js'
+import { recordRequestFailure, registerRequestSafety } from './request-safety.js'
 import { registerTaskMutationLock, withTaskMutation } from './task-mutation-lock.js'
 import { processFavoriteReminders } from '../packages/core/favorites.js'
 import { processQueueReminders } from '../packages/core/queue-reminders.js'
@@ -1042,7 +1042,10 @@ export function createApp({ store, env, mobile = {} }) {
   app.use('/api/*',async(c,next)=>{
     await next()
     const vary=new Set((c.res.headers.get('Vary')||'').split(',').map(value=>value.trim()).filter(Boolean));vary.add('Authorization');vary.add('X-Admin-Token');c.header('Vary',[...vary].join(', '))
-    if(c.req.header('authorization')||c.req.header('x-admin-token'))c.header('Cache-Control','private, no-store')
+    if(c.req.header('authorization')||c.req.header('x-admin-token')){
+      const eventStream=c.res.headers.get('Content-Type')?.startsWith('text/event-stream')
+      c.header('Cache-Control',eventStream?'private, no-store, no-transform':'private, no-store')
+    }
   })
   registerAuditMiddleware(app,{store,env,authenticate:authenticateRequest,checkSuperAdmin:c=>checkSuperAdmin(c,env)})
   app.use('/api/*', async(c,next)=>{
@@ -1663,11 +1666,15 @@ export function createApp({ store, env, mobile = {} }) {
           }
         }
       }
-      const occupancy=await store.get(`occupancy:${buildingId}`,{})
-      const ownerIds=[...new Set(Object.values(occupancy||{}).map(o=>o?.userId).filter(id=>typeof id==='string'))]
+      const savedOccupancy=await store.get(`occupancy:${buildingId}`,{})
+      const occupancy=Object.fromEntries(Object.entries(savedOccupancy||{}).filter(([,entry])=>typeof entry?.userId==='string'&&entry.userId))
+      const ownerIds=[...new Set(Object.values(occupancy).map(entry=>entry.userId))]
       const tasksByUser=new Map(await Promise.all(ownerIds.map(async id=>[id,await store.get('tasks:'+id,[])])))
       board=applyRegisteredAvailability(board,{occupancy,tasksByUser})
-      const tasksByMachine = new Map(Object.entries(occupancy || {}).map(([machineId, entry]) => [String(machineId), (tasksByUser.get(entry.userId) || []).find(task => ownsTaskOccupancy(entry, task, entry.userId))]))
+      const tasksByMachine = new Map(Object.entries(occupancy).map(([machineId, entry]) => {
+        const tasks=tasksByUser.get(entry.userId)
+        return [machineId, Array.isArray(tasks) ? tasks.find(task => ownsTaskOccupancy(entry, task, entry.userId)) : undefined]
+      }))
       board=projectCalibratedBoard(board, calibration, { tasksByMachine })
       board.floors=(board.floors||[]).map(floor=>({...floor,machines:(floor.machines||[]).filter(machine=>!env.SITE_BUILDINGS.some(building=>building.enabled===false&&building.code===resolveMachineDorm(machine,slotMap,env.SITE_BUILDINGS)))})).filter(floor=>floor.machines.length)
       if (dorm) {
@@ -1695,6 +1702,7 @@ export function createApp({ store, env, mobile = {} }) {
         { 'Cache-Control': 'no-store' }
       )
     } catch (e) {
+      recordRequestFailure(c, e)
       if(e?.code==='machine_store_unavailable')return apiErr(e.code,'机器数据暂不可用，请稍后重试',503)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }

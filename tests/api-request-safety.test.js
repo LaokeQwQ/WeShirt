@@ -2,15 +2,81 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createSingleFlight } from '../frontend/src/loginFlow.js'
+import { readAssistantEvents } from '../frontend/src/assistantStream.js'
 
 async function frontend(fetch, track = () => {}) {
   const source = await readFile(new URL('../frontend/src/api.js', import.meta.url), 'utf8')
   const map = new Map([['ws_token', 'initial-user-token']])
   const localStorage = { getItem: (key) => map.get(key) || null, setItem: (key, value) => map.set(key, String(value)), removeItem: (key) => map.delete(key) }
   const body = source.replace(/^import[^\n]*\n/gm, '').replace(/import\.meta\.env\.VITE_API_BASE/g, "''").replace(/import\.meta\.env\.DEV/g, 'false').replace(/^export\s+(?=(?:async\s+)?function|const)/gm, '').replace(/^export\s*\{[^}]*\}\s*;?/gm, '')
-  return new Function('fetch', 'localStorage', 'createSingleFlight', 'track', 'getTelemetryContext', body + '\nreturn { api, claimCode, startDingLogin, setToken, onNeedLogin, NEED_LOGIN }')(fetch, localStorage, createSingleFlight, track, () => ({}))
+  return new Function('fetch', 'localStorage', 'createSingleFlight', 'readAssistantEvents', 'track', 'getTelemetryContext', body + '\nreturn { api, claimCode, startDingLogin, setToken, onNeedLogin, streamAssistantChat, NEED_LOGIN }')(fetch, localStorage, createSingleFlight, readAssistantEvents, track, () => ({}))
 }
 const reply = (data, status = 200, eventId = 'evt_1234567890abcdef12345678') => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'X-Event-ID': eventId } })
+
+const textEncoder = new TextEncoder()
+const eventId = 'evt_1234567890abcdef12345678'
+const sse = (event, data) => `event: ${event}\r\ndata: ${JSON.stringify(data)}\r\n\r\n`
+const eventReply = body => new Response(body, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'X-Event-ID': eventId } })
+const completedTurn = { reply: '最终回答', messages: [{ role: 'assistant', content: '最终回答', at: '2026-11-26T00:00:00.000Z' }], usage: { dailyRemaining: 3 }, context: {} }
+
+test('助手只发一次已鉴权 POST，收到分片后立即更新，终态以 done 为准', async () => {
+  const controller = new AbortController(), chunks = []
+  let writer, fetches = 0, acceptDelta
+  const receivedFirst = new Promise(resolve => { acceptDelta = resolve })
+  const upstream = new ReadableStream({ start(output) { writer = output } })
+  const client = await frontend(async (path, options) => {
+    fetches++
+    assert.equal(path, '/api/assistant/chat/stream')
+    assert.equal(options.method, 'POST')
+    assert.equal(options.redirect, 'error')
+    assert.equal(options.headers.Authorization, 'Bearer initial-user-token')
+    assert.equal(options.headers['Idempotency-Key'], undefined)
+    return eventReply(upstream)
+  })
+  const result = client.streamAssistantChat({ input: '洗衣建议' }, { signal: controller.signal,
+    onDelta: text => { chunks.push(text); acceptDelta() }, onReset: () => chunks.push('RESET') })
+  const first = textEncoder.encode(sse('delta', { text: '草稿' }))
+  for (const byte of first) writer.enqueue(Uint8Array.of(byte))
+  await receivedFirst
+  assert.deepEqual(chunks, ['草稿'])
+  writer.enqueue(textEncoder.encode(sse('reset', {}) + sse('delta', { text: '最终' }) + sse('done', completedTurn)))
+  writer.close()
+  assert.deepEqual(await result, completedTurn)
+  assert.deepEqual(chunks, ['草稿', 'RESET', '最终'])
+  assert.equal(fetches, 1)
+})
+
+test('流式请求遇到登录失效不会自动重发，截断不能被当成完成', async () => {
+  const controller = new AbortController(), deltas = []
+  const options = { signal: controller.signal, onDelta: text => deltas.push(text), onReset: () => {} }
+  let requests = 0
+  const denied = await frontend(async () => { requests++; return reply({ error: { code: 'unauthorized', message: '请先登录' } }, 401) })
+  await assert.rejects(() => denied.streamAssistantChat({ input: 'question' }, options), { status: 401, eventId })
+  assert.equal(requests, 1)
+
+  const truncated = await frontend(async () => eventReply(sse('delta', { text: '半截' })))
+  await assert.rejects(() => truncated.streamAssistantChat({ input: 'question' }, options), { code: 'stream_interrupted', eventId })
+  assert.deepEqual(deltas, ['半截'])
+
+  const failure = await frontend(async () => eventReply(sse('error', { error: { status: 429, code: 'rate_limit', message: '请稍后重试' } })))
+  await assert.rejects(() => failure.streamAssistantChat({ input: 'question' }, options), { code: 'rate_limit', status: 429, eventId })
+})
+
+test('停止流式回答会取消连接，即使网络层未主动取消读流', async () => {
+  const controller = new AbortController()
+  let sentSignal, cancelled = false
+  const client = await frontend(async (_path, options) => {
+    sentSignal = options.signal
+    return eventReply(new ReadableStream({
+      start(output) { output.enqueue(textEncoder.encode(sse('delta', { text: '半截' }))) },
+      cancel() { cancelled = true },
+    }))
+  })
+  await assert.rejects(() => client.streamAssistantChat({ input: 'question' }, { signal: controller.signal,
+    onDelta: () => controller.abort(), onReset: () => {} }), { name: 'AbortError' })
+  assert.equal(sentSignal.aborted, true)
+  assert.equal(cancelled, true)
+})
 
 test('dynamic API reads bypass browser response storage even when the old endpoint advertised stale caching', async () => {
   const client = await frontend(async (_url, options) => { assert.equal(options.cache, 'no-store'); return reply({ board: { floors: [] } }) })

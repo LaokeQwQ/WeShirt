@@ -139,6 +139,10 @@ test('an unreadable personal rule produces an error on the real protected API in
   assert.ok(response.headers.get('X-Event-ID'))
   assert.equal(body.items, undefined)
   assert.equal(body.error.status, 500)
+  const rows = (await store.list('auditlog:')).flatMap(row => row.value)
+  const diagnostic = rows.find(row => row.type === 'error' && row.detail?.eventId === body.error.eventId)
+  assert.equal(diagnostic?.detail?.failureCategory, 'edge_kv_read_failed')
+  assert.ok(!JSON.stringify(diagnostic).includes('binding read failed'))
 })
 
 test('ordinary values expire after a short cache window and clock rollback cannot extend their lifetime', async t => {

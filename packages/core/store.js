@@ -102,7 +102,9 @@ export function createEdgeKVStore(kv) {
     }
     const before = revision
     // Only absence uses the fallback. Provider failures must propagate, never authorize.
-    const raw = await kv.get(key)
+    let raw
+    try { raw = await kv.get(key) }
+    catch (cause) { throw Object.assign(new Error('binding read failed', { cause }), { code: 'edge_kv_read_failed' }) }
     if (raw === null || raw === undefined) { forget(key); return { found: false } }
     const value = storedValue(key, raw)
     if (before === revision) remember(key, raw)

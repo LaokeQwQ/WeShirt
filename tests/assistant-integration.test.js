@@ -54,6 +54,30 @@ test('integrated AI config is unavailable to normal user; admins see key presenc
   assert.equal((await mcp.json()).error.code, -32602)
 })
 
+test('integrated streaming route preserves privacy, no-transform and its terminal result', async (t) => {
+  const store = createMemoryStore()
+  await store.put('user:u_a', { id: 'u_a', dormBuilding: 'guiyuan' })
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    assert.equal(JSON.parse(options.body).stream, true)
+    return new Response('data: {"type":"response.output_text.delta","delta":"可以洗衣"}\n\n' +
+      'data: {"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"可以洗衣"}]}]}}\n\n',
+    { headers: { 'Content-Type': 'text/event-stream' } })
+  })
+  const app = createApp({ store, env })
+  const token = await issueToken('u_a', secret)
+  const response = await app.request('/api/assistant/chat/stream', { method: 'POST',
+    headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'idempotency-key': 'fixture-streaming-key' },
+    body: JSON.stringify({ input: '洗衣建议' }) })
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('content-type'), /^text\/event-stream/)
+  assert.equal(response.headers.get('cache-control'), 'private, no-store, no-transform')
+  assert.match(response.headers.get('x-event-id'), /^evt_/)
+  const text = await response.text()
+  assert.match(text, /event: delta/)
+  assert.match(text, /event: done/)
+  assert.doesNotMatch(text, /event: error|test-only-ai-key/)
+})
+
 test('DingTalk account admin reads AI configuration without bootstrap token; model discovery stays super-only',async()=>{
   const store=createMemoryStore()
   for(const id of ['chief','manager'])await store.put('user:'+id,{id,nick:id,dormBuilding:'guiyuan'})

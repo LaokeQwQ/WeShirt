@@ -3,11 +3,17 @@ import { issueTicket, verifyTicket } from '../packages/core/auth.js'
 import { normalizeDormBuilding, dormBuildingName } from '../packages/core/buildings.js'
 import { ASSISTANT_LIMITS, AssistantError, BUILTIN_SKILLS, MACHINE_TOOL, assistantConfig, publicAssistantConfig, patchAssistantConfig, validateSkill, beijingDay, pruneHistory, memoryHabits, machineStatus, callAssistant, readBoundedJson, plainObject, discoverAssistantModels, normalizePromptProfiles } from '../packages/core/assistant.js'
 import { mobileDigest } from '../packages/core/mobile-auth.js'
+import { logEvent } from '../packages/core/auditlog.js'
+
+const STREAM_TIMEOUT_MS = 45000
+const STREAM_LEASE_MS = 90000
 
 const runtimes = new WeakMap()
 function runtime(store) { if (!runtimes.has(store)) runtimes.set(store, new Set()); return runtimes.get(store) }
 const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers } })
-const fail = (error) => json({ error: { code: error instanceof AssistantError ? error.code : 'unavailable', message: error instanceof AssistantError ? error.message : '助手服务暂时不可用，请稍后再试' } }, error instanceof AssistantError ? error.status : 503)
+const publicError = error => error instanceof AssistantError ? { code: error.code, message: error.message, status: error.status }
+  : { code: 'unavailable', message: '助手服务暂时不可用，请稍后再试', status: 503 }
+const fail = error => { const { status, ...body } = publicError(error); return json({ error: body }, status) }
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key)
 const configKey = 'assistant:config'
 const memoryKey = (id) => `assistant:memory:${id}`
@@ -39,6 +45,50 @@ function usageFor(value, config, now = Date.now()) {
 }
 function visibleUsage(value) { const { day, count, dailyLimit, minuteLimit, dailyRemaining, minuteRemaining } = value; return { day, used: count, dailyLimit, minuteLimit, dailyRemaining, minuteRemaining } }
 const rpcError = (id, code, message, status = 200) => json({ jsonrpc: '2.0', id, error: { code, message } }, status)
+
+function chatStream(c, store, run) {
+  const controller = new AbortController()
+  const { readable, writable } = new TransformStream()
+  const writer = writable.getWriter()
+  const requestSignal = c.req.raw.signal
+  const stop = () => {
+    if (controller.signal.aborted) return
+    controller.abort()
+    void writer.abort().catch(() => {})
+  }
+  if (requestSignal?.aborted) stop()
+  else requestSignal?.addEventListener?.('abort', stop, { once: true })
+  void writer.closed?.catch(stop)
+  const eventId = c.get('eventId') || 'evt_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24)
+  const encode = new TextEncoder()
+  const write = text => writer.write(encode.encode(text)).catch(stop)
+  const send = (event, data) => write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  const heartbeat = setInterval(() => {
+    if (!controller.signal.aborted && writer.desiredSize > 0) void write(': keep-alive\n\n')
+  }, 10000)
+  const expiry = setTimeout(stop, 65000)
+  const task = (async () => {
+    try {
+      await write(': connected\n\n')
+      if (controller.signal.aborted) return
+      const result = await run({ signal: controller.signal, onDelta: text => send('delta', { text }), onReset: () => send('reset', {}) })
+      if (!controller.signal.aborted) await send('done', result)
+    } catch (problem) {
+      if (!controller.signal.aborted) {
+        const error = publicError(problem)
+        await send('error', { error: { ...error, eventId } })
+        await logEvent(store, { type: 'error', level: error.status >= 500 ? 'error' : 'warn', action: 'AI 流式回答失败', target: '/api/assistant/chat/stream', detail: { eventId, status: error.status, code: error.code } })
+      }
+    } finally {
+      clearInterval(heartbeat)
+      clearTimeout(expiry)
+      requestSignal?.removeEventListener?.('abort', stop)
+      await writer.close().catch(() => {})
+    }
+  })()
+  try { c.executionCtx?.waitUntil?.(task) } catch { /* other runtimes keep the response open */ }
+  return new Response(readable, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'private, no-store, no-transform', 'X-Accel-Buffering': 'no', 'X-Event-ID': eventId } })
+}
 
 // Run from the existing maintenance cron so inactive accounts also lose expired chat data.
 export async function pruneAssistantStorage(store, now = Date.now()) {
@@ -100,7 +150,7 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     } catch(error) { if(error instanceof AssistantError)throw error; throw new AssistantError('quota_unavailable','调用额度暂时无法核验，请稍后重试',503) }
     throw new AssistantError('busy','调用额度正在更新，请稍后重试',429)
   }
-  async function withChatLease(id,action) {
+  async function withChatLease(id,action,leaseMs = 30000) {
     if(!atomicStore)return action()
     const key='mobile:limit:assistant-chat:'+await mobileDigest(id),owner=crypto.randomUUID()
     let claimed=false
@@ -108,7 +158,8 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
       for(let attempt=0;attempt<8;attempt++) {
         const row=await atomicStore.get(key)
         if(row?.value?.until>Date.now())throw new AssistantError('busy','已有问题正在处理，请稍后再试',429)
-        if(await atomicStore.compareAndSet(key,row?.version||null,{owner,until:Date.now()+30000},{expiresAt:Date.now()+30000})){claimed=true;break}
+        const until = Date.now() + leaseMs
+        if(await atomicStore.compareAndSet(key,row?.version||null,{owner,until},{expiresAt:until})){claimed=true;break}
       }
       if(!claimed)throw new AssistantError('busy','已有问题正在处理，请稍后再试',429)
     }catch(error){if(error instanceof AssistantError)throw error;throw new AssistantError('quota_unavailable','暂时无法确认处理状态，请稍后重试',503)}
@@ -254,7 +305,7 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     if (data?.type !== 'assistant_skill') throw new AssistantError('bad_ticket', '分享码无效或已过期')
     return saveSkill(user, data.skill)
   }))
-  app.post('/api/assistant/chat', wrap(async (c) => {
+  const chat = (streaming) => wrap(async (c) => {
     const user = await userFor(c)
     const body = await readBody(c)
     if (typeof body.input !== 'string' || !body.input.trim() || body.input.length > 1000 || body.input.includes('\0') || Object.keys(body).some((key) => !['input', 'skillId'].includes(key)) || (body.skillId != null && (typeof body.skillId !== 'string' || body.skillId.length > 100))) throw new AssistantError('bad_param', '请输入 1 至 1000 字的问题')
@@ -263,7 +314,9 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     if (!normalizeDormBuilding(user.dormBuilding,(await getSiteConfig(store)).buildings)) throw new AssistantError('building_required', '请先在设置中绑定住宿楼', 409)
     const skill = body.skillId ? [...BUILTIN_SKILLS, ...await ownSkills(user.id)].find((s) => s.id === body.skillId) : null
     if (body.skillId && !skill) throw new AssistantError('not_found', '所选 Skill 不存在', 404)
-    return locked(store, `chat:${user.id}`, () => withChatLease(user.id, async () => {
+    const generate = (streamOptions = {}) => locked(store, `chat:${user.id}`, () => withChatLease(user.id, async () => {
+      const signal = streamOptions.signal
+      if (signal?.aborted) throw new AssistantError('cancelled', '已停止生成', 499)
       let usage = await readUsage(user.id,config)
       if (!usage.dailyRemaining || !usage.minuteRemaining) throw new AssistantError('rate_limit', !usage.dailyRemaining ? '今日 AI 额度已用完，明天再来' : '本分钟模型请求已达上限，请稍后重试', 429)
       const memory = await readMemory(user)
@@ -272,13 +325,18 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
       const prompt = preferences.promptProfiles.find(row=>row.id===preferences.activePromptId)?.text
       let first = true, context = null
       const reply = await callAssistant({ config, input: body.input.trim(), history, skill, skills:[...BUILTIN_SKILLS,...await ownSkills(user.id)], prompt, memory: memory.enabled ? { note: memory.note, habits: memory.habits } : null, getStatus: (kind) => statusFor(user, kind), fetchImpl, resolveHost: env.ASSISTANT_RESOLVE_HOST,
-        beforeRequest:async()=>{usage=await reserveRequest(user.id,config,first);first=false},onContext:value=>{context=value} })
+        beforeRequest:async()=>{usage=await reserveRequest(user.id,config,first);first=false},onContext:value=>{context=value},
+        ...streamOptions, ...(streaming ? { timeoutMs: STREAM_TIMEOUT_MS } : {}) })
+      if (signal?.aborted) throw new AssistantError('cancelled', '已停止生成', 499)
       const at = new Date().toISOString()
       const messages = pruneHistory([...history, { role: 'user', content: body.input.trim(), at }, { role: 'assistant', content: reply, at }])
       await store.put(historyKey(user.id), messages)
-      return json({ reply, messages, context, usage: visibleUsage(usage) })
-    }))
-  }))
+      return { reply, messages, context, usage: visibleUsage(usage) }
+    }, streaming ? STREAM_LEASE_MS : undefined))
+    return streaming ? chatStream(c, store, generate) : json(await generate())
+  })
+  app.post('/api/assistant/chat', chat(false))
+  app.post('/api/assistant/chat/stream', chat(true))
 
   app.post('/api/mcp', async (c) => {
     let id = null
