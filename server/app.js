@@ -1768,33 +1768,36 @@ export function createApp({ store, env, mobile = {} }) {
       const userId = await bearerUser(c, env)
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
       const id = c.req.param('id')
-      const list = await store.get(`tasks:${userId}`, [])
-      const arr = Array.isArray(list) ? list : []
-      const task = arr.find((t) => t.id === id)
-      if (!task) return apiErr('not_found', '任务不存在或已删除', 404)
+      const taskKey = `tasks:${userId}`
+      const list = await store.get(taskKey, [])
+      const records = Array.isArray(list) ? list : []
+      const existing = records.find((record) => record?.id === id)
+      if (!existing) return apiErr('not_found', '任务不存在或已删除', 404)
 
-      task.done = true
-      task.takenAt = nowISO()
-      await store.put(`tasks:${userId}`, arr)
+      const changed = !existing.done || !existing.takenAt
+      const task = changed ? { ...existing, done: true, takenAt: existing.takenAt || nowISO() } : existing
+      if (changed) await store.put(taskKey, records.map((record) => record === existing ? task : record))
 
-      // 清占用：只清「本来就是我占的」那台，别误删别人后来登记的记录
-      const buildingId = env.BUILDING_ID || 'b1'
+      // A retry can release the original occupancy after a partial write.
+      let released = false
       if (task.machineId) {
-        const occ = await store.get(`occupancy:${buildingId}`, {})
-        const occMap = occ && typeof occ === 'object' ? occ : {}
-        if (ownsTaskOccupancy(occMap[task.machineId], task, userId)) {
-          delete occMap[task.machineId]
-          await store.put(`occupancy:${buildingId}`, occMap)
+        const occupancyKey = `occupancy:${env.BUILDING_ID || 'b1'}`
+        const occupancy = await store.get(occupancyKey, {})
+        if (ownsTaskOccupancy(occupancy?.[task.machineId], task, userId)) {
+          const next = { ...occupancy }
+          delete next[task.machineId]
+          await store.put(occupancyKey, next)
+          released = true
         }
       }
 
-      await audit(store, {
+      if (changed || released) await persistAudit(c, audit(store, {
         type: 'task',
         action: '确认已取衣',
         actorId: userId,
         target: task.machineName || task.machineId,
         detail: { taskId: task.id, endAt: task.endAt },
-      })
+      }))
       return json({ ok: true, task })
     } catch (e) {
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)

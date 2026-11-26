@@ -83,6 +83,44 @@ test('取旧任务与新增登记并发时，旧take不能清掉新任务占用�
   assert.equal((await store.get('queue:b1'))[0].userId, 'b')
 })
 
+test('取衣重试保留首次确认时间并修复未清除的占用', async (t) => {
+  const { register, store, call } = await fixture(t)
+  const saved = await register('one')
+  assert.equal(saved.status, 200)
+  const id = saved.data.task.id
+  const path = `/api/tasks/${id}/take`
+  const key = 'retry-same-pickup-key'
+  const put = store.put
+  let failOccupancy = true
+  store.put = async (key, value) => {
+    if (key === 'occupancy:b1' && failOccupancy) {
+      failOccupancy = false
+      throw new Error('temporary occupancy write failure')
+    }
+    return put(key, value)
+  }
+
+  const failed = await call(path, { key })
+  assert.equal(failed.status, 500)
+  assert.ok(failed.data.error.eventId)
+  const [finished] = await store.get('tasks:a')
+  assert.equal(finished.done, true)
+  assert.ok(finished.takenAt)
+  assert.equal((await store.get('occupancy:b1')).one.taskId, id)
+
+  const retried = await call(path, { key })
+  assert.equal(retried.status, 200)
+  assert.equal(retried.data.task.takenAt, finished.takenAt)
+  assert.deepEqual(await store.get('occupancy:b1'), {})
+
+  const next = await register('one')
+  assert.equal(next.status, 200)
+  const repeated = await call(path, { key: 'another-pickup-key' })
+  assert.equal(repeated.status, 200)
+  assert.equal(repeated.data.task.takenAt, finished.takenAt)
+  assert.equal((await store.get('occupancy:b1')).one.taskId, next.data.task.id)
+})
+
 test('occupancy读到旧过期快照后，新登记不能被清理逻辑覆盖删除', async (t) => {
   const { store, memory, call, register } = await fixture(t)
   await store.put('occupancy:b1', { one: { userId: 'a', taskId: 'expired', startAt: new Date(Date.now() - 3 * 86400000).toISOString(), endAt: new Date(Date.now() - 2 * 86400000).toISOString() } })

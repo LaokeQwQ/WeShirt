@@ -78,7 +78,10 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
       // Creation returns a credential once: never persist or replay that reply.
       // Temporary sessions also cannot replay a cached, more privileged Bearer result.
       const accessCodeRoute = /^\/api\/admin\/(?:access-codes|login)(?:\/|$)/.test(c.req.path)
-      const eligible = writes.has(c.req.method) && key && !accessCodeRoute && !c.get('temporaryAdminAccess') && !excluded.test(c.req.path) && (c.req.header('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json'
+      // Taking clothes is idempotent under the task lock. Retrying must run the
+      // handler again if the first attempt saved the task but not the occupancy.
+      const taskPickup = c.req.method === 'POST' && requestRoute(c) === '/api/tasks/:id/take'
+      const eligible = writes.has(c.req.method) && key && !accessCodeRoute && !taskPickup && !c.get('temporaryAdminAccess') && !excluded.test(c.req.path) && (c.req.header('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json'
       if (!eligible) { await next(); return }
       if (!/^[A-Za-z0-9_.:-]{8,128}$/.test(key)) { c.res = json({ error: { code: 'bad_idempotency_key', message: '请求标识无效，请重新提交' } }, 400); return }
       const actor = await authenticate?.(c)
