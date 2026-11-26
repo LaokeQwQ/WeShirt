@@ -136,3 +136,7 @@ FCM 明确返回 `UNREGISTERED` 时会原子删除该安装令牌并移除用户
 单元测试使用本地产生的 RSA 测试密钥、模拟发送端响应和测试原子存储，验证 JWT 签名、U-Push 字节校验、跨工作节点防重、失败重试、失效令牌清理和频道权限撤回。本轮没有向真实设备或群聊发送测试消息。提供凭据后还需验证 FCM 与基础 U-Push 测试设备的前后台接收、通知点击、关闭提醒和卸载重装行为。
 
 参考：[FCM HTTP v1](https://firebase.google.com/docs/cloud-messaging/send/v1-api)、[Google 服务账号 OAuth](https://developers.google.com/identity/protocols/oauth2/service-account)、[友盟服务端消息格式](https://devs.umeng.com/docs/67966/detail/68343)、[友盟签名示例](https://devs.umeng.com/docs/67966/detail/149296)。
+
+## 安卓应用更新
+
+Pages 构建完成后，将已验签的发行 APK 和 `latest.json` 放入 `dist/updates/android/`。后续网站部署也要沿用已发布的更新资源。APK 使用包含构建编号的文件名，同名文件只能对应同一份安装包。更新清单包含 `versionCode`、`versionName`、`apk`（同源路径）、`size`（字节数）和 `sha256`。签名文件和发行密钥保存在部署环境。
