@@ -73,7 +73,8 @@ export function createMobilePushTransports(env = {}, { fetcher = fetch, now = Da
   if (fcm) transports.fcm = async (token, data) => {
     try {
       const accessToken = await oauthToken()
-      const result = await jsonFetch(fetcher, `https://fcm.googleapis.com/v1/projects/${fcm.project_id}/messages:send`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + accessToken }, body: JSON.stringify({ message: { token, data, android: { priority: 'HIGH', ttl: '3600s', collapse_key: data.eventId, restricted_package_name: 'com.laoke.weshirt' } } }) })
+      const registration = data.kind === 'TASK_REGISTERED'
+      const result = await jsonFetch(fetcher, `https://fcm.googleapis.com/v1/projects/${fcm.project_id}/messages:send`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + accessToken }, body: JSON.stringify({ message: { token, data, android: { priority: registration ? 'NORMAL' : 'HIGH', ttl: registration ? '600s' : '3600s', collapse_key: registration ? 'laundry_widget_registered' : data.eventId, restricted_package_name: 'com.laoke.weshirt' } } }) })
       const code = (result.body?.error?.details || []).find(value => value['@type'] === 'type.googleapis.com/google.firebase.fcm.v1.FcmError')?.errorCode
       if (result.status === 401) oauth = null
       return { ok: result.status === 200 && typeof result.body?.name === 'string', gone: code === 'UNREGISTERED', code: code === 'UNREGISTERED' ? 'unregistered' : result.status === 429 ? 'rate_limited' : 'provider_rejected' }
@@ -97,9 +98,11 @@ export async function mobileNoticeData(notice = {}) {
   // Server-supplied stable references avoid a new event ID on every retry.
   const reference = notice.eventId || notice.noticeId || notice.nativeEventKey || notice.tag || [kind, notice.taskId, notice.machineId, notice.finishAt, notice.title, notice.text].join('|')
   const eventId = 'push_' + (await mobileDigest(String(reference))).slice(0, 32)
+  const revision = String(Math.max(1, Number.isSafeInteger(notice.revision) ? notice.revision : 1))
+  if (kind === 'TASK_REGISTERED') return { eventId, revision, kind, taskId: idOK(notice.taskId) ? notice.taskId : '' }
   const finishAt = typeof notice.finishAt === 'string' && Number.isFinite(Date.parse(notice.finishAt)) ? new Date(notice.finishAt).toISOString() : ''
   const taskId = idOK(notice.taskId) ? notice.taskId : notice.type === 'queue' && idOK(notice.reservationId) ? 'queue:' + notice.reservationId : ''
-  return { eventId, revision: String(Math.max(1, Number.isSafeInteger(notice.revision) ? notice.revision : 1)), kind, title: clean(notice.title || 'WeShirt 提醒', 48), body: clean(notice.text || notice.body || '打开应用查看最新状态', 120), taskId, finishAt, serverConfirmed: notice.confirmed === true ? 'true' : 'false' }
+  return { eventId, revision, kind, title: clean(notice.title || 'WeShirt 提醒', 48), body: clean(notice.text || notice.body || '打开应用查看最新状态', 120), taskId, finishAt, serverConfirmed: notice.confirmed === true ? 'true' : 'false' }
 }
 
 /** Durable per-user outbox; provider success is independent from DingTalk. */
@@ -277,6 +280,8 @@ export function createMobilePush({ store, env = {}, atomicStore = createRemoteMo
     async notify(uid, notice) {
       if (!providers.length || !await validUser(uid)) return { ok: false, skipped: true }
       const data = await mobileNoticeData(notice)
+      const registration = data.kind === 'TASK_REGISTERED'
+      if (registration && !data.taskId) return { ok: false, skipped: true }
       let queued = false
       await update(userKey(uid), value => {
         const installations = value.installations || []
@@ -290,7 +295,7 @@ export function createMobilePush({ store, env = {}, atomicStore = createRemoteMo
         // lease expires, that exhausted event is terminal and can be evicted.
         const terminal = row => ['sent', 'suppressed', 'failed'].includes(row.state) || row.attempts >= 4 && !(row.leaseUntil > now())
         while (outbox.length >= 20) { const index = outbox.findIndex(event => Object.values(event.deliveries).every(terminal)); if (index < 0) fail('mobile_push_capacity', 503); outbox.splice(index, 1) }
-        outbox.push({ data, policy:{...(notice.channel?{channel:notice.channel,noticeId:notice.noticeId}:{}),...(notice.type==='queue'?{queueNoticeId:notice.noticeId}:{}),...(notice.taskId?{taskId:notice.taskId}:{}),...(notice.machineFault?{machineFault:notice.machineFault}:{}),...(notice.machineTime?{machineTime:notice.machineTime}:{})}, expiresAt: now() + DAY, deliveries: Object.fromEntries(installations.map(id => [id, { state: 'pending', attempts: 0 }])) }); queued = true
+        outbox.push({ data, policy:{...(notice.channel?{channel:notice.channel,noticeId:notice.noticeId}:{}),...(notice.type==='queue'?{queueNoticeId:notice.noticeId}:{}),...(notice.taskId?{taskId:notice.taskId}:{}),...(notice.machineFault?{machineFault:notice.machineFault}:{}),...(notice.machineTime?{machineTime:notice.machineTime}:{})}, expiresAt: now() + (registration ? 600000 : DAY), deliveries: Object.fromEntries(installations.map(id => [id, { state: 'pending', attempts: 0 }])) }); queued = true
         return { ...value, outbox }
       })
       const result = await deliver(uid)

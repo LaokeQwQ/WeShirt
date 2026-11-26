@@ -74,6 +74,23 @@ async function fixture(transports){
   await atomicStore.compareAndSet('mobile:installation:'+id,null,{userId:'u_push',installationId:id,provider:'fcm',token:'private-token',notificationsEnabled:true},{expiresAt:at+86400000})
   return {store,atomicStore,push,options,id,advance(ms){at+=ms}}
 }
+test('registration wake contains only routing identifiers and respects installed opt-in', async()=>{
+  const messages=[]
+  const fixtureData=await fixture({fcm:async(_token,data)=>{messages.push(data);return {ok:true}}})
+  const {store,push,atomicStore,id}=fixtureData
+  const taskId='t_registration_test'
+  const event={nativeKind:'TASK_REGISTERED',nativeEventKey:`task-registered:${taskId}`,taskId,title:'unused',text:'unused'}
+  await store.put('tasks:u_push',[{id:taskId,done:false}])
+  assert.equal((await push.notify('u_push',event)).ok,true)
+  assert.deepEqual(messages,[await mobileNoticeData(event)])
+  assert.deepEqual(Object.keys(messages[0]).sort(),['eventId','kind','revision','taskId'])
+  await push.notify('u_push',event)
+  const deviceKey=`mobile:installation:${id}`
+  const device=await atomicStore.get(deviceKey)
+  await atomicStore.compareAndSet(deviceKey,device.version,{...device.value,notificationsEnabled:false},{expiresAt:Date.now()+86400000})
+  await push.notify('u_push',{...event,nativeEventKey:'task-registered:disabled'})
+  assert.equal(messages.length,1)
+})
 test('native outbox retries independently, deduplicates events across workers and never double-routes a device', async()=>{
   const calls=[];let success=false
   const transports={fcm:async(token,data)=>{calls.push({provider:'fcm',token,data});return {ok:success}},upush:async()=>{calls.push({provider:'upush'});return {ok:true}}}
