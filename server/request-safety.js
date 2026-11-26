@@ -146,7 +146,13 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
         await withOperationLock(store, bucket, async () => {
           const saved = await store.get(bucket, [])
           const entries = (Array.isArray(saved) ? saved : []).filter((entry) => entry.expiresAt > now() && entry.scope !== scope)
-          await store.put(bucket, [401, 403].includes(c.res.status) ? entries : [...entries, { scope, bodyHash, authHash, state: 'complete', snapshot, expiresAt: now() + CACHE_TTL }].slice(-CACHE_LIMIT))
+          // A pending review holds content out of the public store. Reusing the
+          // same request key must recheck the decision once review finishes.
+          let moderationPending = false
+          if (snapshot?.status === 409) {
+            try { moderationPending = JSON.parse(snapshot.body)?.error?.code === 'moderation_pending' } catch { /* ordinary conflict */ }
+          }
+          await store.put(bucket, moderationPending || [401, 403].includes(c.res.status) ? entries : [...entries, { scope, bodyHash, authHash, state: 'complete', snapshot, expiresAt: now() + CACHE_TTL }].slice(-CACHE_LIMIT))
         })
       } finally { pending.delete(flightKey); decision.leader.resolve(snapshot) }
     } catch (error) {

@@ -12,6 +12,7 @@ import { readStreamBytes } from '../packages/core/stream-bytes.js'
 import { registerCommunityReportRoutes } from './community-reports.js'
 import { communitySnapshot } from './community-snapshot.js'
 import { communityMessageDigest, readCommunityReadState, acknowledgeCommunityMessages } from '../packages/core/community-reads.js'
+import { reviewAvatar } from './content-moderation.js'
 
 const MINUTE = 60000
 const MUTES_KEY = 'moderation:mutes'
@@ -22,7 +23,7 @@ const array = (value) => Array.isArray(value) ? value : []
 const permittedAt = (row, code, mode = 'operate') => !row || row[mode] === true && (row[mode + 'Buildings'] === null || row[mode + 'Buildings']?.includes(code))
 const fail = (code, message, status = 400) => { const error = new Error(message); Object.assign(error, { code, status }); throw error }
 
-export function registerCommunityRoutes(app, { store, env = {}, authenticate, checkSuperAdmin, notify, now = () => Date.now() }) {
+export function registerCommunityRoutes(app, { store, env = {}, authenticate, checkSuperAdmin, notify, moderation, now = () => Date.now() }) {
   const bid = env.BUILDING_ID || 'b1'
   const mediaService = createCommunityMedia({ store, now })
   const revisionKey = (channel) => 'community:revision:' + channel
@@ -313,6 +314,12 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     requireChannel(requester, channel, ctx, 'operate')
     if (c.req.query('channel') && c.req.query('channel') !== channel || !channelManager(requester, channel)) fail('forbidden', '需要此频道的管理权限', 403)
     const avatar = await mediaService.upload(c.req.raw, requester.user.id, channel, true)
+    await reviewAvatar(moderation, { actorId: requester.user.id, surface: 'channel-avatar:' + channel, dataUrl: avatar.dataUrl })
+    if (moderation?.enabled) {
+      const [current, currentContext] = await Promise.all([actor(c, true, false, true), context()])
+      requireChannel(current, channel, currentContext, 'operate')
+      if (!channelManager(current, channel)) fail('forbidden', '需要此频道的管理权限', 403)
+    }
     await store.put('community:avatar:' + channel, avatar.dataUrl); await bump(channel)
     return { ok: true, avatarData: avatar.dataUrl }
   }))
@@ -400,6 +407,8 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     const initialChannel = selectChannel(input.channel, input.dorm, initialContext) || initialContext.byId.get(input.machineId)?.dormBuilding || initialContext.buildings.find((building) => building.code === requester.user.dormBuilding)?.code || initialContext.buildings[0]?.code || 'guiyuan'
     requireChannel(requester, initialChannel, initialContext, 'operate')
     const targets = await recipients(input, requester, initialChannel)
+    if (content && moderation?.enabled)
+      await moderation.checkText({ actorId: requester.user.id, surface: 'message:' + initialChannel, text: content })
     requester = await actor(c, true, false, true)
     return withOperationLock(store, 'community:moderation', async () => {
       if (await muteFor(requester.user.id)) fail('muted', '你当前被禁言，暂时不能留言或回复', 403)
