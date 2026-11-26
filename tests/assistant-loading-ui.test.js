@@ -11,9 +11,9 @@ function fixture(){
  const data=createAssistantResourceCache({request:key=>new Promise((resolve,reject)=>reads.push({key,resolve,reject}))})
  data.setSession('A','token-A')
  const scope=effectScope(),unmount=[]
- const bindings={ref,reactive,computed,watch,nextTick,onMounted(){},onUnmounted:fn=>unmount.push(fn),useRoute:()=>({query:{}}),useRouter:()=>({}),useUserStore:()=>user,assistantData:data,BASE:'',window:{location:{origin:'https://fixture.invalid'}},dormBuildingName:()=>'',showToast(){},showConfirmDialog:()=>new Promise(resolve=>confirmations.push(resolve)),api:(path,options)=>new Promise(resolve=>requests.push({path,options,resolve}))}
+ const bindings={ref,reactive,computed,watch,nextTick,onMounted(){},onUnmounted:fn=>unmount.push(fn),useRoute:()=>({query:{}}),useRouter:()=>({}),useUserStore:()=>user,assistantData:data,BASE:'',window:{location:{origin:'https://fixture.invalid'}},dormBuildingName:()=>'',showToast(){},showConfirmDialog:()=>new Promise(resolve=>confirmations.push(resolve)),api:(path,options)=>new Promise(resolve=>requests.push({path,options,resolve})),streamAssistantChat:(body,options)=>new Promise(resolve=>requests.push({body,options,resolve}))}
  const script=source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]*\n/gm,'')
- const panel=scope.run(()=>new Function(...Object.keys(bindings),script+'\nreturn {status,memory,messages,preferences,input,canChat,loadResource,send,clearHistory,pendingResources,failedResources}')(...Object.values(bindings)))
+ const panel=scope.run(()=>new Function(...Object.keys(bindings),script+'\nreturn {status,memory,messages,preferences,input,canChat,loadResource,send,clearHistory,pendingResources,failedResources,draftTurn,partialTurn}')(...Object.values(bindings)))
  return {panel,user,data,requests,reads,confirmations,dispose(){unmount.forEach(fn=>fn());scope.stop()}}
 }
 test('actual assistant view displays fast status/memory while history is pending and preferences has its own error',async()=>{
@@ -32,10 +32,13 @@ test('actual assistant view displays fast status/memory while history is pending
 test('chat response from the old mounted account cannot populate the new account cache before Vue unmount',async()=>{
  const f=fixture();f.data.publish('status',{ready:true,dormBuilding:'guiyuan',usage:{dailyRemaining:5}});f.panel.input.value='hello'
  const sent=f.panel.send();assert.equal(f.requests.length,1)
+ f.requests[0].options.onDelta('partial reply');assert.equal(f.panel.draftTurn.value.text,'partial reply')
  f.user.user={id:'B'};f.user.token='token-B';f.data.setSession('B','token-B')
+ assert.equal(f.requests[0].options.signal.aborted,true)
+ f.requests[0].options.onDelta('private late fragment')
  f.requests[0].resolve({messages:[{content:'private A reply'}],usage:{dailyRemaining:4}});await sent
  assert.equal(f.data.state.history.data,null);assert.equal(f.data.state.status.data,null)
- assert.deepEqual(f.panel.messages.value,[]);f.dispose()
+ assert.deepEqual(f.panel.messages.value,[]);assert.equal(f.panel.draftTurn.value,null);assert.equal(f.panel.partialTurn.value,null);f.dispose()
 })
 test('confirming a dialog opened by the previous account never deletes the next account history',async()=>{
  const f=fixture();const clearing=f.panel.clearHistory();assert.equal(f.confirmations.length,1)

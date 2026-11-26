@@ -7,6 +7,7 @@
 // 需要时用 VITE_API_BASE 覆盖
 import { track, getTelemetryContext } from './telemetry'
 import { createSingleFlight } from './loginFlow'
+import { readAssistantEvents } from './assistantStream.js'
 
 const DEV_BASE = 'http://localhost:8787'
 const BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? DEV_BASE : '')
@@ -218,6 +219,51 @@ export async function api(path, opts = {}) {
   }
   try { return await job }
   finally { track('api_request', { ...context, ...timing, endpoint: path, durationMs: Math.min(60000, performance.now() - started) }) }
+}
+
+export async function streamAssistantChat(body, { signal, onDelta, onReset }) {
+  const path = '/api/assistant/chat/stream'
+  const started = performance.now()
+  const context = getTelemetryContext()
+  const sentToken = token
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (signal.aborted) abort()
+  else signal.addEventListener('abort', abort, { once: true })
+  let response, status = 0, eventId, timedOut = false
+  const timer = setTimeout(() => { timedOut = true; abort() }, 70000)
+  try {
+    if (signal.aborted) throw new DOMException('Request aborted', 'AbortError')
+    if (!sentToken) throw apiError('请重新登录后再提问', { status: 401, code: 'unauthorized' })
+    response = await fetch(BASE + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: 'Bearer ' + sentToken },
+      body: JSON.stringify(body), signal: controller.signal, cache: 'no-store', redirect: 'error',
+    })
+    status = response.status
+    eventId = response.headers.get('X-Event-ID')
+    if (!response.ok) throw await responseError(response, '助手暂时无法连接')
+    const guard = callback => value => {
+      if (token !== sentToken) abort()
+      if (!controller.signal.aborted) callback(value)
+    }
+    const result = await readAssistantEvents(response, { signal: controller.signal, onDelta: guard(onDelta), onReset: guard(onReset), makeError: apiError })
+    if (token !== sentToken) throw new DOMException('Session changed', 'AbortError')
+    return result
+  } catch (problem) {
+    if (signal.aborted || token !== sentToken) throw new DOMException('Request aborted', 'AbortError')
+    const error = problem?.eventId ? problem : apiError(timedOut ? '助手回答超时，已停止接收' : '与助手的连接中断，请重试', {
+      code: timedOut ? 'timeout' : 'network_error', eventId,
+    })
+    status = error.status
+    eventId = error.eventId
+    throw error
+  } finally {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', abort)
+    if (response?.body && !response.bodyUsed) void response.body.cancel().catch(() => {})
+    track('api_request', { ...context, status, ...(eventId ? { eventId } : {}), endpoint: path, durationMs: Math.min(60000, performance.now() - started) })
+  }
 }
 
 async function performApi(path, opts, timing) {

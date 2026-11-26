@@ -49,6 +49,16 @@ test('并发不同用户不同机器保留所有任务和occupancy，同用户�
   assert.equal(Object.keys(await store.get('occupancy:b1')).length, 3)
 })
 
+test('机器看板忽略损坏的单条占用及旧格式任务，继续显示上游状态', async (t) => {
+  const { store, call } = await fixture(t)
+  await store.put('occupancy:b1', { one: null, two: { userId: 'b' } })
+  await store.put('tasks:b', { old: true })
+  const response = await call('/api/machines', { method: 'GET', user: null })
+  assert.equal(response.status, 200)
+  assert.equal(response.data.board.total, 3)
+  assert.equal(response.data.board.idle, 3)
+})
+
 test('不同人争抢同台机器稳定一个成功一个409，失败不创建孤立任务', async (t) => {
   const { register, store } = await fixture(t)
   const results = await Promise.all([register('one', { user: 'a' }), register('one', { user: 'b' })])

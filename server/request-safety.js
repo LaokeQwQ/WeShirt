@@ -10,7 +10,7 @@ const CACHE_TTL = 120000
 const CACHE_LIMIT = 12
 const flights = new WeakMap()
 const writes = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
-const excluded = /^\/api\/(?:auth(?:\/|$)|mobile(?:\/|$)|dingtalk(?:\/|$)|cron(?:\/|$)|telemetry(?:\/|$)|inspections(?:\/|$)|urge\/reveal(?:\/|$))|\/(?:photos?|uploads?)(?:\/|$)/
+const excluded = /^\/api\/(?:auth(?:\/|$)|mobile(?:\/|$)|dingtalk(?:\/|$)|cron(?:\/|$)|telemetry(?:\/|$)|inspections(?:\/|$)|urge\/reveal(?:\/|$)|assistant\/chat\/stream\/?$)|\/(?:photos?|uploads?)(?:\/|$)/
 const eventId = () => 'evt_' + crypto.randomUUID().replace(/-/g, '').slice(0, 24)
 const digest = async (value) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', typeof value === 'string' ? new TextEncoder().encode(value) : value))].map((b) => b.toString(16).padStart(2, '0')).join('')
 
@@ -23,6 +23,17 @@ export function requestRoute(c) {
 
 function responseFrom(snapshot) {
   return snapshot ? new Response(snapshot.body, { status: snapshot.status, headers: snapshot.headers }) : json({ error: { code: 'idempotency_result_unavailable', message: '请求已处理，请刷新确认本次操作结果' } }, 409)
+}
+
+export function recordRequestFailure(c, error) {
+  const categories = {
+    edge_kv_read_failed: 'edge_kv_read_failed',
+    machine_store_unavailable: 'machine_store_unavailable',
+  }
+  const types = { TypeError: 'invalid_data_type', SyntaxError: 'invalid_data_format', TimeoutError: 'timeout', AbortError: 'aborted' }
+  const category = Object.hasOwn(categories, error?.code) ? categories[error.code] :
+    Object.hasOwn(types, error?.name) ? types[error.name] : 'unclassified'
+  c.set('failureCategory', category)
 }
 
 async function snapshotResponse(response) {
@@ -56,7 +67,8 @@ async function finalize(c, store) {
   for (const key of ['content-length', 'content-encoding', 'etag', 'last-modified']) headers.delete(key)
   headers.set('content-type', 'application/json; charset=utf-8'); headers.set('cache-control', 'no-store')
   c.res = new Response(JSON.stringify(payload), { status: response.status, headers })
-  await logEvent(store, { type: 'error', level: response.status >= 500 ? 'error' : 'warn', action: '接口请求失败', target: requestRoute(c), detail: { eventId: id, status: response.status, method: c.req.method, code: typeof code === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(code) ? code : typeof code === 'number' ? code : 'http_error' } }).catch(() => {})
+  const failureCategory = c.get('failureCategory')
+  await logEvent(store, { type: 'error', level: response.status >= 500 ? 'error' : 'warn', action: '接口请求失败', target: requestRoute(c), detail: { eventId: id, status: response.status, method: c.req.method, code: typeof code === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(code) ? code : typeof code === 'number' ? code : 'http_error', ...(failureCategory ? { failureCategory } : {}) } }).catch(() => {})
 }
 
 export function registerRequestSafety(app, { store, authenticate, now = () => Date.now() } = {}) {
@@ -64,6 +76,7 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
   let pending = flights.get(store)
   if (!pending) { pending = new Map(); flights.set(store, pending) }
   app.onError((_error, c) => {
+    recordRequestFailure(c, _error)
     const id = c.get('eventId') || eventId()
     c.set('eventId', id)
     const unavailable=_error?.code==='machine_store_unavailable',status=unavailable?503:500
@@ -136,7 +149,8 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
           await store.put(bucket, [401, 403].includes(c.res.status) ? entries : [...entries, { scope, bodyHash, authHash, state: 'complete', snapshot, expiresAt: now() + CACHE_TTL }].slice(-CACHE_LIMIT))
         })
       } finally { pending.delete(flightKey); decision.leader.resolve(snapshot) }
-    } catch {
+    } catch (error) {
+      recordRequestFailure(c, error)
       c.res = json({ error: { code: 'internal', message: '服务暂时不可用，请稍后重试' } }, 500)
     } finally { await finalize(c, store) }
   })
