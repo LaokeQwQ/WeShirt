@@ -9,7 +9,7 @@ import { resolveMachineKind } from '../packages/core/machine-kind.js'
 const maskNick = (value) => String(value || '同学').slice(0, 1) + '**'
 const validId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value)
 
-export function registerOperationsRoutes(app, { store, env = {}, authenticate, checkAdmin, checkSuperAdmin, notify, now = () => Date.now() }) {
+export function registerOperationsRoutes(app, { store, env = {}, authenticate, checkAdmin, checkSuperAdmin, notify, moderation, now = () => Date.now() }) {
   const bid = env.BUILDING_ID || 'b1'
   const resolveUser = async (c) => {
     const value = await authenticate?.(c)
@@ -92,7 +92,7 @@ export function registerOperationsRoutes(app, { store, env = {}, authenticate, c
     })
   })
 
-  registerCommunityRoutes(app, { store, env, authenticate, checkSuperAdmin, notify, now })
+  registerCommunityRoutes(app, { store, env, authenticate, checkSuperAdmin, notify, moderation, now })
 
   app.get('/api/admin/operations', async (c) => {
     if (!await checkAdmin?.(c)) return apiErr('unauthorized', '需要管理员登录', 401)

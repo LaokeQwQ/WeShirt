@@ -70,6 +70,8 @@ import { resolveMachineKind, normalizeMachineCategory } from '../packages/core/m
 import { applyRegisteredAvailability } from '../packages/core/availability.js'
 import { processCommunityNotices } from '../packages/core/community-notices.js'
 import { pruneCommunityMedia } from './community-media.js'
+import { createContentModeration } from '../packages/core/content-moderation.js'
+import { registerContentReviewCallback, reviewAvatar } from './content-moderation.js'
 import { DORM_BUILDINGS, normalizeDormBuilding, dormBuildingName, resolveMachineDorm, filterDormFloors, summarizeDormBuildings, currentDormCatalog, enabledMachineBoard, isMachineDormEnabled } from '../packages/core/buildings.js'
 
 // 登记备注为当前机器面板公开纯文本，不自动发布到留言频道。
@@ -1014,12 +1016,13 @@ async function runSyncOnce(env, store, opts = {}) {
 // ─────────────────────────────────────────────────────────────
 // createApp 工厂
 // ─────────────────────────────────────────────────────────────
-export function createApp({ store, env, mobile = {} }) {
+export function createApp({ store, env, mobile = {}, moderation: moderationOptions = {} }) {
   if (!store) throw new Error('createApp 需要 store')
   env = env || {}
 
   const app = new Hono()
   const mobileAtomicStore = mobile.atomicStore || createRemoteMobileAtomicStore(env)
+  const moderation = createContentModeration({ env, atomicStore: mobileAtomicStore, ...moderationOptions })
   configureMachineDocuments(store,{env,atomicStore:mobileAtomicStore})
   const adminAccessCodes = createAdminAccessCodes({ atomicStore: mobileAtomicStore, authSecret: env.AUTH_SECRET })
   const mobileAuth = createMobileAuth({ store, env, atomicStore: mobileAtomicStore, identityProvider: mobile.identityProvider, now: mobile.now })
@@ -2459,7 +2462,7 @@ export function createApp({ store, env, mobile = {} }) {
       const userId = await bearerUser(c, env)
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
       const body = await c.req.json().catch(() => ({}))
-      const user = await getUserOrRebuild(store, userId)
+      const user = { ...await getUserOrRebuild(store, userId) }
       // 读不到真实记录时不要写：写下去就是一份空白账号，把钉钉身份冲掉
       if (user.transient)
         return apiErr('account_out_of_sync', '账号资料暂时读不到，请重新用钉钉登录一次', 409)
@@ -2512,12 +2515,18 @@ export function createApp({ store, env, mobile = {} }) {
         } else {
           const url = normalizeAvatarUrl(body.avatarUrl)
           if (!url) return apiErr('bad_param', '头像图片不合法或超过大小限制（约 45KB），请重新上传')
+          if (url !== user.avatarUrl && (user.disabled || user.blocked))
+            return apiErr('forbidden', '当前账号不能修改头像', 403)
+          if (url !== user.avatarUrl)
+            await reviewAvatar(moderation, { actorId: userId, surface: 'profile-avatar', dataUrl: url })
           user.avatarUrl = url
         }
       }
       await store.put(`user:${userId}`, user)
       return json({ user: publicUser(user) })
     } catch (e) {
+      if (['moderation_pending', 'moderation_rejected', 'moderation_unavailable', 'moderation_too_frequent', 'bad_avatar'].includes(e.code))
+        return apiErr(e.code, e.message, e.status)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -3644,7 +3653,8 @@ export function createApp({ store, env, mobile = {} }) {
   registerMachineTimeCalibrationRoutes(app,{store,env,authorize:c=>checkAdmin(c,env,store)})
   registerQueueNoticeRoutes(app,{store,authenticate})
   registerAssistantRoutes(app,{store,env,atomicStore:mobileAtomicStore,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),getBoard})
-  registerOperationsRoutes(app,{store,env,authenticate,checkAdmin:(c)=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env),notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,mobilePush)})
+  registerContentReviewCallback(app, moderation)
+  registerOperationsRoutes(app,{store,env,authenticate,moderation,checkAdmin:(c)=>checkAdmin(c,env,store),checkSuperAdmin:c=>checkSuperAdmin(c,env),notify:(uid,notice)=>notifyCommunityUser(env,store,uid,notice,mobilePush)})
   registerInspectionRoutes(app,{store,env,authenticate,getBoard,checkSuperAdmin:c=>checkSuperAdmin(c,env),notifyBuilding:async({conversationId,inspection})=>{
     const mod=await import('../packages/core/dingtalk.js')
     const notice=buildInspectionGroupNotice(inspection)
