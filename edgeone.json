@@ -1,6 +1,24 @@
 {
   "outputDirectory": "dist",
+  "caches": [
+    { "source": "/updates/android/latest.json", "cacheTtl": 0 },
+    { "source": "/updates/android/*.apk", "cacheTtl": 86400 }
+  ],
   "headers": [
+    {
+      "source": "/updates/android/latest.json",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    },
+    {
+      "source": "/updates/android/*.apk",
+      "headers": [
+        { "key": "Content-Type", "value": "application/vnd.android.package-archive" },
+        { "key": "Cache-Control", "value": "public, max-age=86400, immutable" }
+      ]
+    },
     {
       "source": "/assets/*",
       "headers": [
