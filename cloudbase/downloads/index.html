@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="下载 WeShirt，查看洗衣机状态、登记洗衣，添加桌面小组件。">
+  <meta name="color-scheme" content="light dark">
+  <title>下载 WeShirt</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./style.css">
+  <script src="./release.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <img class="mark" src="./icon.svg" width="76" height="76" alt="">
+      <div>
+        <h1>WeShirt</h1>
+        <p>随时查看洗衣机和烘干机的状态，登记洗衣、预约提醒，也能在桌面上看洗衣进度。</p>
+      </div>
+    </header>
+    <section class="platforms" aria-label="应用下载">
+      <article class="platform">
+        <h2><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 5 5 2m12 3 2-3M3 17h18a9 9 0 0 0-18 0Zm6-5h.01m6 0h.01"/></svg> Android</h2>
+        <p id="version" aria-live="polite">正在读取发行版本…</p>
+        <a id="download" class="download" hidden>下载 APK</a>
+      </article>
+      <article class="platform">
+        <h2><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 18h4"/></svg> iOS</h2>
+        <p>开发中</p>
+      </article>
+    </section>
+    <footer>洗衣机状态来自海乐生活公开数据。</footer>
+  </main>
+</body>
+</html>

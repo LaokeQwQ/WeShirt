@@ -1939,6 +1939,11 @@ export function createApp({ store, env, mobile = {} }) {
         store.del(`urge:${buildingId}:${machineId}`),
       ])
 
+      if (mobilePush.providers.length) {
+        const wake = mobilePush.notify(userId, { nativeKind: 'TASK_REGISTERED', nativeEventKey: `task-registered:${task.id}`, taskId: task.id })
+        await persistAudit(c, wake.catch(() => undefined))
+      }
+
       await persistAudit(c, audit(store, {
         type: 'task',
         action: '登记洗衣',
