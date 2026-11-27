@@ -23,6 +23,22 @@ export const mobileDigest = async value => {
 export class MobileError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status }
 }
+const authFailures = new WeakMap()
+export const mobileAuthFailureDiagnostics = error => error && typeof error === 'object' ? authFailures.get(error) || null : null
+async function authStage(stage, operation) {
+  try { return await operation() }
+  catch (error) {
+    const problem = error instanceof Error ? error : new Error('mobile_auth_unavailable')
+    // Only fixed categories and call-site stages cross into audit. Never retain
+    // exception messages, request bodies, identifiers or provider responses.
+    const category = problem instanceof MobileError ? problem.code === 'mobile_busy' ? 'mobile_cas_contention' : 'mobile_auth_rejected' :
+      problem.message === 'mobile_store_unavailable' ? 'mobile_store_unavailable' :
+      problem.code === 'edge_kv_read_failed' ? 'edge_kv_read_failed' :
+      problem.name === 'TimeoutError' ? 'timeout' : problem.name === 'AbortError' ? 'aborted' : 'mobile_auth_unavailable'
+    if (!authFailures.has(problem)) authFailures.set(problem, Object.freeze({ stage, category }))
+    throw problem
+  }
+}
 const fail = (code, message, status) => { throw new MobileError(code, message, status) }
 const publicUser = user => ({ id: user.id, nick: user.nick || '', avatar: user.avatar || null, avatarUrl: user.avatarUrl || null, dormBuilding: user.dormBuilding || null })
 const invalidRefresh = () => fail('invalid_refresh_token', '登录状态已过期，请重新登录', 401)
@@ -56,10 +72,18 @@ export function createMobileAuth({ store, env = {}, atomicStore, identityProvide
   }
   async function limit(key, maximum, windowMs = 60000) {
     const at = now(), bucketKey = 'mobile:limit:' + key + ':' + Math.floor(at / windowMs)
-    for (let attempt = 0; attempt < 6; attempt++) {
+    const deadline = at + 2000
+    for (let attempt = 0; attempt < 16 && (attempt === 0 || now() < deadline); attempt++) {
       const row = await atomicStore.get(bucketKey)
       if ((row?.value?.count || 0) >= maximum) fail('mobile_rate_limited', '操作太频繁，请稍后重试', 429)
       if (await cas(bucketKey, row, { count: (row?.value?.count || 0) + 1 }, at + windowMs * 2)) return
+      // A definite false means another worker won; reread after jitter rather
+      // than keeping all contenders in lockstep. Thrown/uncertain writes are
+      // never repeated. Neither quotas nor provider exchanges are retried here.
+      const remaining = deadline - now()
+      if (attempt === 15 || remaining <= 0) break
+      const spread = Math.min(160, 20 * 2 ** Math.min(attempt, 3))
+      await new Promise(resolve => setTimeout(resolve, Math.min(remaining, 10 + Math.floor(Math.random() * spread))))
     }
     fail('mobile_busy', '请求繁忙，请稍后重试', 503)
   }
@@ -127,23 +151,29 @@ export function createMobileAuth({ store, env = {}, atomicStore, identityProvide
     async challenge(body) {
       requireEnabled()
       if (!object(body) || !idOK(body.installationId) || !idOK(body.state) || body.platform !== 'android' || body.packageName !== MOBILE_PACKAGE || !/^[A-Za-z0-9_-]{43}$/.test(body.codeChallenge || '') || Object.keys(body).some(key => !['installationId', 'state', 'platform', 'packageName', 'codeChallenge'].includes(key))) fail('bad_param', '登录请求无效')
-      await limit('challenge-global', 120)
-      await limit('challenge-' + await mobileDigest(body.installationId), 5)
+      await authStage('challenge_limit_global', () => limit('challenge-global', 120))
+      await authStage('challenge_limit_installation', async () => limit('challenge-' + await mobileDigest(body.installationId), 5))
       const challengeId = random(), expiresAt = now() + CHALLENGE_SECONDS * 1000
-      if (!await cas('mobile:challenge:' + challengeId, null, { ...body, expiresAt, consumed: false }, expiresAt)) fail('mobile_busy', '请求繁忙，请重试', 503)
+      await authStage('challenge_save', async () => {
+        if (!await cas('mobile:challenge:' + challengeId, null, { ...body, expiresAt, consumed: false }, expiresAt)) fail('mobile_busy', '请求繁忙，请重试', 503)
+      })
       return { challengeId, state: body.state, expiresIn: CHALLENGE_SECONDS, provider: { clientId: env.DINGTALK_MOBILE_CLIENT_ID, scope: 'openid', packageName: MOBILE_PACKAGE, redirectUri: env.DINGTALK_MOBILE_REDIRECT_URI } }
     },
     async exchange(body) {
       requireEnabled()
       if (!object(body) || !/^[A-Za-z0-9_-]{43}$/.test(body.challengeId || '') || !idOK(body.state) || !/^[A-Za-z0-9._~-]{43,128}$/.test(body.codeVerifier || '') || typeof body.authCode !== 'string' || !body.authCode || body.authCode.length > 2048 || /[\u0000-\u0020\u007f]/.test(body.authCode) || Object.keys(body).some(key => !['challengeId', 'state', 'codeVerifier', 'authCode'].includes(key))) fail('bad_param', '登录请求无效')
-      await limit('exchange-global', 120)
-      const key = 'mobile:challenge:' + body.challengeId, row = await atomicStore.get(key), challenge = row?.value
+      await authStage('exchange_limit', () => limit('exchange-global', 120))
+      const key = 'mobile:challenge:' + body.challengeId, row = await authStage('exchange_challenge_read', () => atomicStore.get(key)), challenge = row?.value
       if (!challenge || challenge.consumed || challenge.expiresAt <= now() || !timingSafeEqual(challenge.state, body.state) || !timingSafeEqual(challenge.codeChallenge, await mobileDigest(body.codeVerifier))) fail('invalid_challenge', '登录验证已失效，请重新登录', 400)
-      if (!await cas(key, row, { ...challenge, consumed: true }, challenge.expiresAt)) fail('invalid_challenge', '登录验证已使用，请重新登录', 409)
-      const identity = await provider.exchange(body.authCode), user = await knownUser(identity)
+      await authStage('exchange_challenge_consume', async () => {
+        if (!await cas(key, row, { ...challenge, consumed: true }, challenge.expiresAt)) fail('invalid_challenge', '登录验证已使用，请重新登录', 409)
+      })
+      const identity = await authStage('exchange_identity', () => provider.exchange(body.authCode)), user = await authStage('exchange_account', () => knownUser(identity))
       const sessionId = random(), access = random(), refresh = random(), at = now(), expiresAt = at + MOBILE_REFRESH_MS
       const session = { sessionId, userId: user.id, installationId: challenge.installationId, accessHash: await mobileDigest(access), accessExpiresAt: at + MOBILE_ACCESS_SECONDS * 1000, refreshHash: await mobileDigest(refresh), refreshExpiresAt: expiresAt, hardExpiresAt: at + MOBILE_SESSION_MAX_MS, revoked: false }
-      if (!await cas('mobile:session:' + sessionId, null, session, expiresAt)) fail('mobile_busy', '登录未完成，请重新登录', 503)
+      await authStage('exchange_session_save', async () => {
+        if (!await cas('mobile:session:' + sessionId, null, session, expiresAt)) fail('mobile_busy', '登录未完成，请重新登录', 503)
+      })
       return response(sessionId, access, refresh, user)
     },
     async verifyAccessToken(token) {
@@ -155,13 +185,16 @@ export function createMobileAuth({ store, env = {}, atomicStore, identityProvide
       if (!object(body) || !idOK(body.installationId) || Object.keys(body).some(key => !['installationId', 'refreshToken'].includes(key))) invalidRefresh()
       const parsed = parseToken(body.refreshToken, 'mr1')
       if (!parsed) invalidRefresh()
-      await limit('refresh-' + await mobileDigest(body.installationId), 10)
-      const key = 'mobile:session:' + parsed.sessionId, row = await atomicStore.get(key), session = row?.value
+      await authStage('refresh_limit', async () => limit('refresh-' + await mobileDigest(body.installationId), 10))
+      const key = 'mobile:session:' + parsed.sessionId, row = await authStage('refresh_session_read', () => atomicStore.get(key)), session = row?.value
       if (!session || session.revoked || session.installationId !== body.installationId || !Number.isFinite(session.refreshExpiresAt) || session.refreshExpiresAt <= now() || !timingSafeEqual(session.refreshHash, await mobileDigest(parsed.secret))) invalidRefresh()
-      const user = await store.get('user:' + session.userId, null)
+      const user = await authStage('refresh_account', async () => {
+        const profile = await store.get('user:' + session.userId, null)
+        if (!profile) fail('mobile_identity_unavailable', '账号资料暂未同步，请稍后重试', 503)
+        return profile
+      })
       // A missing profile can be a transient KV read across regions. Keep the
       // current refresh credential usable until the account can be checked.
-      if (!user) fail('mobile_identity_unavailable', '账号资料暂未同步，请稍后重试', 503)
       if (user?.id !== session.userId || user.disabled || user.blocked) invalidRefresh()
       const access = random(), refresh = random(), at = now()
       // Existing sessions all used a fixed 30-day expiry, so its original
@@ -172,7 +205,9 @@ export function createMobileAuth({ store, env = {}, atomicStore, identityProvide
       // Rotate both credentials in one durable CAS. Exactly one concurrent
       // refresh wins. A lost response requires login; stale tokens never win.
       const next = { ...session, accessHash: await mobileDigest(access), accessExpiresAt: Math.min(at + MOBILE_ACCESS_SECONDS * 1000, refreshExpiresAt), refreshHash: await mobileDigest(refresh), refreshExpiresAt, hardExpiresAt }
-      if (!await cas(key, row, next, refreshExpiresAt)) invalidRefresh()
+      await authStage('refresh_session_rotate', async () => {
+        if (!await cas(key, row, next, refreshExpiresAt)) invalidRefresh()
+      })
       return { ...response(parsed.sessionId, access, refresh, user), expiresIn: Math.floor((next.accessExpiresAt - at) / 1000), refreshExpiresIn: Math.floor((refreshExpiresAt - at) / 1000) }
     },
     async logout(body) {

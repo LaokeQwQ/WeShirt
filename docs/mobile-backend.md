@@ -45,6 +45,10 @@ createApp({ store, env, mobile: { atomicStore: createCloudBasePostgresAtomicStor
 
 `GET /api/mobile/config` 公布能力；`POST /api/mobile/auth/challenge`、`exchange`、`refresh`、`logout` 负责挑战与会话。挑战有效 180 秒，访问令牌有效 15 分钟，刷新凭据在 30 天内有效。成功续期后重新计算这 30 天，距首次登录最多 90 天。并发刷新只有一个成功；响应丢失后重新授权，不能继续重试旧令牌。客户端须原子保存整组新凭据。
 
+登录限额不变。计数 CAS 明确返回冲突时，短暂随机退避后重新读取计数，最多 16 次尝试，并在 2 秒冲突恢复预算用尽后停止；已有进行中的存储调用仍受桥接自身的超时约束。存储异常、结果不确定的写入、钉钉授权码兑换、challenge 消费和会话凭据轮换都不使用这项重试。达到限额仍返回 `429 mobile_rate_limited`。
+
+排查原生登录失败时，用客户端的 `eventId` 查询错误审计。`authStage` 区分限流、challenge 读取/消费、身份交换、账号查询与会话保存/轮换；`failureCategory` 仅保留固定分类。阶段只写入后台审计，响应仍使用原有错误码和状态码；不记录授权码、state、PKCE verifier、令牌、身份标识或上游错误正文。`mobile_busy` 表示明确的冲突耗尽，`mobile_unavailable` 需要结合阶段判断，不能仅凭 503 认定钉钉服务异常。
+
 首版只关联已有可信钉钉账号，按已验证的 `unionId` 或企业通讯录映射核实身份，禁止按昵称或手机号合并。网站账号目录仍在 KV，原生单独建立新身份会导致网页和原生首次并发注册时分裂账号；需先让用户通过网站登记，或将两种注册入口一起迁移到统一身份事务。未关联时返回 `409 account_link_required`。
 
 ## 推送
