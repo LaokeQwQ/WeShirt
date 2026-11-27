@@ -13,7 +13,7 @@ async function loadRelease() {
     const name = 'WeShirt-v' + versionName + '-build' + versionCode + '.apk'
     download.href = './' + name
     download.download = name
-    version.textContent = 'v' + versionName + ' · Build ' + versionCode + ' · ' + (size / (1024 * 1024)).toFixed(1) + ' MB'
+    version.textContent = 'v' + versionName + ' · ' + (size / (1024 * 1024)).toFixed(1) + ' MB'
     download.hidden = false
   } catch {
     version.textContent = '暂时无法读取发行版本，刷新页面后重试。'
