@@ -68,7 +68,8 @@ async function finalize(c, store) {
   headers.set('content-type', 'application/json; charset=utf-8'); headers.set('cache-control', 'no-store')
   c.res = new Response(JSON.stringify(payload), { status: response.status, headers })
   const failureCategory = c.get('failureCategory')
-  await logEvent(store, { type: 'error', level: response.status >= 500 ? 'error' : 'warn', action: '接口请求失败', target: requestRoute(c), detail: { eventId: id, status: response.status, method: c.req.method, code: typeof code === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(code) ? code : typeof code === 'number' ? code : 'http_error', ...(failureCategory ? { failureCategory } : {}) } }).catch(() => {})
+  const authStage = c.get('authStage')
+  await logEvent(store, { type: 'error', level: response.status >= 500 ? 'error' : 'warn', action: '接口请求失败', target: requestRoute(c), detail: { eventId: id, status: response.status, method: c.req.method, code: typeof code === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(code) ? code : typeof code === 'number' ? code : 'http_error', ...(failureCategory ? { failureCategory } : {}), ...(typeof authStage === 'string' && /^(?:challenge|exchange|refresh)_[a-z_]{1,40}$/.test(authStage) ? { authStage } : {}) } }).catch(() => {})
 }
 
 export function registerRequestSafety(app, { store, authenticate, now = () => Date.now() } = {}) {

@@ -1,4 +1,4 @@
-import { createMobileAuth, MOBILE_PACKAGE, MobileError } from '../packages/core/mobile-auth.js'
+import { createMobileAuth, MOBILE_PACKAGE, MobileError, mobileAuthFailureDiagnostics } from '../packages/core/mobile-auth.js'
 import { readBoundedJson } from '../packages/core/assistant.js'
 import { scopedFavoriteMachines } from '../packages/core/favorites.js'
 import { DORM_BUILDINGS, normalizeDormBuilding } from '../packages/core/buildings.js'
@@ -17,6 +17,8 @@ export function registerMobileRoutes(app, { store, env = {}, authenticate, getBo
   const wrap = handler => async c => {
     try { return c.json(await handler(c), 200, { 'Cache-Control': 'private, no-store' }) }
     catch (error) {
+      const diagnostic = mobileAuthFailureDiagnostics(error)
+      if (diagnostic) { c.set('authStage', diagnostic.stage); c.set('failureCategory', diagnostic.category) }
       const known = error instanceof MobileError
       return c.json({ error: { code: known ? error.code : error?.code === 'body_too_large' ? 'too_large' : 'mobile_unavailable', message: known ? error.message : '移动服务暂不可用，请稍后重试' } }, known ? error.status : error?.code === 'body_too_large' ? 413 : 503, { 'Cache-Control': 'no-store' })
     }
