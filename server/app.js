@@ -58,7 +58,7 @@ import { getUserIdentity } from '../packages/core/identity.js'
 import { registerPermissionMiddleware, registerPermissionRoutes } from './permissions.js'
 import { persistAudit, registerAuditMiddleware } from './audit-middleware.js'
 import { recordRequestFailure, registerRequestSafety } from './request-safety.js'
-import { registerTaskMutationLock, withTaskMutation } from './task-mutation-lock.js'
+import { withTaskMutation } from './task-mutation-lock.js'
 import { processFavoriteReminders } from '../packages/core/favorites.js'
 import { processQueueReminders } from '../packages/core/queue-reminders.js'
 import { runOperations, applyMachineHealth, withOperationLock, resetHealthObservation } from '../packages/core/operations.js'
@@ -1060,7 +1060,12 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     await next()
   })
   registerRequestSafety(app,{store,env,authenticate:authenticateRequest})
-  registerTaskMutationLock(app,{store,env})
+  // Registration takes its lock inside the handler, after validation and
+  // read-only setup. Other task mutations retain their existing shared lock.
+  app.use('/api/tasks/*', async (c, next) => {
+    if (c.req.path === '/api/tasks' || !['POST', 'PATCH', 'DELETE'].includes(c.req.method)) return next()
+    return withTaskMutation(store, env.BUILDING_ID, next)
+  })
   app.use('/api/user/*',async(c,next)=>{
     if (!['POST','PATCH','PUT','DELETE'].includes(c.req.method) && c.req.path!=='/api/user/dingtalk-avatar') return next()
     const uid=await bearerUser(c,env)
@@ -1145,8 +1150,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
   // 只要用户打开任意需要看板的页面，就顺带把同步推一下。
   // 之前只有 /api/machines 会触发，用户直接进「我的洗衣」就永远不触发，
   // 表现就是「洗完没人提醒」。
-  function kickSync(c) {
-    const entry = store.get(`machines:${env.BUILDING_ID || 'b1'}`, null)
+  function kickSync(c, cachedEntry) {
+    const entry = cachedEntry === undefined ? store.get(`machines:${env.BUILDING_ID || 'b1'}`, null) : Promise.resolve(cachedEntry)
     const ctx = execCtxOf(c)
     const job = entry
       .then((e) => refreshIfStale(c, e))
@@ -1719,15 +1724,18 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const userId = await bearerUser(c, env)
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
       const bid = env.BUILDING_ID || 'b1'
-      await refreshIfStale(c, await store.get(`machines:${bid}`, null))
-      const [list, savedMapping, cachedBoard] = await Promise.all([
+      const [list, savedMapping, cachedBoard, calibration] = await Promise.all([
         pruneUserTasks(store, env.BUILDING_ID, userId),
         store.get(`mapping:${env.BUILDING_ID || 'b1'}`, null),
         store.get(`machines:${env.BUILDING_ID || 'b1'}`, null),
+        readCalibrationSettings(store,bid),
       ])
+      // A post-registration reload must return the saved task immediately;
+      // stale upstream synchronization and notification delivery run separately.
+      kickSync(c, cachedBoard)
       const taskOccupancy = await store.get(`occupancy:${bid}`, {})
       const registeredBoard = applyRegisteredAvailability(cachedBoard?.board, { occupancy:taskOccupancy, tasksByUser:new Map([[userId,list]]) })
-      const calibratedBoard = projectCalibratedBoard(registeredBoard, await readCalibrationSettings(store,bid), { mapping: savedMapping?.mapping || {} })
+      const calibratedBoard = projectCalibratedBoard(registeredBoard, calibration, { mapping: savedMapping?.mapping || {} })
       const boardMachines = calibratedBoard?.floors?.flatMap((f) => f.machines) || []
       const now = nowISO()
       const nowMs = Date.now()
@@ -1831,10 +1839,12 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       if (Object.hasOwn(body, 'useDisinfectant') && typeof useDisinfectant !== 'boolean') return apiErr('bad_param', '是否使用消毒液须为布尔值')
       if (Object.hasOwn(body, 'selfCleaned') && typeof selfCleaned !== 'boolean') return apiErr('bad_param', '自清洁记录须为布尔值')
       const buildingId = env.BUILDING_ID || 'b1'
-      const [entry, savedMapping] = await Promise.all([
+      const [entry, savedMapping, user] = await Promise.all([
         store.get(`machines:${buildingId}`, null),
         store.get(`mapping:${buildingId}`, null),
+        getUserOrRebuild(store, userId),
       ])
+      if (user.transient) return apiErr('account_out_of_sync', '账号资料正在同步，请稍后登记', 409)
       const found = entry?.board?.floors
         ?.flatMap((f) => f.machines)
         ?.find((m) => String(m.id) === String(machineId))
@@ -1881,74 +1891,77 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       }
       if(program==='self_clean'&&(isDryer||mode==='machine'||mins!==6))return apiErr('bad_param','桶自洁请明确选择六分钟洗衣机程序')
 
-      const startAt = nowISO()
-      if (!endAt) endAt = new Date(Date.now() + mins * 60000).toISOString()
-
       // 机器名从看板取（取不到则回退 machineId）
       let machineName = machineId
       if (found) machineName = found.name || machineId
 
-      // 并发优化：下面几次读互不依赖，一次性并发取，减少串行往返
-      const [user, occ, qList, list] = await Promise.all([
-        getUserOrRebuild(store, userId),
-        store.get(`occupancy:${buildingId}`, {}),
-        store.get(`queue:${buildingId}`, []),
-        store.get(`tasks:${userId}`, []),
-      ])
+      const result = await withTaskMutation(store, buildingId, async () => {
+        // Mutable snapshots must be read after acquiring the shared task/queue
+        // locks. Read-only machine/user setup and provider I/O stay outside.
+        const [occ, qList, list] = await Promise.all([
+          store.get(`occupancy:${buildingId}`, {}),
+          store.get(`queue:${buildingId}`, []),
+          store.get(`tasks:${userId}`, []),
+        ])
 
-      const current = occ && typeof occ === 'object' ? occ[machineId] : null
-      if (current?.userId && current.userId !== userId && Date.parse(current.endAt) >= Date.now() - DAY_MS) return apiErr('machine_occupied', '这台机器已有他人登记，请刷新确认现场状态', 409)
-      if (user.transient) return apiErr('account_out_of_sync', '账号资料正在同步，请稍后登记', 409)
-      const task = {
-        id: 't_' + randomCode(10),
-        machineId,
-        machineName,
-        kind,
-        // 楼层留着给通知文案用（「桂园1楼7号机 · 1 楼」比只写机器名清楚）
-        floorCode: found?.floorCode || '',
-        startAt,
-        createdAt: startAt,
-        endAt,
-        // 登记方式：machine=跟着机器剩余时间，duration=用户自己选的时长
-        mode: mode === 'machine' ? 'machine' : 'duration',
-        minutes: mins,
-        timingSource:mode==='machine'?(found?.estimated?'estimate':'upstream'):'user',
-        estimated:mode==='machine'&&found?.estimated===true,
-        ...(program==='self_clean'?{program:'self_clean'}:{}),
-        note: noteText,
-        useDisinfectant: useDisinfectant === true,
-        selfCleaned: selfCleaned === true,
-        done: false,
-        notified: false,
-      }
-      const tasks = retainedTasks(list)
-      tasks.push(task)
-      await store.put(`tasks:${userId}`, tasks)
+        const current = occ && typeof occ === 'object' ? occ[machineId] : null
+        if (current?.userId && current.userId !== userId && Date.parse(current.endAt) >= Date.now() - DAY_MS) return apiErr('machine_occupied', '这台机器已有他人登记，请刷新确认现场状态', 409)
+        const startAt = nowISO()
+        const taskEndAt = endAt || new Date(Date.now() + mins * 60000).toISOString()
+        const task = {
+          id: 't_' + randomCode(10),
+          machineId,
+          machineName,
+          kind,
+          // 楼层留着给通知文案用（「桂园1楼7号机 · 1 楼」比只写机器名清楚）
+          floorCode: found?.floorCode || '',
+          startAt,
+          createdAt: startAt,
+          endAt: taskEndAt,
+          // 登记方式：machine=跟着机器剩余时间，duration=用户自己选的时长
+          mode: mode === 'machine' ? 'machine' : 'duration',
+          minutes: mins,
+          timingSource:mode==='machine'?(found?.estimated?'estimate':'upstream'):'user',
+          estimated:mode==='machine'&&found?.estimated===true,
+          ...(program==='self_clean'?{program:'self_clean'}:{}),
+          note: noteText,
+          useDisinfectant: useDisinfectant === true,
+          selfCleaned: selfCleaned === true,
+          done: false,
+          notified: false,
+        }
+        const tasks = retainedTasks(list)
+        tasks.push(task)
+        await store.put(`tasks:${userId}`, tasks)
 
-      // 占用登记：记录"谁在这台机器上开洗"（面板展示头像+昵称打码+几分钟前）
-      const occMap = occ && typeof occ === 'object' ? { ...occ } : {}
-      occMap[machineId] = {
-        taskId: task.id,
-        userId,
-        nick: user.nick,
-        avatar: normalizeAvatar(user.avatar),
-        avatarUrl: normalizeAvatarUrl(user.avatarUrl),
-        startAt,
-        endAt,
-      }
+        // 占用登记：记录"谁在这台机器上开洗"（面板展示头像+昵称打码+几分钟前）
+        const occMap = occ && typeof occ === 'object' ? { ...occ } : {}
+        occMap[machineId] = {
+          taskId: task.id,
+          userId,
+          nick: user.nick,
+          avatar: normalizeAvatar(user.avatar),
+          avatarUrl: normalizeAvatarUrl(user.avatarUrl),
+          startAt,
+          endAt: taskEndAt,
+        }
 
-      // 开洗（任意机器）= 自动退出自己的所有排队
-      const qArr = Array.isArray(qList) ? qList : []
-      const qNext = qArr.filter((q) => q.userId !== userId)
+        // 开洗（任意机器）= 自动退出自己的所有排队
+        const qArr = Array.isArray(qList) ? qList : []
+        const qNext = qArr.filter((q) => q.userId !== userId)
 
-      // 上面三次写也并发落盘
-      await Promise.all([
-        store.put(`occupancy:${buildingId}`, occMap),
-        qNext.length !== qArr.length ? store.put(`queue:${buildingId}`, qNext) : Promise.resolve(),
-        // 有人重新登记这台机器 → 「提醒取衣」的累计次数与冷却清零
-        store.del(`urgecount:${buildingId}:${machineId}`),
-        store.del(`urge:${buildingId}:${machineId}`),
-      ])
+        // 上面三次写也并发落盘
+        await Promise.all([
+          store.put(`occupancy:${buildingId}`, occMap),
+          qNext.length !== qArr.length ? store.put(`queue:${buildingId}`, qNext) : Promise.resolve(),
+          // 有人重新登记这台机器 → 「提醒取衣」的累计次数与冷却清零
+          store.del(`urgecount:${buildingId}:${machineId}`),
+          store.del(`urge:${buildingId}:${machineId}`),
+        ])
+        return task
+      }, { queue: true })
+      if (result instanceof Response) return result
+      const task = result
 
       if (mobilePush.providers.length) {
         const wake = mobilePush.notify(userId, { nativeKind: 'TASK_REGISTERED', nativeEventKey: `task-registered:${task.id}`, taskId: task.id })
@@ -1964,7 +1977,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         detail: {
           mode: task.mode,
           minutes: mins,
-          endAt,
+          endAt: task.endAt,
           hasNote: Boolean(noteText),
           useDisinfectant: task.useDisinfectant,
           selfCleaned: task.selfCleaned,
@@ -1981,7 +1994,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           startAt: task.startAt,
           ...taskLifecycle(task),
           endAt: task.endAt,
-          leftMin: await computeLeftMin(task.endAt, startAt),
+          leftMin: await computeLeftMin(task.endAt, task.startAt),
           done: false,
         },
       })
