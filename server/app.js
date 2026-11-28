@@ -1823,7 +1823,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         const now = Date.now()
         const recent = board => {
           const age = now - Date.parse(board?.updatedAt || '')
-          return age >= 0 && age < 5 * 60_000
+          return age >= -30_000 && age < 5 * 60_000
         }
         let board = mayFallback && publicBoardFallbacks.get(dorm)
         if (!recent(board)) board = null
@@ -1834,7 +1834,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         const ageMs = now - Date.parse(board?.updatedAt || '')
         if (recent(board)) {
           return json({ board, mapping: {}, freshness: { serverNow: new Date(now).toISOString(), updatedAt: board.updatedAt,
-            ageSeconds: Math.floor(ageMs / 1000), stale: true, syncFailed: true, errorStage: 'board_storage',
+            ageSeconds: Math.max(0, Math.floor(ageMs / 1000)), stale: true, syncFailed: true, errorStage: 'board_storage',
             eventId: c.get('eventId') } }, 200, { 'Cache-Control': 'no-store' })
         }
         return apiErr('board_storage_busy', '设备状态暂时无法读取，请稍后重试', 503)

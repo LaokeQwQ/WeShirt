@@ -60,3 +60,11 @@ test('cloud mirror rejects old or mismatched snapshots and never repeats an unce
   assert.equal(calls, 1)
   assert.equal([...rows.values()][0].value.updatedAt, stamp(at - 1000))
 })
+
+test('a reader a few seconds behind the CloudBase writer can use the layout without trusting live status', async () => {
+  const { store, atomic } = fixture()
+  assert.equal((await store.publish({ board: board(at + 8000) })).status, 'published')
+  assert.equal((await store.read({ dorm: 'one' })).floors[0].machines[0].state, 'unknown')
+  const tooFarBehind = createCloudBoardStore(atomic, { now: () => at - 30000 })
+  assert.equal(await tooFarBehind.read({ dorm: 'one' }), null)
+})

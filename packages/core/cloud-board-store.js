@@ -80,7 +80,7 @@ export function createCloudBoardStore(atomicStore, { partition = 'b1', now = Dat
       if (!dormCode(dorm) || !Number.isFinite(maxAgeMs) || maxAgeMs < 1) return null
       const snapshot = parse(await atomicStore.get(await name))
       const age = snapshot ? now() - Date.parse(snapshot.updatedAt) : Infinity
-      return age >= 0 && age < Math.min(maxAgeMs, 5 * 60000) ? renderDorm(snapshot, dorm) : null
+      return age >= -30_000 && age < Math.min(maxAgeMs, 5 * 60000) ? renderDorm(snapshot, dorm) : null
     },
   }
 }
