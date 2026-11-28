@@ -77,7 +77,7 @@ New mutations must preserve authorization, target scope, idempotency and audit c
 
 Cover simultaneous writes, conflicting idempotency bodies, changed identities and grants, stale profile responses and scoped results. Individual writes commit in PostgreSQL transactions. Application locks still serialize multi-step updates only within one runtime. Use compare-and-set operations or a dedicated database transaction where atomicity across runtimes is required.
 
-Identity, permissions, authentication tickets and scope decisions read from CloudBase PostgreSQL. Default values apply only when a record is absent. Storage failures propagate. Prefix listings traverse database pages and the runtime has no application storage result cache. Run `node --test tests/site-store-postgres.test.js tests/edge-task-lifetime.test.js` for targeted coverage.
+Identity, permissions, authentication tickets and scope decisions read from CloudBase PostgreSQL. Default values apply only when a record is absent. Storage failures propagate. Prefix listings traverse database pages and the runtime has no application storage result cache. Run `node --test tests/site-store-postgres.test.js tests/site-store-authorization.test.js tests/edge-task-lifetime.test.js` for targeted coverage.
 
 `GET /api/machines` returns `no-store` and `freshness` containing server time, snapshot age and sync failure state. Clients coalesce reads for five seconds and keep the latest known snapshot. Foreground, online and page restoration revalidate. Comments and other auxiliary requests load independently of device updates. Hashed static assets retain long caching.
 

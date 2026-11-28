@@ -77,7 +77,7 @@ GitHub 公共仓库还需要在 Settings → Actions → Policies 为 `.github/w
 
 回归应覆盖并发提交、不同正文复用标识、账号和权限变更、昵称旧响应覆盖和范围过滤。通用业务存储的单次写入在 PostgreSQL 事务内提交，涉及多次读改写的流程仍只在同一运行时内串行。需要跨实例原子性的流程使用条件写入或专用数据库事务。
 
-身份、权限、认证票据及范围判定数据从 CloudBase PostgreSQL 读取。只有记录不存在时才能使用默认值，存储故障必须报错。列表按前缀逐页读取，运行时不缓存业务存储结果。针对性回归使用 `node --test tests/site-store-postgres.test.js tests/edge-task-lifetime.test.js`。
+身份、权限、认证票据及范围判定数据从 CloudBase PostgreSQL 读取。只有记录不存在时才能使用默认值，存储故障必须报错。列表按前缀逐页读取，运行时不缓存业务存储结果。针对性回归使用 `node --test tests/site-store-postgres.test.js tests/site-store-authorization.test.js tests/edge-task-lifetime.test.js`。
 
 `GET /api/machines` 返回 `no-store` 与 `freshness`（服务端时间、快照年龄、同步失败标记），前端保留 5 秒请求合并。只有更新的快照可以覆盖已展示的机器状态。回到前台、网络恢复和历史页面恢复时重新校验。留言等附属接口独立加载。静态哈希资源继续使用长期缓存。
 

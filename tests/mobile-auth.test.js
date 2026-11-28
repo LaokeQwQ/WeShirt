@@ -192,7 +192,7 @@ test('native login, profile and permissions do not wait on unrelated site runtim
   const reads = []
   const store = { ...f.store, async get(key, fallback) {
     reads.push(key)
-    if (blocked.has(key)) throw Object.assign(new Error('temporary runtime store outage'), { code: 'edge_kv_read_failed' })
+    if (blocked.has(key)) throw Object.assign(new Error('temporary runtime store outage'), { code: 'site_store_unavailable' })
     return f.store.get(key, fallback)
   } }
   const app = createApp({ store, env, mobile: { atomicStore: f.atomicStore, identityProvider: f.identityProvider } })

@@ -22,7 +22,7 @@ function createBridge(rows, beforeGet = async () => {}) {
       result = true
     } else if (op === 'delete') {
       result = rows.delete(key)
-    } else if (op === 'list') {
+    } else if (op === 'list_keys') {
       result = { rows: [...rows].filter(([name]) => name.startsWith(prefix)).map(([key, value]) => ({ key, value })), next: null }
     } else {
       assert.fail('Unexpected bridge operation')
@@ -151,20 +151,15 @@ test('Pages rejects missing CloudBase configuration without using a KV binding',
   assert.equal(touched, false)
 })
 
-test('Pages freezes all API routes without contacting storage', async () => {
-  let contacted = false
-  const onRequest = createPagesHandler({ fetch: async () => { contacted = true } })
-  const env = { ...storageEnv, SITE_STORE_MIGRATION_MODE: 'freeze' }
-  for (const [path, method] of [['/api/health', 'GET'], ['/api/machines', 'GET'], ['/api/cron/ingest', 'POST'], ['/api/tasks', 'DELETE']]) {
-    const response = await onRequest({ env, request: new Request('https://site.example' + path, { method }) })
-    assert.equal(response.status, 503)
-    assert.equal(response.headers.get('cache-control'), 'no-store')
-    assert.equal(response.headers.get('retry-after'), '15')
-    const { error } = await response.json()
-    assert.equal(error.code, 'site_store_migrating')
-    assert.equal(error.eventId, response.headers.get('x-event-id'))
-  }
-  assert.equal(contacted, false)
+test('Pages no longer serves the completed migration export route', async () => {
+  const onRequest = createBridge(new Map())
+  const response = await onRequest({ env: storageEnv, request: new Request('https://site.example/api/_migration/edge-store-export', {
+    method: 'POST', body: JSON.stringify({ op: 'list', cursor: null }),
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer former-migration-secret' },
+  }) })
+  assert.equal(response.status, 404)
+  const { error } = await response.json()
+  assert.equal(error.eventId, response.headers.get('x-event-id'))
 })
 
 test('storage probe reads from CloudBase across independent Pages runtimes', async () => {

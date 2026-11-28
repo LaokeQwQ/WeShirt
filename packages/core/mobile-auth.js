@@ -34,7 +34,6 @@ async function authStage(stage, operation) {
     const category = problem instanceof MobileError ? problem.code === 'mobile_busy' ? 'mobile_cas_contention' : 'mobile_auth_rejected' :
       problem.message === 'mobile_store_unavailable' ? 'mobile_store_unavailable' :
       problem.code === 'site_store_unavailable' ? 'site_store_unavailable' :
-      problem.code === 'edge_kv_read_failed' ? 'edge_kv_read_failed' :
       problem.name === 'TimeoutError' ? 'timeout' : problem.name === 'AbortError' ? 'aborted' : 'mobile_auth_unavailable'
     if (!authFailures.has(problem)) authFailures.set(problem, Object.freeze({ stage, category }))
     throw problem
