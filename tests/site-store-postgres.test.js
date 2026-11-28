@@ -1,15 +1,21 @@
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { PGlite } from '@electric-sql/pglite'
 
 const migration = new URL('../cloudbase/migrations/20261128134500_site_store.sql', import.meta.url)
+const chunks = new URL('../cloudbase/migrations/20261128160000_site_store_chunks.sql', import.meta.url)
 const functions = {
   get: { signatures: 'text', args: ['$1::text'] },
   put: { signatures: 'text, jsonb', args: ['$1::text', '$2::jsonb'] },
   delete: { signatures: 'text', args: ['$1::text'] },
   list: { signatures: 'text, text, integer', args: ['$1::text', '$2::text', '$3::integer'] },
   import: { signatures: 'jsonb', args: ['$1::jsonb'] },
+  stage: { signatures: 'text, integer, text, boolean', args: ['$1::text', '$2::integer', '$3::text', '$4::boolean'] },
+  commit: { signatures: 'text, integer, text, boolean', args: ['$1::text', '$2::integer', '$3::text', '$4::boolean'] },
+  read_chunk: { signatures: 'text, integer, text', args: ['$1::text', '$2::integer', '$3::text'] },
+  list_keys: { signatures: 'text, text, integer', args: ['$1::text', '$2::text', '$3::integer'] },
 }
 let db
 
@@ -38,12 +44,14 @@ const get = key => executeRpc('get', [key])
 const put = (key, value) => executeRpc('put', [key, JSON.stringify(value)])
 const list = (prefix, afterKey = null, limit = 100) => executeRpc('list', [prefix, afterKey, limit])
 const importRows = rows => executeRpc('import', [JSON.stringify(rows)])
+const stage = (id, part, value, importOnly = false) => executeRpc('stage', [id, part, value, importOnly])
 
 before(async () => {
   db = new PGlite()
   await db.waitReady
   await db.exec('CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN;')
   await db.exec(await readFile(migration, 'utf8'))
+  await db.exec(await readFile(chunks, 'utf8'))
 })
 after(async () => { await db?.close() })
 
@@ -152,6 +160,10 @@ test('RPC grants, JWT check, schema ACL and forced RLS protect site state', asyn
     delete: [key],
     list: ['roles:', null, 100],
     import: [JSON.stringify([{ key, value: null }])],
+    stage: [crypto.randomUUID(), 0, 'null', false],
+    commit: [crypto.randomUUID(), 1, key, false],
+    read_chunk: [key, 0, null],
+    list_keys: ['roles:', null, 100],
   }
   for (const [op, { signatures }] of Object.entries(functions)) {
     await assert.rejects(executeRpc(op, fixture[op], { role: 'anon' }), { code: '42501' })
@@ -171,4 +183,99 @@ test('RPC grants, JWT check, schema ACL and forced RLS protect site state', asyn
   const result = await asRole('authenticated', { role: 'authenticated' }, tx => tx.query('SELECT key FROM weshirt_site_private.entries'))
   assert.deepEqual(result.rows, [])
   assert.deepEqual(await get(key), { found: true, value: { hidden: true } })
+})
+
+test('staged chunks are immutable until a validated, idempotent commit', async () => {
+  const id = crypto.randomUUID(), key = 'chunks:photo'
+  const value = { photo: 'a'.repeat(190000) }
+  const serialized = JSON.stringify(value)
+  const parts = serialized.match(/.{1,100000}/g)
+  assert.equal(await stage(id, 0, parts[0]), true)
+  assert.equal(await stage(id, 0, parts[0]), true)
+  await assert.rejects(stage(id, 0, parts[1]), { code: '22023' })
+  await assert.rejects(executeRpc('commit', [id, 2, key, false]), { code: '22023' })
+  assert.deepEqual(await get(key), { found: false })
+  assert.equal(await stage(id, 1, parts[1]), true)
+  assert.equal(await executeRpc('commit', [id, 2, key, false]), true)
+  assert.deepEqual(await get(key), { found: true, value })
+  assert.equal(await put(key, 'after upload'), true)
+  assert.equal(await executeRpc('commit', [id, 2, key, false]), true)
+  assert.deepEqual(await get(key), { found: true, value: 'after upload' })
+  await assert.rejects(executeRpc('commit', [id, 2, 'chunks:wrong-key', false]), { code: '22023' })
+  await assert.rejects(stage(id, 2, parts[0]), { code: '22023' })
+  assert.equal(await stage(id, 0, parts[0]), true)
+  const internalId = createHash('sha256').update('false:' + id).digest('hex').slice(0, 32)
+  const { rows } = await db.query('SELECT count(*)::integer AS count FROM weshirt_site_private.upload_parts WHERE id = $1', [internalId])
+  assert.equal(rows[0].count, 0)
+})
+
+test('chunk imports neither overwrite existing state nor partially apply malformed serialized values', async () => {
+  const id = crypto.randomUUID(), key = 'chunks:transfer'
+  await put(key, 1)
+  assert.equal(await stage(id, 0, '2', true), true)
+  await assert.rejects(executeRpc('commit', [id, 1, key, false]), { code: '22023' })
+  assert.equal(await executeRpc('commit', [id, 1, key, true]), false)
+  assert.equal(await executeRpc('commit', [id, 1, key, true]), false)
+  assert.deepEqual(await get(key), { found: true, value: 1 })
+  const invalid = crypto.randomUUID()
+  assert.equal(await stage(invalid, 0, '"unfinished'), true)
+  await assert.rejects(executeRpc('commit', [invalid, 1, key, false]), { code: '22P02' })
+  assert.deepEqual(await get(key), { found: true, value: 1 })
+  const internalId = createHash('sha256').update('false:' + invalid).digest('hex').slice(0, 32)
+  await db.query("UPDATE weshirt_site_private.uploads SET expires_at = statement_timestamp() - interval '1 minute' WHERE id = $1", [internalId])
+  await assert.rejects(executeRpc('commit', [invalid, 1, key, false]), { code: '22023' })
+  await stage(crypto.randomUUID(), 0, 'null')
+  assert.equal((await db.query('SELECT count(*)::integer AS count FROM weshirt_site_private.upload_parts WHERE id = $1', [internalId])).rows[0].count, 0)
+})
+
+test('reads bound escaped bytes, preserve Unicode, and reject mixed versions', async () => {
+  const key = 'chunks:unicode'
+  const value = { photo: '🫧'.repeat(33000), note: '\\u中文\n'.repeat(2700) }
+  await put(key, value)
+  const first = await executeRpc('read_chunk', [key, 0, null])
+  assert.equal(first.found, true)
+  assert.equal(first.next, 10000)
+  assert.match(first.digest, /^[a-f0-9]{64}$/)
+  const parts = [first.text]
+  let next = first.next
+  while (next !== null) {
+    const row = await executeRpc('read_chunk', [key, next, first.digest])
+    assert.ok(Buffer.byteLength(JSON.stringify(row), 'utf8') < 91000)
+    assert.equal(row.digest, first.digest)
+    assert.ok(row.next === null || row.next > next)
+    parts.push(row.text)
+    next = row.next
+  }
+  assert.deepEqual(JSON.parse(parts.join('')), value)
+  await put(key, { newVersion: true })
+  await assert.rejects(executeRpc('read_chunk', [key, first.next, first.digest]), { code: '40001' })
+  await executeRpc('delete', [key])
+  await assert.rejects(executeRpc('read_chunk', [key, first.next, first.digest]), { code: '40001' })
+  assert.deepEqual(await executeRpc('read_chunk', [key, 0, null]), { found: false })
+})
+
+test('gateway-safe pagination inlines small values, excludes expired rows and respects literal byte ordering', async () => {
+  const expired = Date.now() - 60000
+  await importRows([
+    { key: 'chunks-list:%1', value: 'a'.repeat(120000) },
+    { key: 'chunks-list:%0', value: null, expiresAtMs: expired },
+    { key: 'chunks-list:%中', value: 0 },
+    { key: 'chunks-list:x', value: 1 },
+  ])
+  assert.deepEqual(await executeRpc('list_keys', ['chunks-list:%', null, 1]), {
+    rows: [{ key: 'chunks-list:%1', chunked: true }], next: 'chunks-list:%1',
+  })
+  assert.deepEqual(await executeRpc('list_keys', ['chunks-list:%', 'chunks-list:%1', 1]), {
+    rows: [{ key: 'chunks-list:%中', value: 0 }], next: null,
+  })
+  await put('chunks-page:1', 'a'.repeat(45000))
+  await put('chunks-page:2', 'b'.repeat(45000))
+  const first = await executeRpc('list_keys', ['chunks-page:', null, 100])
+  assert.equal(first.rows.length, 1)
+  assert.equal(first.next, 'chunks-page:1')
+  assert.equal(first.rows[0].value.length, 45000)
+  const second = await executeRpc('list_keys', ['chunks-page:', first.next, 100])
+  assert.equal(second.rows.length, 1)
+  assert.equal(second.rows[0].value.length, 45000)
+  assert.equal(second.next, null)
 })
