@@ -148,6 +148,7 @@ const activeTasks = computed(() => partition.value.activeTasks)
 const taskHistory = computed(() => partition.value.history)
 function formatTime(value) { const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN') : '登记时间未知' }
 let tasksPending = null
+const completedPickups = new Map()
 let machinesPending = null
 let pickupsPending = null
 let disposed = false
@@ -317,6 +318,7 @@ async function submit() {
 // 我已取衣：标记完成（不是删除，留一条记录）
 async function take(t) {
   if (takingId.value || !canTake(t)) return
+  const owner = userStore.user?.id
   takingId.value = t.id
   try {
     const result = await confirmAction({
@@ -327,18 +329,22 @@ async function take(t) {
       describe: (snapshot) => ({ title: '确认已取衣', message: `${snapshot.name || '这台机器'}\n确认已取走自己的衣物后，将结束这条登记并释放登记占用。` }),
       execute: (snapshot) => {
         if (!snapshot.available) throw new Error('机器状态已变化，请核对后再确认取衣')
-        return api(`/api/tasks/${snapshot.id}/take`, { method: 'POST' })
+        return api(`/api/tasks/${encodeURIComponent(snapshot.id)}/take`, { method: 'POST', timeout: 10000 })
       },
       onChanged: () => showToast('登记状态已变化，请刷新后重新确认'),
     })
     if (result.status !== 'submitted') return
-    t.done = true
-    t.takenAt = new Date().toISOString()
+    if (disposed || owner !== userStore.user?.id) return
+    const receipt = result.value?.task
+    if (receipt?.id !== t.id || receipt.done !== true) throw new Error('取衣结果待核对，正在刷新记录')
+    const takenAt = receipt.takenAt || new Date().toISOString()
+    completedPickups.set(t.id, { owner, takenAt })
     const source = tasks.value.find(item => item.id === t.id)
-    if (source) Object.assign(source, { done: true, takenAt: t.takenAt, takeState: 'taken' })
+    if (source) Object.assign(source, { done: true, takenAt, takeState: 'taken' })
     showToast('已标记完成')
   } catch (e) {
     showToast(e?.message || '操作失败')
+    if (!disposed && (e?.status >= 500 || !e?.status)) void loadTasks({ quiet: true })
   } finally {
     takingId.value = ''
   }
@@ -398,7 +404,12 @@ async function loadTasks({ quiet = false } = {}) {
     const data = await api('/api/tasks')
     if (disposed || owner !== userStore.user?.id) return
     if (!Array.isArray(data.tasks)) throw new Error('洗衣记录格式有误，请重试')
-    tasks.value = removeDeletedTasks(owner, data.tasks)
+    tasks.value = removeDeletedTasks(owner, data.tasks).map(task => {
+      const receipt = completedPickups.get(task.id)
+      if (receipt?.owner !== owner) return task
+      if (task.done) { completedPickups.delete(task.id); return task }
+      return { ...task, done: true, takenAt: receipt.takenAt, takeState: 'taken' }
+    })
     syncClock(data.serverNow)
     taskError.value = ''
   } catch (e) {

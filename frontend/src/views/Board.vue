@@ -10,7 +10,7 @@
       </template>
     </van-nav-bar>
 
-    <!-- 顶部统计 -->
+    <div class="board-content">
     <div class="stats">
       <div class="stat"><div class="stat-num">{{ board?.total ?? '-' }}</div><div class="stat-label">本楼机器</div></div>
       <div class="stat idle"><div class="stat-num">{{ board?.idle ?? '-' }}</div><div class="stat-label">空闲</div></div>
@@ -40,11 +40,12 @@
     <div v-if="error && board" class="board-tip">刷新失败，显示上次数据：{{ error }}</div>
     <div v-else-if="sourceBoard?.freshness?.syncFailed" class="board-tip">最近一次同步未成功，显示上次有效数据 <button @click="load(true)">重新检查</button></div>
     <div v-else-if="staleMinutes >= 3" class="board-tip">数据已 {{ staleMinutes }} 分钟未更新，请以现场为准</div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { api } from '../api'
 import { sortByAvailability } from '../machineOrder'
 import { useUserStore } from '../stores/user'
@@ -94,33 +95,81 @@ function goRoom() { router.push('/') }
 </script>
 
 <style scoped>
-.sort-note{display:flex;justify-content:space-between;padding:4px 14px;color:var(--text-dim);font-size:12px}.sort-note button{background:transparent;color:#93c5fd;border:0;padding:5px;cursor:pointer}.board-heading{display:flex;justify-content:space-between;align-items:center;padding:4px 14px}.board-heading h2{margin:0;font-size:18px}.board-heading span{font-size:11px;color:var(--text-dim)}.kind-filter{display:flex;gap:8px;padding:10px 12px}.kind-filter button{border:1px solid var(--border);background:var(--bg-card);color:var(--text-dim);border-radius:20px;padding:7px 13px}.kind-filter button.on{border-color:#60a5fa;color:#93c5fd;background:#1c3049}
+.board-content { width: min(100%, 1040px); margin-inline: auto; }
+.board-heading, .sort-note {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 4px 12px;
+}
+.board-heading h2 { min-width: 0; margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.board-heading > span, .sort-note { color: var(--text-dim); font-size: 12px; }
+.kind-filter { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
+.kind-filter button {
+  flex: 1;
+  min-height: 40px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+}
+.kind-filter button.on, .sort-note > button.on {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, var(--bg-card));
+  color: var(--text);
+}
+.sort-note > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.sort-note > button > span { font-size: 11px; color: var(--text-dim); }
+.sort-note svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.sort-note .on svg { fill: currentColor; }
 .dorm-switch { border: 0; background: transparent; color: inherit; font-size: 16px; font-weight: 600; cursor: pointer; }
-.board-tip { padding: 12px; color: #fbbf24; font-size: 12px; text-align: center; }
+.board-tip { padding: 12px; color: #fbbf24; font-size: 12px; text-align: center; overflow-wrap: anywhere; }
 .nav-actions { display: flex; align-items: center; gap: 14px; }
 .room-btn {
+  padding: 2px 9px;
+  border: 1px solid rgba(34, 197, 94, .45);
+  border-radius: 999px;
+  background: rgba(34, 197, 94, .1);
+  color: #22c55e;
   font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.5px;
-  color: #22c55e;
-  border: 1px solid rgba(34, 197, 94, 0.45);
-  background: rgba(34, 197, 94, 0.1);
-  border-radius: 999px;
-  padding: 2px 9px;
   line-height: 18px;
+  letter-spacing: .5px;
 }
-.stats { display: flex; gap: 8px; padding: 12px; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 6px; padding: 12px; }
 .stat {
-  flex: 1; background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 12px; text-align: center; padding: 10px 4px;
+  padding: 9px 3px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  text-align: center;
 }
-.stat-num { font-size: 22px; font-weight: 700; }
+.stat-num { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .stat-label { font-size: 12px; color: var(--text-dim); }
 .stat.idle .stat-num { color: var(--st-idle); }
 .stat.occ .stat-num { color: var(--st-occupied); }
 .stat.fal .stat-num { color: var(--st-faulty); }
-.grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 0 12px; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; padding: 0 12px 18px; }
 .empty { text-align: center; padding: 40px 16px; }
-.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.kind-filter{flex-wrap:wrap}.kind-filter button{min-height:40px;flex:1;white-space:nowrap}.sort-note{align-items:center;gap:10px;padding:4px 12px 10px}.sort-note>span{white-space:nowrap}.sort-note>button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:8px 12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);font:inherit;font-size:12px;white-space:nowrap}.sort-note>button.on{border-color:var(--primary);background:color-mix(in srgb,var(--primary) 12%,var(--bg-card));color:var(--primary)}.sort-note svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6}.sort-note .on svg{fill:currentColor}.sort-note>button>span{font-size:11px;color:var(--text-dim)}.board-heading{gap:12px}.board-heading h2{min-width:0;overflow-wrap:anywhere}.board-heading>span{flex:none}
-.grid{grid-template-columns:minmax(0,1fr);gap:10px;padding:0 12px 18px}.board-heading{flex-wrap:wrap}.kind-filter button{white-space:normal}.kind-filter{padding-top:8px}.board-heading>span{font-size:12px}@media(min-width:1000px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:380px){.stats{gap:5px;padding-inline:10px}.stat-label{font-size:11px}.sort-note{flex-wrap:wrap}.kind-filter button{padding-inline:9px}}
+@media (min-width: 640px) {
+  .grid { grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+  .kind-filter button { flex: 0 1 auto; min-width: 88px; }
+}
+@media (min-width: 920px) { .grid { grid-template-columns: repeat(4, minmax(0,1fr)); } }
 </style>

@@ -1,17 +1,30 @@
 <template>
   <main class="assistant-page page">
-    <van-nav-bar title="洗衣助手" />
+    <van-nav-bar title="洗衣助手">
+      <template v-if="userStore.ready && userStore.isLoggedIn" #right>
+        <div class="assistant-nav-actions">
+          <button type="button" aria-label="查看历史对话" @click="openHistory">
+            <van-icon name="clock-o" aria-hidden="true" /><span>历史</span>
+          </button>
+          <button type="button" aria-label="助手设置" @click="showOptions = true"><van-icon name="setting-o" aria-hidden="true" /></button>
+        </div>
+      </template>
+    </van-nav-bar>
     <section class="assistant-top card assistant-enter">
-      <div><h1>今天怎么安排洗衣？</h1><p class="text-dim">{{ buildingName || '尚未绑定住宿楼' }} · 查询机器、洗护建议、安排时间</p></div>
+      <div><h1>今天怎么安排洗衣？</h1><p class="text-dim">{{ buildingName || '尚未绑定住宿楼' }}</p></div>
       <span v-if="status" class="quota">今日剩余 {{ status.usage.dailyRemaining }} / {{ status.usage.dailyLimit }}</span>
     </section>
-    <p v-if="error" class="notice error" role="alert">{{ error }}</p>
+    <p v-if="error && !showOptions && !showHistory" class="notice error" role="alert">{{ error }}</p>
     <section v-if="loading && !status" class="card notice" role="status">正在连接助手，个人资料会分别载入…</section>
     <section v-else-if="!status" class="card notice"><p>助手暂时无法连接。</p><van-button size="small" @click="load">重新连接</van-button></section>
     <section v-else-if="!status.ready" class="card notice"><b>AI 助手还未开放</b><p>管理员配置完成后即可提问。现在可以直接在看板查看机器。</p><router-link to="/list">查看机器状态 →</router-link></section>
     <section v-else-if="!status.dormBuilding" class="card notice"><b>先选一下住宿楼</b><p>助手会只查询你所绑定住宿楼的机器。</p><router-link to="/settings">前往设置 →</router-link></section>
 
     <template v-if="userStore.ready && userStore.isLoggedIn">
+      <van-popup v-model:show="showOptions" position="bottom" round class="assistant-sheet settings-sheet">
+        <section aria-label="助手设置">
+          <div class="section-head"><h2>助手设置</h2><button type="button" class="text-button" @click="showOptions = false">关闭</button></div>
+          <p v-if="error" class="notice error" role="alert">{{ error }}</p>
       <section v-for="resource in pendingResources" :key="resource.key" class="card resource-notice" role="status">正在读取{{ resource.label }}…</section>
       <section v-for="resource in failedResources" :key="resource.key" class="card resource-notice" role="alert"><span>{{ resource.label }}：{{ resources[resource.key].error }}</span><van-button size="small" @click="loadResource(resource.key, true)">重试此项</van-button></section>
       <section class="skills card">
@@ -33,9 +46,18 @@
           <div class="row-actions"><van-button type="primary" native-type="submit" size="small" :loading="promptSaving" :disabled="sending">保存并使用</van-button><van-button native-type="button" size="small" :disabled="promptSaving || sending || preferences.promptProfiles.length >= 8" @click="addPrompt">新建</van-button><van-button native-type="button" size="small" :disabled="promptSaving || sending || preferences.promptProfiles.length <= 1" @click="removePrompt">删除</van-button><button type="button" class="text-button" :disabled="promptSaving || sending" @click="resetPreferences">恢复平台默认</button></div>
         </form><p class="hint text-dim">修改后点击保存。提示词只调整回答方式；实时状态仍需重新查询，工具始终只读。</p>
       </section>
+      <section v-if="memory" class="memory card">
+        <div class="section-head"><h2>个人记忆</h2><label class="memory-toggle"><span>{{ memory.enabled ? '已开启' : '已关闭' }}</span><input type="checkbox" :checked="memory.enabled" :disabled="memorySaving || sending" @change="toggleMemory($event.target.checked)" /></label></div>
+        <p class="hint text-dim">默认关闭。开启后会将你的备注和近 14 天登记的常用洗衣时段用于回答，仅属于你的账号。</p>
+        <p v-if="memory.enabled" class="habit">{{ habitText }}</p>
+        <form class="stack" @submit.prevent="saveMemory"><label>我希望助手记住<textarea v-model="memoryNote" maxlength="500" rows="3" placeholder="例如：周二晚上有空；尽量使用冷水。" :disabled="memorySaving || sending" /></label><div class="section-head"><span class="hint text-dim">{{ memoryNote.length }}/500{{ memory.enabled ? '' : ' · 关闭时不会用于回答' }}</span><van-button native-type="submit" size="small" :loading="memorySaving" :disabled="sending">保存备注</van-button></div></form>
+        <button type="button" class="text-button danger forget" :disabled="memorySaving || sending" @click="clearMemory">清空并关闭记忆</button>
+      </section>
+      <details class="mcp card"><summary>连接个人只读 MCP</summary><p class="hint text-dim">支持 JSON-RPC HTTP。使用你的登录 Bearer 凭证访问同源 /api/mcp，可读取当前绑定住宿楼状态；不提供写入或通知工具。不要把个人登录凭证分享给他人。</p><code>{{ mcpUrl }}</code></details>
+        </section>
+      </van-popup>
 
-      <section class="conversation card" aria-label="与洗衣助手对话">
-        <div class="section-head"><h2>对话</h2><button type="button" class="text-button" @click="openHistory">查看历史对话</button></div>
+      <section class="conversation" aria-label="与洗衣助手对话">
         <p v-if="contextInfo?.compressed" class="hint text-dim" role="status">较早的对话已自动压缩，近期问题保留原文；需要时请补充细节。</p>
         <div ref="messageList" class="messages" aria-live="polite" aria-relevant="additions text" :aria-busy="sending">
           <div v-if="!messages.length && !draftTurn && !partialTurn" class="empty-state assistant-enter">
@@ -56,40 +78,49 @@
           </template>
         </div>
         <form class="composer" @submit.prevent="send">
-          <label class="sr-only" for="assistant-input">向洗衣助手提问</label>
-          <textarea id="assistant-input" v-model="input" rows="3" maxlength="1000" :disabled="!canChat || sending" placeholder="输入问题（最多 1000 字）" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send" />
-          <input v-if="photoAvailable" ref="cameraInput" class="sr-only" type="file" accept="image/*" capture="environment" aria-label="拍照" tabindex="-1" @change="choosePhoto" />
-          <input v-if="photoAvailable" ref="photoInput" class="sr-only" type="file" accept="image/*" aria-label="选择照片" tabindex="-1" @change="choosePhoto" />
-          <aside v-if="attachment" class="photo-preview">
-            <img :src="attachment" alt="待发送照片预览" />
-            <button type="button" class="text-button" :disabled="sending" @click="removePhoto">移除照片</button>
-            <p class="hint text-dim">发送时，照片会传给当前模型识别。</p>
-          </aside>
           <p v-if="refusal || suspended" class="safety-notice" role="alert">{{ refusal || '助手暂时停用，恢复时间：' + messageDate(status.blockedUntil) }}</p>
-          <p v-if="photoError" class="hint error" role="alert">{{ photoError }}</p>
-          <p v-else-if="preparingPhoto" class="hint text-dim" role="status">正在处理照片…</p>
-          <div>
+          <p v-if="status?.ready && !status.usage.dailyRemaining" class="composer-notice text-dim">今日额度已用完，明天再来；看板仍可正常查询。</p>
+          <div class="composer-field">
+            <label class="sr-only" for="assistant-input">向洗衣助手提问</label>
+            <input v-if="photoAvailable" ref="cameraInput" type="file" hidden accept="image/*" capture="environment" @change="choosePhoto" />
+            <input v-if="photoAvailable" ref="photoInput" type="file" hidden accept="image/*" @change="choosePhoto" />
+            <aside v-if="attachment" class="photo-preview">
+              <img :src="attachment" alt="待发送照片预览" />
+              <span class="hint text-dim">发送时，照片会传给当前模型识别。</span>
+              <button type="button" class="text-button" :disabled="sending" @click="removePhoto">移除照片</button>
+            </aside>
+            <textarea id="assistant-input" v-model="input" rows="1" maxlength="1000" :disabled="!canChat || sending" placeholder="问问洗衣助手…" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send" />
+            <p v-if="photoError" class="composer-notice error" role="alert">{{ photoError }}</p>
+            <p v-else-if="preparingPhoto" class="composer-notice text-dim" role="status">正在处理照片…</p>
+            <p v-if="recording || transcribing" class="composer-notice text-dim" role="status">{{ recording ? '正在录音，最多 30 秒。' : '正在识别语音…' }}{{ voiceDescription }}</p>
+            <p v-else-if="voiceError" class="composer-notice error" role="alert">{{ voiceError }}</p>
             <div class="composer-tools">
-              <van-button v-if="status?.deepThinkingAvailable" native-type="button" size="small" :type="deepThink ? 'primary' : 'default'" :aria-pressed="deepThink" :disabled="sending" @click="deepThink = !deepThink">深度思考</van-button>
-              <van-button v-if="voiceAvailable" native-type="button" size="small" icon="service-o" :disabled="!canChat || sending || transcribing" :aria-pressed="recording" @click="toggleVoice">{{ recording ? '结束录音' : '语音输入' }}</van-button>
-              <template v-if="photoAvailable">
-                <van-button native-type="button" size="small" icon="photograph" :disabled="!canChat || sending || preparingPhoto" @click="cameraInput?.click()">拍照</van-button>
-                <van-button native-type="button" size="small" icon="photo-o" :disabled="!canChat || sending || preparingPhoto" @click="photoInput?.click()">选图</van-button>
-              </template>
+              <button v-if="photoAvailable" class="composer-icon" type="button" aria-label="添加图片" title="添加图片" aria-haspopup="dialog" :disabled="!canChat || sending || preparingPhoto" @click="showAttachments = true">
+                <van-icon name="plus" aria-hidden="true" />
+              </button>
+              <button v-if="voiceAvailable" class="composer-icon" type="button" :aria-label="recording ? '结束录音' : '语音输入'" :title="recording ? '结束录音' : '语音输入'" :disabled="!canChat || sending || transcribing" :aria-pressed="recording" @click="toggleVoice">
+                <van-icon name="audio" aria-hidden="true" />
+              </button>
+              <button v-if="status?.deepThinkingAvailable" class="thinking-toggle" type="button" :aria-pressed="deepThink" :disabled="!canChat || sending" @click="deepThink = !deepThink">深度思考</button>
+              <button v-if="sending" class="composer-send" type="button" aria-label="停止生成" title="停止生成" @click="stopAnswer"><span aria-hidden="true" class="stop-symbol"></span></button>
+              <button v-else class="composer-send" type="submit" aria-label="发送" title="发送" :disabled="!canSend"><van-icon name="arrow-up" aria-hidden="true" /></button>
             </div>
-            <van-button v-if="sending" native-type="button" size="small" @click="stopAnswer">停止生成</van-button>
-            <van-button v-else type="primary" native-type="submit" size="small" :disabled="!canSend">发送</van-button>
           </div>
-          <p v-if="recording || transcribing" class="hint text-dim" role="status">{{ recording ? '正在听，最多录制 30 秒。' : '正在识别语音…' }}</p>
-          <p v-else-if="voiceError" class="hint error" role="alert">{{ voiceError }}</p>
-          <p v-else-if="voiceAvailable" class="hint text-dim">{{ serverVoice ? '语音由 DeepSeek 转写，识别结果会填入输入框。' : '语音由浏览器的语音服务转写，识别结果会填入输入框。' }}</p>
         </form>
-        <p v-if="status?.ready && !status.usage.dailyRemaining" class="hint text-dim">今日额度已用完，明天再来；看板仍可正常查询。</p>
       </section>
 
-      <van-popup v-model:show="showHistory" position="bottom" round class="history-sheet">
+      <van-popup v-model:show="showAttachments" position="bottom" round class="assistant-sheet">
+        <section role="dialog" aria-label="添加图片" class="attachment-options">
+          <div class="section-head"><h2>添加图片</h2><button type="button" class="text-button" @click="showAttachments = false">取消</button></div>
+          <button type="button" @click="pickAttachment(cameraInput)"><van-icon name="photograph" aria-hidden="true" />拍照</button>
+          <button type="button" @click="pickAttachment(photoInput)"><van-icon name="photo-o" aria-hidden="true" />从相册选择</button>
+        </section>
+      </van-popup>
+
+      <van-popup v-model:show="showHistory" position="bottom" round class="assistant-sheet history-sheet">
         <section aria-label="历史对话">
           <div class="section-head"><h2>历史对话</h2><button type="button" class="text-button" @click="showHistory = false">关闭</button></div>
+          <p v-if="error" class="notice error" role="alert">{{ error }}</p>
           <p class="hint text-dim">保留最近 14 天的聊天，最多 256 条。</p>
           <p v-if="resources.history.loading" role="status">正在读取历史对话…</p>
           <p v-else-if="resources.history.error" role="alert">{{ resources.history.error }} <button type="button" class="text-button" @click="loadResource('history', true)">重试</button></p>
@@ -104,14 +135,6 @@
         </section>
       </van-popup>
 
-      <section v-if="memory" class="memory card">
-        <div class="section-head"><h2>个人记忆</h2><label class="memory-toggle"><span>{{ memory.enabled ? '已开启' : '已关闭' }}</span><input type="checkbox" :checked="memory.enabled" :disabled="memorySaving || sending" @change="toggleMemory($event.target.checked)" /></label></div>
-        <p class="hint text-dim">默认关闭。开启后会将你的备注和近 14 天登记的常用洗衣时段用于回答，仅属于你的账号。</p>
-        <p v-if="memory.enabled" class="habit">{{ habitText }}</p>
-        <form class="stack" @submit.prevent="saveMemory"><label>我希望助手记住<textarea v-model="memoryNote" maxlength="500" rows="3" placeholder="例如：周二晚上有空；尽量使用冷水。" :disabled="memorySaving || sending" /></label><div class="section-head"><span class="hint text-dim">{{ memoryNote.length }}/500{{ memory.enabled ? '' : ' · 关闭时不会用于回答' }}</span><van-button native-type="submit" size="small" :loading="memorySaving" :disabled="sending">保存备注</van-button></div></form>
-        <button type="button" class="text-button danger forget" :disabled="memorySaving || sending" @click="clearMemory">清空并关闭记忆</button>
-      </section>
-      <details class="mcp card"><summary>连接个人只读 MCP</summary><p class="hint text-dim">支持 JSON-RPC HTTP。使用你的登录 Bearer 凭证访问同源 /api/mcp，可读取当前绑定住宿楼状态；不提供写入或通知工具。不要把个人登录凭证分享给他人。</p><code>{{ mcpUrl }}</code></details>
     </template>
   </main>
 </template>
@@ -139,7 +162,8 @@ const deepThink = ref(false), refusal = ref('')
 const loading = ref(false), sending = ref(false), clearing = ref(false), memorySaving = ref(false), busySkill = ref(false), showSkills = ref(false), importTicket = ref(''), share = ref(null), messageList = ref(null)
 const preferences=ref(null),promptSaving=ref(false),contextInfo=ref(null)
 const draftTurn = ref(null), partialTurn = ref(null)
-const showHistory = ref(false), recording = ref(false), transcribing = ref(false), voiceError = ref('')
+const showHistory = ref(false), showOptions = ref(false), showAttachments = ref(false)
+const recording = ref(false), transcribing = ref(false), voiceError = ref('')
 const cameraInput = ref(null), photoInput = ref(null), attachment = ref(''), photoError = ref(''), preparingPhoto = ref(false)
 const savedMessages = computed(() => resources.history.data?.messages || [])
 const activePrompt=computed(()=>preferences.value?.promptProfiles.find(row=>row.id===preferences.value.activePromptId))
@@ -158,6 +182,8 @@ watch(() => [userStore.ready,userStore.user?.id,userStore.token], () => {
   stopVoice()
   removePhoto()
   showHistory.value = false
+  showOptions.value = false
+  showAttachments.value = false
   sending.value = false; draftTurn.value = null; partialTurn.value = null
   status.value=null;messages.value=[];skills.value=[];memory.value=null;memoryNote.value='';preferences.value=null;input.value='';share.value=null;contextInfo.value=null;error.value=''
   Object.assign(draft,{title:'',description:'',prompt:''})
@@ -210,6 +236,9 @@ function toggleVoice() {
   activeMic = serverVoice.value ? deepSeekMic : browserSpeech
   void activeMic.start()
 }
+const voiceDescription = computed(() => serverVoice.value
+  ? '由 DeepSeek 转写，结果会填入输入框。'
+  : '由浏览器语音服务转写，结果会填入输入框。')
 function stopVoice() {
   activeMic?.abort()
   activeMic = null
@@ -223,6 +252,11 @@ function removePhoto() {
   attachment.value = ''
   photoError.value = ''
   preparingPhoto.value = false
+}
+function pickAttachment(field) {
+  if (!canChat.value || sending.value || preparingPhoto.value) return
+  showAttachments.value = false
+  field?.click()
 }
 async function choosePhoto(event) {
   const file = event.target.files?.[0]
@@ -400,7 +434,11 @@ async function copy(text) {
 }
 function stopVoiceWhenHidden() { if (document.hidden) stopVoice() }
 onMounted(() => {
-  if (typeof route.query.skill === 'string' && route.query.skill.length <= 10000) { importTicket.value = route.query.skill; showSkills.value = true }
+  if (typeof route.query.skill === 'string' && route.query.skill.length <= 10000) {
+    importTicket.value = route.query.skill
+    showOptions.value = true
+    showSkills.value = true
+  }
   for (const key of ASSISTANT_WARMUP_RESOURCES) loadResource(key)
   document.addEventListener('visibilitychange', stopVoiceWhenHidden)
 })
@@ -423,9 +461,162 @@ onUnmounted(() => {
 .conversation-examples{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
 .conversation-examples button{min-height:40px;padding:6px 12px;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--text);font:inherit;cursor:pointer}
 .conversation-examples button:disabled{opacity:.55;cursor:default}
-.history-sheet{max-height:75dvh;padding:18px max(18px,calc((100% - 750px)/2)) calc(18px + env(safe-area-inset-bottom));box-sizing:border-box;overflow:auto}
-.history-sheet .messages{max-height:48dvh}
-.composer-tools{display:flex;gap:6px;flex-wrap:wrap;min-width:0}
-.photo-preview{display:flex;align-items:center;gap:10px;margin-top:10px}
-.photo-preview img{width:76px;height:76px;object-fit:cover;border-radius:10px;border:1px solid var(--border)}
+.assistant-sheet {
+  max-height: 75vh;
+  max-height: 75dvh;
+  padding: 18px max(16px, calc((100% - 750px) / 2)) calc(16px + env(safe-area-inset-bottom));
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.settings-sheet .card { margin-inline: 0; }
+.history-sheet .messages { max-height: 48dvh; }
+
+:global(.app-root:has(> .assistant-page)) {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  padding-bottom: calc(var(--van-tabbar-height, 50px) + env(safe-area-inset-bottom, 0px));
+}
+.assistant-page {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  padding-bottom: 0;
+}
+.assistant-page > :not(.conversation) { flex: none; }
+.assistant-page .assistant-top {
+  margin-block: 10px 4px;
+  padding: 12px 14px;
+  background: transparent;
+  border: 0;
+}
+.assistant-top h1 { margin-bottom: 3px; }
+.quota { padding: 2px 8px; }
+
+.assistant-nav-actions { display: flex; align-items: center; gap: 2px; }
+.assistant-nav-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  min-height: 44px;
+  padding: 0 6px;
+  gap: 4px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.assistant-nav-actions .van-icon {
+  color: var(--text-dim);
+  font-size: 17px;
+}
+.assistant-nav-actions button:hover { background: var(--van-active-color); }
+
+.conversation {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-inline: clamp(12px, 3vw, 24px);
+}
+.conversation > .messages {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  padding: 8px 2px;
+}
+.conversation > .messages > * { flex-shrink: 0; }
+.conversation > .hint { margin: 4px 2px; }
+.empty-state { margin-block: auto; padding: 16px 4px; }
+
+.composer {
+  flex: none;
+  margin-block: 0 8px;
+  padding: 0;
+  border: 0;
+}
+.composer > .composer-field {
+  display: block;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--bg-elev);
+}
+.composer-field:focus-within { border-color: var(--primary); }
+.composer-field input[hidden] { display: none; }
+.composer-field #assistant-input {
+  display: block;
+  min-height: 40px;
+  max-height: 24dvh;
+  padding: 8px 10px 4px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.5;
+  resize: none;
+  field-sizing: content;
+}
+.composer-notice { margin: 4px 10px 6px; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.composer > .safety-notice { margin: 4px 0 6px; font-size: 13px; }
+.composer-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.composer-tools button {
+  flex-shrink: 0;
+  min-height: 44px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.composer-tools button:disabled { cursor: default; opacity: .44; }
+.composer-tools button:not(:disabled):hover { background: var(--van-active-color); }
+.composer-icon { width: 44px; }
+.composer-tools .van-icon { width: 20px; height: 20px; font-size: 20px; }
+.composer-tools .thinking-toggle { padding-inline: 10px; font-size: 12px; white-space: nowrap; }
+.composer-tools [aria-pressed='true'] { color: #a9cfff; background: rgba(59,130,246,.16); }
+.composer-tools .composer-send {
+  width: 44px;
+  margin-inline-start: auto;
+  background: #2563eb;
+  color: #fff;
+}
+.composer-tools .composer-send:not(:disabled):hover { background: #1d4ed8; }
+.stop-symbol { width: 12px; height: 12px; border-radius: 3px; background: currentColor; }
+.photo-preview { display: flex; align-items: center; gap: 8px; margin: 4px 6px; }
+.photo-preview .hint { flex: 1; min-width: 0; line-height: 1.4; }
+.photo-preview img { flex: none; width: 48px; height: 48px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); }
+.photo-preview button { flex: none; }
+.attachment-options { display: grid; gap: 8px; }
+.attachment-options > button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: start;
+}
+.attachment-options .van-icon { font-size: 19px; }
 </style>

@@ -130,3 +130,33 @@ test('machine care indicators belong to the current occupancy and clear after pi
   await call('/api/tasks/'+second.data.task.id+'/take',{method:'POST'})
   assert.equal((await call('/api/occupancy',{user:null})).data.occupancy.washer1,undefined)
 })
+
+test('pickup bypasses unrelated settings reads and repairs a transient occupancy write', async (t) => {
+  const { call, store } = await fixture(t)
+  const registered = await call('/api/tasks', { method: 'POST', body: { machineId: 'washer1', minutes: 30 } })
+  const pickup = '/api/tasks/' + registered.data.task.id + '/take'
+  const get = store.get
+  const put = store.put
+  let failure = true
+  t.mock.method(store, 'get', async (key, fallback) => {
+    if (key === 'meta:dingtalk') throw new Error('unrelated settings unavailable')
+    return get(key, fallback)
+  })
+  t.mock.method(store, 'put', async (key, value) => {
+    if (key === 'occupancy:b1' && failure) {
+      failure = false
+      throw Object.assign(new Error('store offline'), { code: 'site_store_unavailable' })
+    }
+    return put(key, value)
+  })
+  const failed = await call(pickup, { method: 'POST' })
+  assert.equal(failed.status, 503)
+  assert.equal(failed.data.error.code, 'site_store_unavailable')
+  assert.match(failed.data.error.eventId, /^evt_/)
+  assert((await get('occupancy:b1')).washer1)
+  const first = (await get('tasks:u1'))[0]
+  const retried = await call(pickup, { method: 'POST' })
+  assert.equal(retried.status, 200)
+  assert.equal(retried.data.task.takenAt, first.takenAt)
+  assert.equal((await get('occupancy:b1')).washer1, undefined)
+})

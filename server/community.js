@@ -65,9 +65,13 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     if (moderator && !canManage) fail(user?.id ? 'forbidden' : 'unauthorized', '需要总管或管理员权限', user?.id ? 403 : 401)
     return { user, identity, moderator: canManage, rules }
   }
-  async function context(c) {
+  async function context(c, { includeMachines = true } = {}) {
     const source=c?communitySnapshot(c,store).store:store
-    const [site, cached, mapping] = await Promise.all([c?.get('communitySiteSnapshot') || getSiteConfig(source), source.get(`machines:${bid}`, null), source.get(`mapping:${bid}`, null)])
+    const [site, cached, mapping] = await Promise.all([
+      c?.get('communitySiteSnapshot') || getSiteConfig(source),
+      includeMachines ? source.get(`machines:${bid}`, null) : null,
+      includeMachines ? source.get(`mapping:${bid}`, null) : null,
+    ])
     const buildings = site.buildings.filter((building) => building.code !== 'public' && building.enabled !== false)
     const historyCatalog = site.buildings.map((building) => ({ ...building, enabled: true }))
     const machines = (cached?.board?.floors || []).flatMap((floor) => floor.machines || []).map((machine) => ({ ...machine, id: String(machine.id), dormBuilding: resolveMachineDorm(machine, mapping?.mapping || {}, historyCatalog) }))
@@ -78,6 +82,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     if (typeof message.dormBuilding === 'string' && message.dormBuilding) return message.dormBuilding
     return ctx.byId.get(String(message.machineId))?.dormBuilding || ctx.buildings[0]?.code || 'guiyuan'
   }
+  const machineScope = message => String(message?.machineId || '')
   function selectChannel(channel, dorm, ctx) {
     if (channel != null && (typeof channel !== 'string' || !ctx.codes.has(channel))) fail('bad_param', '留言频道无效')
     if (dorm != null && dorm !== '' && (typeof dorm !== 'string' || !ctx.codes.has(dorm) || dorm === 'public')) fail('bad_param', '住宿楼无效')
@@ -174,7 +179,11 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
   }
   async function enrich(messages, all, ctx, requester, c) {
     const source=c?communitySnapshot(c,store).store:store, byId=new Map(all.filter(entry=>!entry.deleted).map(entry=>[entry.id,entry]))
-    const parents = messages.map((message) => byId.get(message.replyTo)).filter((entry,index)=>entry&&messageChannel(entry,ctx)===messageChannel(messages[index],ctx))
+    const parentFor = message => {
+      const parent = byId.get(message.replyTo)
+      return parent && machineScope(parent) === machineScope(message) && messageChannel(parent, ctx) === messageChannel(message, ctx) ? parent : null
+    }
+    const parents = messages.map(parentFor).filter(Boolean)
     const ids = [...new Set([...messages, ...parents].map((message) => message.userId).filter(Boolean))]
     const authors = new Map(await limitedMap(ids,async uid=>[uid,{user:await source.get('user:'+uid,null),identity:await getUserIdentity(source,uid)}]))
     function authorFields(message) {
@@ -189,7 +198,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
       const { identityInternal, ...publicAuthor } = fields
       const channel = messageChannel(message, ctx)
       const mine = Boolean(requester.user?.id && requester.user.id === message.userId)
-      const parent = parents.find((entry) => entry.id === message.replyTo)
+      const parent = parentFor(message)
       const parentAuthor = parent && authorFields(parent)
       return { id: message.id, ...publicAuthor, text: message.text, at: message.at, channel, dormBuilding: channel === 'public' ? null : channel,
         type: message.type === 'announcement' ? 'announcement' : 'message', media: message.media ? publicMedia(message.media) : null,
@@ -206,7 +215,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
   registerCommunityReportRoutes(app, { store, bid, actor, context, messageChannel, requireChannel, now })
 
   app.get('/api/messages/channels', wrap(async (c) => {
-    const [requester, ctx] = await Promise.all([actor(c), context(c)]),source=communitySnapshot(c,store).store
+    const [requester, ctx] = await Promise.all([actor(c), context(c, { includeMachines: false })]),source=communitySnapshot(c,store).store
     const current = ctx.buildings.find((building) => building.code === requester.user?.dormBuilding)
     const rows = [{ code: 'public', name: '公共频道' }, ...(current ? [current] : []), ...ctx.buildings.filter((building) => building.code !== current?.code)]
     const visible=rows.filter(channel=>allowed(requester,channel.code)),codes=new Set(visible.map(row=>row.code))
@@ -214,7 +223,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     const summaries=new Map(),unread=new Map()
     // Read the collection once. Neither pins nor timestamp collisions change
     // chronological insertion order, and unauthorized channels are never enriched.
-    const readable=array(all).filter(message=>!message.deleted&&codes.has(messageChannel(message,ctx)))
+    const readable=array(all).filter(message=>!message.deleted&&!machineScope(message)&&codes.has(messageChannel(message,ctx)))
     const digests=requester.user?.id?await limitedMap(readable,message=>communityMessageDigest(messageChannel(message,ctx),message.id),32):[]
     for(const [index,message] of readable.entries()){
       const channel=messageChannel(message,ctx)
@@ -234,7 +243,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
   }))
   app.post('/api/messages/read',wrap(async c=>{
     const input=await body(c)
-    if(Object.keys(input).some(key=>!['channel','messageIds','throughMessageId'].includes(key))||typeof input.channel!=='string')fail('bad_param','请选择频道及实际显示的消息')
+    if(Object.keys(input).some(key=>!['channel','machineId','messageIds','throughMessageId'].includes(key))||typeof input.channel!=='string'||input.machineId!=null&&!validId(input.machineId))fail('bad_param','请选择频道及实际显示的消息')
     if(input.messageIds!=null&&input.throughMessageId!=null)fail('bad_param','请只提交一种消息标识')
     const ids=input.messageIds??(input.throughMessageId!=null?[input.throughMessageId]:null)
     if(!Array.isArray(ids)||ids.length<1||ids.length>50||ids.some(id=>!validId(id)))fail('bad_param','每次可确认1至50条已显示消息')
@@ -247,19 +256,21 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
       if(requester.user.id!==uid)fail('unauthorized','账号已变化，请重新打开频道',401)
       requireChannel(requester,input.channel,ctx)
       const messages=array(all),byId=new Map(messages.filter(row=>!row.deleted&&messageChannel(row,ctx)===input.channel).map(row=>[row.id,row]))
-      if(ids.some(id=>!byId.has(id)))fail('not_found','消息已删除、已移出当前频道或不可见，请刷新后重试',404)
+      const first = byId.get(ids[0])
+      const scope = input.machineId ?? machineScope(first)
+      if(ids.some(id=>!byId.has(id)||machineScope(byId.get(id))!==scope))fail('not_found','消息已删除、已移出当前留言板或不可见，请刷新后重试',404)
       latest={requester,ctx,messages}
       return {acknowledged:await limitedMap([...new Set(ids)],id=>communityMessageDigest(input.channel,id),32),retained:new Set(await limitedMap(messages.filter(row=>!row.deleted),row=>communityMessageDigest(messageChannel(row,ctx),row.id),32))}
     }})
-    const unread=latest.messages.filter(message=>!message.deleted&&message.userId!==uid&&messageChannel(message,latest.ctx)===input.channel)
+    const unread=latest.messages.filter(message=>!message.deleted&&message.userId!==uid&&machineScope(message)===''&&messageChannel(message,latest.ctx)===input.channel)
     const unreadCount=(await limitedMap(unread,message=>communityMessageDigest(input.channel,message.id),32)).filter(id=>!seen.has(id)).length
     const acknowledged=new Set(ids)
     await markCommunityNoticesRead(store,uid,entry=>entry.channel===input.channel&&acknowledged.has(entry.messageId),now())
     return {ok:true,channel:input.channel,unreadCount}
   }))
   app.get('/api/messages', wrap(async (c) => {
-    const [requester, ctx] = await Promise.all([actor(c), context(c)])
     const machineId = c.req.query('machineId') || ''
+    const [requester, ctx] = await Promise.all([actor(c), context(c, { includeMachines: Boolean(machineId) })])
     let channel = selectChannel(c.req.query('channel'), c.req.query('dorm'), ctx)
     if (channel) requireChannel(requester, channel, ctx)
     if (machineId && channel === 'public') fail('bad_param', '公共频道不关联机器')
@@ -271,14 +282,16 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
     const limit = Number.isFinite(count) ? Math.min(50, Math.max(1, Math.floor(count))) : 20
     const page = Number.isFinite(pageValue) ? Math.min(100, Math.max(1, Math.floor(pageValue))) : 1
     const all = array(await communitySnapshot(c,store).store.get(`messages:${bid}`, []))
-    const filtered = all.filter((message) => !message.deleted && ctx.codes.has(messageChannel(message, ctx)) && allowed(requester, messageChannel(message, ctx)) && (!channel || messageChannel(message, ctx) === channel) && (!machineId || String(message.machineId) === machineId))
+    const filtered = all.filter((message) => !message.deleted && machineScope(message) === machineId && ctx.codes.has(messageChannel(message, ctx)) && allowed(requester, messageChannel(message, ctx)) && (!channel || messageChannel(message, ctx) === channel))
       .map((message, order) => ({ message, order })).sort((a, b) => Number(b.message.pinned === true) - Number(a.message.pinned === true) || b.order - a.order).map(({ message }) => message)
     return { messages: await enrich(filtered.slice((page - 1) * limit, page * limit), all, ctx, requester,c), pagination: { page, limit, total: filtered.length, hasMore: page * limit < filtered.length }, channel, ...await metadata(requester) }
   }))
   app.get('/api/messages/participants', wrap(async (c) => {
     const [requester, ctx] = await Promise.all([actor(c, true), context(c)]), channel = c.req.query('channel'),source=communitySnapshot(c,store).store
     requireChannel(requester, channel, ctx)
-    const rows = array(await source.get(`messages:${bid}`, [])).filter((entry) => !entry.deleted && messageChannel(entry, ctx) === channel)
+    const scope = c.req.query('machineId') || ''
+    if (scope && (!validId(scope) || channel === 'public' || ctx.byId.get(scope)?.dormBuilding !== channel)) fail('bad_param', '机器不在所选频道')
+    const rows = array(await source.get(`messages:${bid}`, [])).filter((entry) => !entry.deleted && machineScope(entry) === scope && messageChannel(entry, ctx) === channel)
     const ids = [...new Set(rows.slice().reverse().map((entry) => entry.userId))].slice(0, 30)
     const site=c.get('communitySiteSnapshot')||await getSiteConfig(source),snapshot={site,store:source}
     const participants = (await limitedMap(ids,async uid=>{
@@ -326,13 +339,22 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
   app.get('/api/messages/notices', wrap(async (c) => {
     const [requester, ctx] = await Promise.all([actor(c, true), context(c)])
     const rows = await readCommunityNotices(store, requester.user.id)
-    const notices = rows.filter((entry) => ctx.codes.has(entry.channel) && allowed(requester, entry.channel)).map(({ id, messageId, channel, title, text, url, at, readAt }) => ({ id, messageId, channel, title, text, url, at, readAt }))
+    const notices = rows.filter((entry) => ctx.codes.has(entry.channel) && allowed(requester, entry.channel)).map(({ id, messageId, channel, title, text, url, at, readAt, machineId: storedMachine }) => {
+      const machineId = validId(storedMachine) ? storedMachine : null
+      const destination = machineId ? '/#/board?channel=' + encodeURIComponent(channel) + '&machine=' + encodeURIComponent(machineId) + '&message=' + encodeURIComponent(messageId) : url
+      return { id, messageId, channel, title, text, url: destination, at, readAt, ...(machineId ? { machineId } : {}) }
+    })
     return { notices, unread: notices.filter((entry) => !entry.readAt).length }
   }))
   app.post('/api/messages/notices/read', wrap(async (c) => {
     const [requester, ctx] = await Promise.all([actor(c, true), context()]), input = await body(c)
     requireChannel(requester, input.channel, ctx)
-    return { ok: true, count: await markCommunityNoticesRead(store, requester.user.id, (entry) => entry.channel === input.channel, now()) }
+    if (input.machineId != null && (!validId(input.machineId) || input.channel === 'public')) fail('bad_param', '请选择有效的机器留言板')
+    return { ok: true, count: await markCommunityNoticesRead(store, requester.user.id, entry => {
+      if (entry.channel !== input.channel) return false
+      const machine = entry.machineId || String(entry.url || '').match(/[?&]machine=([A-Za-z0-9_-]+)(?:&|$)/)?.[1] || ''
+      return machine === (input.machineId || '')
+    }, now()) }
   }))
   app.post('/api/messages/notices/:id/read', wrap(async (c) => {
     const [requester, ctx] = await Promise.all([actor(c, true), context()])
@@ -426,10 +448,13 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
         if (channel !== initialChannel) fail('conflict', '频道配置已变化，请重新发送', 409)
         if (input.mentionAll && !channelManager(requester, channel)) fail('forbidden', '频道管理权限已变化，请重新发送', 403)
         if (input.type === 'announcement' && !channelManager(requester, channel)) fail('forbidden', '仅管理员或获授权宿管可发布频道公告', 403)
-        const pinned = input.type === 'announcement' && input.pinned !== false
-        if (pinned && list.filter((message) => !message.deleted && message.pinned && messageChannel(message, ctx) === channel).length >= 5) fail('pin_limit', '每个频道最多置顶 5 条留言', 409)
         if (machine && machine.dormBuilding !== channel) fail('bad_param', '机器不在所选频道')
         if (parent && messageChannel(parent, ctx) !== channel) fail('bad_param', '请在同一频道回复')
+        if (parent && machineScope(parent) !== (machine ? String(machine.id) : '')) fail('bad_param', '请在同一留言板回复')
+        const scope = machine ? String(machine.id) : machineScope(parent)
+        if (scope && (input.mentionAll || input.type === 'announcement')) fail('bad_param', '机器留言板只接受留言和回复')
+        const pinned = input.type === 'announcement' && input.pinned !== false
+        if (pinned && list.filter((message) => !message.deleted && message.pinned && !machineScope(message) && messageChannel(message, ctx) === channel).length >= 5) fail('pin_limit', '每个频道最多置顶 5 条留言', 409)
         const rateKey = `operations:messageRate:${requester.user.id}`
         const recent = array((await store.get(rateKey, null)) || list.filter((entry) => entry.userId === requester.user.id).map((entry) => Date.parse(entry.at))).filter((at) => Number.isFinite(at) && now() - at < MINUTE)
         if (recent.length >= 30 || recent.some((at) => now() - at < 2000)) fail('too_many', '发送较快，请稍等两秒再发；每分钟最多30条', 429)
@@ -441,13 +466,21 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
           type: input.type === 'announcement' ? 'announcement' : 'message', pinned, pinnedAt: pinned ? new Date(now()).toISOString() : null, mentionUserIds: targets, mentionAll: input.mentionAll === true }
         if (input.mediaId) entry.media = await mediaService.link(attachment, requester.user.id, channel, entry.id)
         const next = [...list, entry]
-        // 置顶不因普通发帖被挤掉，整体最多300条。
-        while (next.length > 300) { const index = next.findIndex((message) => !message.pinned); const [removed] = next.splice(index < 0 ? 0 : index, 1); if (removed.media?.id) await mediaService.remove(removed.media.id) }
+        // Keep separate history budgets for channel chat and machine boards.
+        const machineBoard = Boolean(scope)
+        const sameSection = message => Boolean(machineScope(message)) === machineBoard
+        while (next.filter(sameSection).length > 300) {
+          const index = next.findIndex(message => sameSection(message) && !message.pinned)
+          const [removed] = next.splice(index < 0 ? next.findIndex(sameSection) : index, 1)
+          if (removed.media?.id) await mediaService.remove(removed.media.id)
+        }
         await store.put(`messages:${bid}`, next)
         await store.put(rateKey, [...recent, now()])
-        await bump(channel)
+        if (!scope) await bump(channel)
         const channelName = channel === 'public' ? '公共频道' : ctx.buildings.find((building) => building.code === channel)?.name || '楼栋频道'
-        await enqueueCommunityNotices(store, targets, { messageId: entry.id, channel, title: '有人@你', text: `${maskNick(requester.user.nick)}在${channelName}提到了你。打开频道查看消息。`, url: '/#/board?channel=' + encodeURIComponent(channel) + '&message=' + encodeURIComponent(entry.id) }, now())
+        const location = scope ? '机器留言板' : channelName
+        const url = '/#/board?channel=' + encodeURIComponent(channel) + (scope ? '&machine=' + encodeURIComponent(scope) : '') + '&message=' + encodeURIComponent(entry.id)
+        await enqueueCommunityNotices(store, targets, { messageId: entry.id, channel, title: '有人@你', text: `${maskNick(requester.user.nick)}在${location}提到了你。`, url, ...(scope ? { machineId: scope } : {}) }, now())
         return { ok: true, message: (await enrich([entry], next, ctx, requester))[0], id: entry.id }
       })
     })
@@ -464,7 +497,7 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
       if (entry.userId !== requester.user?.id && !requester.moderator) fail('forbidden', '只能删除自己的留言', 403)
       await store.put(`messages:${bid}`, list.filter((message) => message.id !== entry.id))
       if (entry.media?.id) await mediaService.remove(entry.media.id)
-      await bump(channel)
+      if (!machineScope(entry)) await bump(channel)
       return { ok: true }
     })
   }))
@@ -480,11 +513,11 @@ export function registerCommunityRoutes(app, { store, env = {}, authenticate, ch
       const ctx = await context(), channel = messageChannel(entry, ctx)
       requireChannel(requester, channel, ctx, 'operate')
       if (!channelManager(requester, channel)) fail('forbidden', '需要频道管理权限', 403)
-      if (input.pinned && !entry.pinned && list.filter((message) => !message.deleted && message.pinned && messageChannel(message, ctx) === channel).length >= 5) fail('pin_limit', '每个频道最多置顶 5 条留言', 409)
+      if (input.pinned && !entry.pinned && list.filter((message) => !message.deleted && message.pinned && machineScope(message) === machineScope(entry) && messageChannel(message, ctx) === channel).length >= 5) fail('pin_limit', '每个留言板最多置顶 5 条留言', 409)
       entry.pinned = input.pinned
       entry.pinnedAt = input.pinned ? entry.pinnedAt || new Date(now()).toISOString() : null
       await store.put(`messages:${bid}`, list)
-      await bump(channel)
+      if (!machineScope(entry)) await bump(channel)
       return { ok: true, message: (await enrich([entry], list, ctx, requester))[0] }
     })
   })

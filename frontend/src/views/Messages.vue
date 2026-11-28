@@ -1,14 +1,15 @@
 <template>
   <div class="page messages" :class="{ 'has-channel': currentChannel }">
-    <van-nav-bar :title="currentChannel ? currentChannel.name : '留言板'" :left-text="channelCode ? '频道' : ''" :left-arrow="Boolean(channelCode)" @click-left="openDirectory">
-      <template v-if="currentChannel" #title><button class="channel-title" type="button" :disabled="!currentChannel.permissions?.canManageAvatar" @click="avatarInput?.click()"><ChannelAvatar :code="currentChannel.code" :src="currentChannel.avatarData" />{{ currentChannel.name }}</button></template>
+    <van-nav-bar :title="machineId ? selectedMachine ? machineName(selectedMachine) + ' · 留言' : '机器留言' : currentChannel?.name || '留言板'" :left-text="channelCode ? '频道' : ''" :left-arrow="Boolean(channelCode)" @click-left="openDirectory">
+      <template v-if="currentChannel && !machineId" #title><button class="channel-title" type="button" :disabled="!currentChannel.permissions?.canManageAvatar" @click="avatarInput?.click()"><ChannelAvatar :code="currentChannel.code" :src="currentChannel.avatarData" />{{ currentChannel.name }}</button></template>
       <template #right><button class="text-button" :disabled="loading || channelsLoading" @click="refresh">刷新</button></template>
     </van-nav-bar>
 
     <section v-if="!channelCode" class="channel-directory" aria-label="留言频道">
       <h1>选择留言频道</h1>
       <p class="directory-hint">公共频道面向全校，楼栋频道方便邻里交流。</p>
-      <p v-if="channelsLoading" class="directory-status" role="status">{{ channelRows.length ? '正在更新频道…' : '正在读取频道与最新消息…' }}</p>
+      <p v-if="channelsLoading || (!channelsLoaded && !channelsError)" class="directory-status" role="status">{{ channelsLoaded ? '正在更新频道…' : '正在读取频道与最新消息…' }}</p>
+      <p v-else-if="channelsLoaded && !channelRows.length && !channelsError" class="directory-status">暂无可查看的频道</p>
       <button v-for="channel in orderedChannels" :key="channel.code" type="button" class="channel-card card" :data-channel="channel.code" @click="openChannel(channel.code)">
         <ChannelAvatar :code="channel.code" :src="channel.avatarData" />
         <span class="channel-description"><strong>{{ channel.name }}<small v-if="channel.code === ownBuilding">我的住宿楼</small></strong><span class="channel-preview" :class="{ empty: !channel.summary }">{{ channelPreview(channel) }}</span><span v-if="mentionCounts[channel.code]" class="directory-mention">有人@你</span></span>
@@ -22,14 +23,13 @@
       <div class="chat-topline"><span>{{ transportState === 'connected' ? '消息实时更新' : '消息自动更新' }}</span><span>长按头像@，长按消息回复或举报</span></div>
       <p v-if="isPublic" class="channel-intro">全校公共交流频道。机器留言与预约请进入对应楼栋频道。</p>
       <template v-else>
-        <div class="filters"><label>机器<select v-model="machineId"><option value="">全部机器 / 楼内留言</option><option v-for="machine in machines" :key="machine.id" :value="String(machine.id)">{{ machineName(machine) }}</option></select></label></div>
+        <div class="filters"><label>留言范围<select v-model="machineId"><option value="">楼栋频道</option><option v-if="machineId && !selectedMachine" :value="machineId">当前机器留言</option><option v-for="machine in machines" :key="machine.id" :value="String(machine.id)">{{ machineName(machine) }}</option></select></label></div>
         <QueuePanel v-if="selectedMachine" class="queue-box" :machine="selectedMachine" :dorm="channelCode" />
         <p v-else class="hint">选一台机器可查看预约排位与预计可用时间。</p>
       </template>
-      <p v-if="error" class="error" role="alert">{{ error }}</p>
+      <p v-if="error" class="error" role="alert">{{ error }}<button class="text-button" type="button" :disabled="loading" @click="refresh">重试</button></p>
       <van-pull-refresh v-model="refreshing" @refresh="refresh">
-        <div v-if="loading && !messages.length" class="empty text-dim">加载中…</div>
-        <div v-else-if="!messages.length" class="empty text-dim">这个频道还没有留言，来聊两句吧。</div>
+        <div v-if="messagesPlaceholder" class="empty text-dim" :role="loading || !messagesLoaded ? 'status' : undefined">{{ messagesPlaceholder }}</div>
         <div ref="messageList" class="msg-list">
           <article v-for="message in visibleMessages" :id="'message-'+message.id" :data-message-id="message.mine ? undefined : message.id" :key="message.id" class="msg card" tabindex="0" aria-label="消息，按回车打开操作" :class="{ pinned: message.pinned, 'mentions-me': message.mentionedMe || route.query.message === message.id }" @pointerdown="startHold($event,message)" @pointerup="cancelHold" @pointercancel="cancelHold" @pointermove="moveHold" @pointerleave="cancelHold" @click.capture="hold.suppressClick($event)" @contextmenu.prevent="messageContext($event,message)" @keydown="messageKey($event,message)">
             <button class="message-avatar" type="button" :aria-label="'长按@'+(message.nick || '这位成员')" :disabled="message.mine || !message.mentionRef" @pointerdown.stop="startAvatarHold($event,message)" @pointerup.stop="cancelHold" @pointercancel.stop="cancelHold" @pointermove.stop="moveHold" @pointerleave="cancelHold" @click.stop.prevent @contextmenu.stop.prevent="mentionAuthor(message)" @keydown.enter.stop.prevent="mentionAuthor(message)" @keydown.space.stop.prevent="mentionAuthor(message)"><Avatar :name="message.nick || '同学'" :src="message.avatarUrl" :size="34" /></button>
@@ -64,17 +64,17 @@
           <button type="button" @click="chooseAttachment({kind:'mention'})"><van-icon name="friends-o"/><span>提及</span></button>
           <p>视频最长 30 秒，最大 4MB</p>
         </div>
-        <label v-if="currentChannel.permissions?.canAnnounce" class="announcement-option"><input v-model="announcement" type="checkbox" />发布为置顶频道公告</label>
+        <label v-if="!machineId && currentChannel.permissions?.canAnnounce" class="announcement-option"><input v-model="announcement" type="checkbox" />发布为置顶频道公告</label>
       </div>
     </template>
-    <div v-else class="empty text-dim">{{ channelsLoading ? '正在读取频道…' : channelsError ? '暂时无法确认频道，请重试。' : '这个频道不存在或已关闭。' }}<button v-if="channelsError && !channelsLoading" type="button" class="text-button" @click="refresh">重新读取</button><button v-if="!channelsLoading" type="button" class="text-button" @click="openDirectory">返回频道列表</button></div>
+    <div v-else class="empty text-dim">{{ channelsLoading || (!channelsLoaded && !channelsError) ? '正在读取频道…' : channelsError ? '暂时无法确认频道，请重试。' : '这个频道不存在或已关闭。' }}<button v-if="channelsError && !channelsLoading" type="button" class="text-button" @click="refresh">重新读取</button><button type="button" class="text-button" @click="openDirectory">返回频道列表</button></div>
 
     <van-action-sheet v-model:show="showMute" title="选择禁言时长" :actions="muteActions" cancel-text="取消" :close-on-click-action="false" @select="confirmMute">
       <div class="mute-reason"><van-field v-model="muteReason" label="原因" placeholder="选填，最多200字" maxlength="200" type="textarea" rows="2" /></div>
     </van-action-sheet>
     <van-action-sheet v-model:show="showMessageActions" title="消息操作" :actions="messageActions" cancel-text="取消" @select="actOnMessage" />
     <van-popup v-model:show="showReport" position="bottom" round :closeable="!reporting" :close-on-click-overlay="!reporting"><section class="report-form"><h3>举报消息</h3><p>举报仅供管理员处理，不会在频道内公开你的身份。</p><blockquote>{{ reportTarget?.text || '附件消息' }}</blockquote><label>举报原因<select v-model="reportReason"><option value="spam">广告或垃圾信息</option><option value="abuse">辱骂或骚扰</option><option value="privacy">泄露个人信息</option><option value="unsafe">不当或危险内容</option><option value="other">其他原因</option></select></label><van-field v-model="reportDetail" type="textarea" rows="3" maxlength="300" show-word-limit placeholder="补充说明（其他原因必填）" /><p v-if="reportError" class="error" role="alert">{{ reportError }}</p><van-button block type="primary" :loading="reporting" :disabled="reporting" @click="submitReport">提交举报</van-button></section></van-popup>
-    <van-popup v-model:show="showMentions" position="bottom" round closeable><section class="mention-picker"><h3>@频道成员</h3><p>可选择此频道近期发言的成员</p><button v-if="currentChannel?.permissions?.canMentionAll" type="button" @click="selectAll">@全体成员<span>每频道每小时一次</span></button><button v-for="item in participants" :key="item.ref" type="button" @click="selectMention(item)">{{ item.nick }}<IdentityBadge :identity="item.identity" /></button><p v-if="!participants.length">{{ participantsLoading ? '正在读取成员…' : '暂无近期发言成员' }}</p></section></van-popup>
+    <van-popup v-model:show="showMentions" position="bottom" round closeable><section class="mention-picker"><h3>@成员</h3><p>可选择在此留言板近期发言的成员</p><button v-if="!machineId && currentChannel?.permissions?.canMentionAll" type="button" @click="selectAll">@全体成员<span>每频道每小时一次</span></button><button v-for="item in participants" :key="item.ref" type="button" @click="selectMention(item)">{{ item.nick }}<IdentityBadge :identity="item.identity" /></button><p v-if="!participants.length">{{ participantsLoading ? '正在读取成员…' : '暂无近期发言成员' }}</p></section></van-popup>
     <input ref="imageInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" @change="pickAttachment($event,'image')" />
     <input ref="cameraInput" class="visually-hidden" type="file" accept="image/*" capture="environment" @change="pickAttachment($event,'image')" />
     <input ref="videoInput" class="visually-hidden" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" @change="pickAttachment($event,'video')" />
@@ -105,16 +105,17 @@ const router = useRouter()
 const dorm = useDormStore()
 const user = useUserStore()
 const channelRows = ref([])
+const channelsLoaded = ref(false)
 const channelsLoading = ref(false)
 const channelsError = ref('')
 const currentBuilding = ref(null)
 const channelCode = computed(() => typeof route.query.channel === 'string' ? route.query.channel : '')
 const channels = computed(() => {
-  const rows = channelRows.value.length ? channelRows.value : (dorm.buildings || []).filter((row) => row.code === (user.user?.dormBuilding || dorm.code))
+  const rows = channelsLoaded.value ? channelRows.value : (dorm.buildings || []).filter((row) => row.code === (user.user?.dormBuilding || dorm.code))
   const unique = new Map([['public', { code: 'public', name: '公共频道' }]])
   for (const row of rows) if (row && typeof row.code === 'string' && row.code && row.code !== 'public' && typeof row.name === 'string') unique.set(row.code, { ...row, code: row.code, name: row.name })
   const pub = rows.find((row) => row.code === 'public'); if (pub) unique.set('public', pub)
-  if (channelRows.value.length && !pub) unique.delete('public')
+  if (channelsLoaded.value && !pub) unique.delete('public')
   return [...unique.values()]
 })
 const ownBuilding = computed(() => currentBuilding.value || user.user?.dormBuilding || dorm.code || '')
@@ -131,6 +132,7 @@ const machineId = computed({
 const machines = ref([])
 const selectedMachine = computed(() => machines.value.find((m) => String(m.id) === machineId.value))
 const messages = ref([])
+const messagesLoaded = ref(false)
 const messageList = ref(null)
 const visibleMessages = computed(() => [...messages.value].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))))
 const text = ref('')
@@ -152,6 +154,11 @@ const refreshing = ref(false)
 const sending = ref(false)
 const moderatingId = ref('')
 const error = ref('')
+const messagesPlaceholder = computed(() => {
+  if (messages.value.length || error.value) return ''
+  if (!messagesLoaded.value || loading.value) return '正在加载消息…'
+  return machineId.value ? '这台机器还没有留言。' : '这个频道还没有留言，来聊两句吧。'
+})
 const sendError = ref('')
 const page = ref(1)
 const hasMore = ref(false)
@@ -171,14 +178,14 @@ let disposed = false
 let readRepairScope = ''
 let channelsPending = null
 const reader = createChannelReadTracker({
-  context:()=>({key:scope.value,owner:user.isLoggedIn?ownerKey.value:'',channel:channelCode.value}),
+  context:()=>({key:scope.value,owner:user.isLoggedIn?ownerKey.value:'',channel:channelCode.value,machineId:machineId.value}),
   visible:()=>document.visibilityState==='visible' && (!document.hasFocus || document.hasFocus()) && !showMute.value && !showReport.value && !showMentions.value && !showAdd.value && !showMessageActions.value && !mediaPreviews.value.size && !draftVideoFullscreen.value && !document.fullscreenElement && !document.webkitFullscreenElement,
   visibleIds:()=>visibleChannelMessageIds(messageList.value,{
     top:document.querySelector('.messages .van-nav-bar')?.getBoundingClientRect().bottom || 0,
     bottom:document.querySelector('.composer-wrap')?.getBoundingClientRect().top || globalThis.innerHeight || 0,
   }),
-  send:body=>api('/api/messages/read',{method:'POST',body,silent:true}),
-  onRead:()=>{readRepairScope='';loadChannels();loadNoticeCounts()},
+  send:(body, view)=>api('/api/messages/read',{method:'POST',body:view.machineId ? { ...body, machineId: view.machineId } : body,silent:true}),
+  onRead:(_result, view)=>{readRepairScope='';if(!view.machineId)loadChannels();loadNoticeCounts()},
   // An article can be deleted between rendering and receipt. Refresh the
   // actual message set before another attempt; do not loop an invalid batch.
   onError:(error,view)=>{if(error.status===404 && readRepairScope!==view.key){readRepairScope=view.key;load(false)}},
@@ -191,7 +198,12 @@ function format(at) {
   return Number.isFinite(time) ? new Date(time).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
 }
 function friendlyError(e, fallback) { return String(e?.message || fallback).split(' · ')[0] }
-function channelPreview(channel) { const summary=channel.summary;return summary ? `${summary.nick || '同学'}: ${summary.kind === 'image' ? '[图片]' : summary.kind === 'video' ? '[视频]' : summary.text || '新消息'}` : channelsLoading.value && !channelRows.value.length ? '正在读取最新消息…' : '暂无消息，来聊两句吧。' }
+function channelPreview(channel) {
+  const summary = channel.summary
+  if (summary) return `${summary.nick || '同学'}: ${summary.kind === 'image' ? '[图片]' : summary.kind === 'video' ? '[视频]' : summary.text || '新消息'}`
+  if (channelsLoaded.value) return '暂无消息，来聊两句吧。'
+  return channelsError.value ? '暂时无法读取最新消息' : '正在读取最新消息…'
+}
 function previewTime(at) { const value=Date.parse(at||'');if(!Number.isFinite(value))return '';const date=new Date(value),today=new Date(clock.value);return date.toDateString()===today.toDateString()?date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):date.toLocaleDateString('zh-CN',{month:'numeric',day:'numeric'}) }
 function machineName(machine) {
   const name = String(machine.displayName || machine.machineLabel || machine.name || '').trim()
@@ -200,7 +212,19 @@ function machineName(machine) {
 function authorBuildingName(message) { return message.authorBuildingName || channels.value.find((row) => row.code === message.authorBuilding)?.name || '未绑定住宿楼' }
 function openDirectory() { router.push({ path: '/board' }) }
 function openChannel(code) { router.push({ path: '/board', query: { channel: code } }) }
-async function loadNoticeCounts() { if (!user.isLoggedIn) { mentionCounts.value = {}; return }; const owner = ownerKey.value; try { const data = await api('/api/messages/notices', { silent: true }); if (owner !== ownerKey.value || disposed) return; const counts = {}; for (const entry of data.notices || []) if (!entry.readAt) counts[entry.channel] = (counts[entry.channel] || 0) + 1; mentionCounts.value = counts } catch {} }
+async function loadNoticeCounts() {
+  if (!user.isLoggedIn) { mentionCounts.value = {}; return }
+  const owner = ownerKey.value
+  try {
+    const data = await api('/api/messages/notices', { silent: true })
+    if (owner !== ownerKey.value || disposed) return
+    const counts = {}
+    for (const entry of data.notices || []) {
+      if (!entry.readAt && !entry.machineId && !/[?&]machine=/.test(entry.url || '')) counts[entry.channel] = (counts[entry.channel] || 0) + 1
+    }
+    mentionCounts.value = counts
+  } catch {}
+}
 function requireLogin() { if (user.isLoggedIn) return true; router.push({ path: '/login', query: { to: route.fullPath } }); return false }
 function openAdd() { if (requireLogin()) showAdd.value = !showAdd.value }
 function chooseAttachment(action) { showAdd.value = false; if (action.kind === 'mention') { openMentions(); return }; (action.kind === 'video' ? videoInput.value : action.kind === 'camera' ? cameraInput.value : imageInput.value)?.click() }
@@ -226,7 +250,22 @@ async function submitReport() {
   } catch (e) { if (!disposed && owner === scope.value) reportError.value = e.message || '提交失败，请重试' }
   finally { reporting.value = false }
 }
-async function openMentions() { if (!requireLogin() || !currentChannel.value || isMuted.value) return; showMentions.value = true; participantsLoading.value = true; const channel = channelCode.value; try { const data = await api('/api/messages/participants?channel=' + encodeURIComponent(channel)); if (channel === channelCode.value) participants.value = data.participants || [] } catch (e) { showToast(e.message) } finally { participantsLoading.value = false } }
+async function openMentions() {
+  if (!requireLogin() || !currentChannel.value || isMuted.value) return
+  showMentions.value = true
+  participantsLoading.value = true
+  const target = scope.value
+  const query = new URLSearchParams({ channel: channelCode.value })
+  if (machineId.value) query.set('machineId', machineId.value)
+  try {
+    const data = await api('/api/messages/participants?' + query)
+    if (!disposed && scope.value === target) participants.value = data.participants || []
+  } catch (error) {
+    if (!disposed && scope.value === target) showToast(error.message)
+  } finally {
+    if (!disposed && scope.value === target) participantsLoading.value = false
+  }
+}
 function selectMention(item) { if (!item?.ref) return; if (selectedMentions.value.some((entry) => entry.ref === item.ref)) { showMentions.value = false; return }; if (selectedMentions.value.length >= 5) { showToast('每条最多@五位成员'); return }; selectedMentions.value.push(item); text.value = (text.value.replace(/@$/, '') + '@' + item.nick + ' ').slice(0, 200); showMentions.value = false }
 function removeMention(item) { selectedMentions.value = selectedMentions.value.filter((entry) => entry.ref !== item.ref); text.value = text.value.replace('@' + item.nick + ' ', '') }
 function selectAll() { mentionAll.value = true; showMentions.value = false }
@@ -244,11 +283,18 @@ async function performLoadChannels(owner) {
   try {
     const result = await api('/api/messages/channels', { auth: 'optional' })
     if (disposed || request !== channelGeneration || owner !== ownerKey.value) return
-    if (Array.isArray(result.channels)) channelRows.value = result.channels
+    if (!Array.isArray(result.channels)) throw new Error('频道列表未返回')
+    channelRows.value = result.channels
+    channelsLoaded.value = true
     currentBuilding.value = result.currentBuilding || null
     mute.value = result.mute || result.moderation || null
     channelsError.value = ''
-  } catch { if (!disposed && request === channelGeneration && owner === ownerKey.value) channelsError.value = '频道列表暂未更新，保留当前目录。' }
+  } catch (problem) {
+    if (!disposed && request === channelGeneration && owner === ownerKey.value) {
+      if ([401, 403].includes(problem?.status)) { channelRows.value = []; channelsLoaded.value = false }
+      channelsError.value = channelsLoaded.value || channelRows.value.length ? '频道列表暂未更新，保留当前目录。' : '频道列表加载失败，请重试。'
+    }
+  }
   finally { if (!disposed && request === channelGeneration) channelsLoading.value = false }
 }
 
@@ -264,14 +310,21 @@ async function load(append = false) {
     if (machineId.value) query.set('machineId', machineId.value)
     const data = await api('/api/messages?' + query, { auth: 'optional' })
     if (disposed || request !== generation || requestScope !== scope.value) return
-    const rows = Array.isArray(data.messages) ? data.messages : []
+    if (!Array.isArray(data.messages)) throw new Error('留言列表未返回，请重试')
+    const rows = data.messages
     messages.value = append ? [...messages.value, ...rows.filter((m) => !messages.value.some((old) => old.id === m.id))] : rows
+    messagesLoaded.value = true
     page.value = targetPage
     hasMore.value = Boolean(data.pagination?.hasMore)
     mute.value = data.mute || data.moderation || null
     if (route.query.message) nextTick(() => document.getElementById('message-' + route.query.message)?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
     nextTick(() => reader.schedule())
-  } catch (e) { if (!disposed && request === generation) error.value = friendlyError(e, '留言读取失败，请重试') }
+  } catch (e) {
+    if (!disposed && request === generation && requestScope === scope.value) {
+      if ([401, 403].includes(e?.status)) { messages.value = []; hasMore.value = false; messagesLoaded.value = false }
+      error.value = friendlyError(e, '留言读取失败，请重试')
+    }
+  }
   finally { if (!disposed && request === generation) { loading.value = false; refreshing.value = false } }
 }
 
@@ -283,7 +336,6 @@ async function loadMachines() {
     const data = await loadBoard({ dorm: code })
     if (disposed || request !== machineGeneration || code !== channelCode.value) return
     machines.value = (data.board?.floors || []).flatMap((f) => f.machines || [])
-    if (machineId.value && !machines.value.some((m) => String(m.id) === machineId.value)) machineId.value = ''
   } catch { /* 留言仍可用，设备查询等待刷新。 */ }
 }
 
@@ -303,11 +355,11 @@ async function send() {
   const requestText = text.value
   const requestChannel = channelCode.value
   const requestReply = reply.value
-  const requestMachine = machineId.value || requestReply?.machineId || undefined
+  const requestMachine = machineId.value || undefined
   const requestAttachment = attachment.value
   const requestMentions = [...selectedMentions.value]
   const requestAll = mentionAll.value
-  const requestAnnouncement = announcement.value && currentChannel.value.permissions?.canAnnounce
+  const requestAnnouncement = !requestMachine && announcement.value && currentChannel.value.permissions?.canAnnounce
   sending.value = true
   sendError.value = ''
   try {
@@ -374,24 +426,24 @@ watch(scope, (next) => {
   text.value = draft?.text || ''
   reply.value = draft?.reply || null
   attachment.value = draft?.attachment || null; selectedMentions.value = draft?.mentions || []; mentionAll.value = draft?.mentionAll || false; announcement.value = draft?.announcement || false
-  cancelHold(); showAdd.value = false; showMentions.value = false; showMessageActions.value = false; showReport.value = false; participants.value = []
+  cancelHold(); showAdd.value = false; showMentions.value = false; showMessageActions.value = false; showReport.value = false; participants.value = []; participantsLoading.value = false
   generation++; machineGeneration++
   reader.reset(); mediaPreviews.value = new Set(); draftVideoFullscreen.value = false
   readRepairScope=''
-  messages.value = []; machines.value = []; error.value = ''; sendError.value = ''; hasMore.value = false; page.value = 1
+  messages.value = []; messagesLoaded.value = false; machines.value = []; error.value = ''; sendError.value = ''; hasMore.value = false; page.value = 1
   loading.value = false; refreshing.value = false; showMute.value = false
   refresh()
 }, { immediate: true })
-watch(ownerKey, () => { channelGeneration++; channelRows.value=[]; currentBuilding.value = null; mute.value = null; mentionCounts.value = {}; loadChannels(); loadNoticeCounts() }, {flush:'sync'})
+watch(ownerKey, () => { channelGeneration++; channelRows.value=[]; channelsLoaded.value = false; channelsError.value = ''; currentBuilding.value = null; mute.value = null; mentionCounts.value = {}; loadChannels(); loadNoticeCounts() }, {flush:'sync'})
 watch(() => Boolean(currentChannel.value), (available) => { if (available && channelCode.value && !messages.value.length && !loading.value) refresh() })
-const transport = createChannelTransport({ configure: (channel) => user.isLoggedIn ? api('/api/messages/realtime?channel=' + encodeURIComponent(channel), { silent: true }) : Promise.resolve({ enabled: false }), refresh: () => { if (!loading.value && !sending.value && page.value === 1) refresh() }, onState: (state) => { transportState.value = state } })
-watch(() => [channelCode.value, ownerKey.value, Boolean(currentChannel.value)], () => { if (channelCode.value && currentChannel.value) transport.start(channelCode.value); else transport.stop() }, { immediate: true })
+const transport = createChannelTransport({ configure: (channel) => user.isLoggedIn && !machineId.value ? api('/api/messages/realtime?channel=' + encodeURIComponent(channel), { silent: true }) : Promise.resolve({ enabled: false }), refresh: () => { if (!loading.value && !sending.value && page.value === 1) refresh() }, onState: (state) => { transportState.value = state } })
+watch(() => [channelCode.value, machineId.value, ownerKey.value, Boolean(currentChannel.value)], () => { if (channelCode.value && currentChannel.value) transport.start(channelCode.value); else transport.stop() }, { immediate: true })
 watch(text, (value, old) => { if (value.endsWith('@') && value.length > old.length) openMentions() })
 watch(()=>[showMute.value,showReport.value,showMentions.value,showAdd.value,showMessageActions.value,mediaPreviews.value.size>0,draftVideoFullscreen.value],values=>{if(values.some(Boolean))reader.pause();else nextTick(()=>reader.schedule())},{flush:'sync'})
 function onVisible() { cancelHold(); reader.reset(); clock.value = Date.now(); transport.visibilityChanged(); if (document.visibilityState === 'visible') { if(!channelCode.value)refresh();else reader.schedule() } }
 function onScroll() { cancelHold(); reader.schedule() }
 onMounted(() => {
-  if (!channelsLoading.value && !channelRows.value.length) loadChannels()
+  if (!channelsLoading.value && !channelsLoaded.value) loadChannels()
   ticker = setInterval(() => { if (document.visibilityState === 'visible') clock.value = Date.now() }, 30000)
   document.addEventListener('visibilitychange', onVisible)
   document.addEventListener('fullscreenchange', onFullscreenChange)

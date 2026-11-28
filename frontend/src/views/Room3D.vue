@@ -106,7 +106,9 @@
               <p v-if="selectedQueueCount" class="mp-queue-n">已有 {{ selectedQueueCount }} 人排队<template v-if="myQueueEntry?.position"> · 你第 {{ myQueueEntry.position }} 位</template></p>
             </div>
             <div v-show="panelTab === 'comments'" id="mp-comments" role="tabpanel" aria-labelledby="mp-comments-tab" class="mp-msgs">
-              <p v-if="!machineMessages.length" class="mp-msg-empty">还没有留言，可以留下这台机器的使用情况。</p>
+              <p v-if="machineMessagesLoading && !machineMessages.length" class="mp-msg-empty" role="status">正在加载本机留言…</p>
+              <p v-else-if="machineMessagesError" class="mp-msg-empty">{{ machineMessagesError }} <button type="button" @click="loadMachineMessages">重试</button></p>
+              <p v-else-if="!machineMessages.length" class="mp-msg-empty">还没有留言，可以留下这台机器的使用情况。</p>
               <article v-for="msg in machineMessages" :key="msg.id" class="mp-msg"><span class="mp-msg-nick">{{ msg.nick }}</span><span class="mp-msg-text">{{ msg.text }}</span></article>
             </div>
           </template>
@@ -439,7 +441,10 @@ const noteText = ref('')
 const useDisinfectant = ref(false)
 const selfCleaned = ref(false)
 const msgText = ref('')
-const allMessages = ref([]) // 全楼留言（含 machineId 标记）
+const machineMessages = ref([])
+const machineMessagesLoading = ref(false)
+const machineMessagesError = ref('')
+let machineMessageRequest = 0
 const queueList = ref([]) // 排队列表（每条 { machineId, nick, at, mine }）
 const queueSubmitting = ref(false)
 const occupancyMap = ref({}) // machineId → { nick(打码), avatar, startMin }
@@ -2953,12 +2958,10 @@ async function performSyncData(force) {
   if (!supplementPending) {
     const owner = userStore.user?.id || ''
     supplementPending = Promise.all([
-      owner ? api('/api/messages?dorm=guiyuan', { auth: 'optional', timeout: 6000 }).catch(() => null) : Promise.resolve(null),
       api('/api/queue?dorm=guiyuan', { auth: 'optional', timeout: 6000 }).catch(() => null),
       api('/api/occupancy?building=b1', { auth: false, timeout: 6000 }).catch(() => null),
-    ]).then(([msgData, queueData, occData]) => {
+    ]).then(([queueData, occData]) => {
       if (disposed || dorm.code !== 'guiyuan' || (userStore.user?.id || '') !== owner) return
-      if (msgData) allMessages.value = msgData.messages || []
       if (queueData) queueList.value = queueData.queue || []
       if (occData) occupancyMap.value = occData.occupancy || {}
       updateQueueVisuals()
@@ -3071,14 +3074,31 @@ async function quickStart() {
   return submitRegistration('washer')
 }
 
-// 本机留言板：只看挂在当前选中机器上的留言（最新 5 条）
-const machineMessages = computed(() => {
-  if (!selected.value?.machineId) return []
-  return allMessages.value
-    .filter((m) => m.machineId === selected.value.machineId)
-    .slice(-5)
-    .reverse()
-})
+async function loadMachineMessages() {
+  const request = ++machineMessageRequest
+  const id = selected.value?.machineId
+  machineMessagesError.value = ''
+  if (panelTab.value !== 'comments' || !id) { machineMessagesLoading.value = false; return }
+  if (!userStore.ready) { machineMessagesLoading.value = true; return }
+  if (!userStore.isLoggedIn) {
+    machineMessagesLoading.value = false
+    machineMessagesError.value = '登录后可查看本机留言'
+    return
+  }
+  machineMessagesLoading.value = true
+  try {
+    const data = await api('/api/messages?channel=' + encodeURIComponent(dorm.code) + '&machineId=' + encodeURIComponent(id) + '&limit=5', { auth: 'optional', silent: true })
+    if (!disposed && request === machineMessageRequest) machineMessages.value = data.messages || []
+  } catch (error) {
+    if (!disposed && request === machineMessageRequest) machineMessagesError.value = error?.message || '本机留言加载失败'
+  } finally {
+    if (!disposed && request === machineMessageRequest) machineMessagesLoading.value = false
+  }
+}
+watch(() => [panelTab.value, selected.value?.machineId, dorm.code, userStore.ready, userStore.user?.id], () => {
+  machineMessages.value = []
+  void loadMachineMessages()
+}, { flush: 'sync' })
 
 // 给当前选中的机器留言
 async function postMachineMessage() {
@@ -3096,7 +3116,7 @@ async function postMachineMessage() {
     })
     msgText.value = ''
     showToast('已留言')
-    await syncData()
+    await loadMachineMessages()
   } catch (e) {
     showToast(e?.message || '留言失败')
   }

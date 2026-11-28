@@ -140,8 +140,13 @@ async function checkTakeConfirm() {
       confirmButtonText: '我已取衣',
       cancelButtonText: '还没取',
     })
-    await api(`/api/tasks/${pending.id}/take`, { method: 'POST' })
-    showToast('已标记完成')
+    try {
+      const result = await api(`/api/tasks/${encodeURIComponent(pending.id)}/take`, { method: 'POST', timeout: 10000 })
+      if (result?.task?.id !== pending.id || result.task.done !== true) throw new Error('取衣结果待核对，请在「我的洗衣」查看')
+      showToast('已确认取衣')
+    } catch (error) {
+      showToast(error?.message || '取衣结果待核对，请在「我的洗衣」查看')
+    }
   } catch {
     /* 用户点「还没取」或接口失败都不打扰 */
   }
