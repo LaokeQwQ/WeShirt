@@ -127,6 +127,21 @@ function ownsTaskOccupancy(occupancy, task, userId) {
   return true // 兼容没有关联字段的旧占用记录
 }
 
+async function readUrgeState(store, buildingId, machineId, occupancy) {
+  const key = `urge-state:${buildingId}:${machineId}`
+  const scope = { taskId: occupancy.taskId || '', userId: occupancy.userId }
+  const saved = await store.get(key, null)
+  if (saved?.taskId === scope.taskId && saved?.userId === scope.userId) {
+    return { key, scope, count: Number.isFinite(saved.count) ? saved.count : 0, at: Number.isFinite(saved.at) ? saved.at : 0 }
+  }
+  if (occupancy.urgeTaskScoped === true) return { key, scope, count: 0, at: 0 }
+  const [legacyCount, legacyAt] = await Promise.all([
+    store.get(`urgecount:${buildingId}:${machineId}`, 0),
+    store.get(`urge:${buildingId}:${machineId}`, 0),
+  ])
+  return { key, scope, count: Number.isFinite(legacyCount) ? legacyCount : 0, at: Number.isFinite(legacyAt) ? legacyAt : 0 }
+}
+
 // ── 惰性加载 machines（computeLeftMin 用），缺失时回退到 util.minutesBetween ──
 let _machinesMod = null
 let _machinesLoading = null
@@ -1850,6 +1865,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
 
   // 登记任务（鉴权）
   app.post('/api/tasks', async (c) => {
+    let registrationStage = 'auth'
     try {
       const userId = await bearerUser(c, env)
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
@@ -1864,6 +1880,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       if (Object.hasOwn(body, 'useDisinfectant') && typeof useDisinfectant !== 'boolean') return apiErr('bad_param', '是否使用消毒液须为布尔值')
       if (Object.hasOwn(body, 'selfCleaned') && typeof selfCleaned !== 'boolean') return apiErr('bad_param', '自清洁记录须为布尔值')
       const buildingId = env.BUILDING_ID || 'b1'
+      registrationStage = 'machine_and_user_read'
       const [entry, savedMapping, user] = await Promise.all([
         store.get(`machines:${buildingId}`, null),
         store.get(`mapping:${buildingId}`, null),
@@ -1923,6 +1940,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const result = await withTaskMutation(store, buildingId, async () => {
         // Mutable snapshots must be read after acquiring the shared task/queue
         // locks. Read-only machine/user setup and provider I/O stay outside.
+        registrationStage = 'registration_state_read'
         const [occ, qList, list] = await Promise.all([
           store.get(`occupancy:${buildingId}`, {}),
           store.get(`queue:${buildingId}`, []),
@@ -1957,6 +1975,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         }
         const tasks = retainedTasks(list)
         tasks.push(task)
+        registrationStage = 'task_write'
         await store.put(`tasks:${userId}`, tasks)
 
         // 占用登记：记录"谁在这台机器上开洗"（面板展示头像+昵称打码+几分钟前）
@@ -1969,24 +1988,32 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           avatarUrl: normalizeAvatarUrl(user.avatarUrl),
           startAt,
           endAt: taskEndAt,
+          urgeTaskScoped: true,
         }
 
         // 开洗（任意机器）= 自动退出自己的所有排队
         const qArr = Array.isArray(qList) ? qList : []
         const qNext = qArr.filter((q) => q.userId !== userId)
 
-        // 上面三次写也并发落盘
-        await Promise.all([
-          store.put(`occupancy:${buildingId}`, occMap),
-          qNext.length !== qArr.length ? store.put(`queue:${buildingId}`, qNext) : Promise.resolve(),
-          // 有人重新登记这台机器 → 「提醒取衣」的累计次数与冷却清零
-          store.del(`urgecount:${buildingId}:${machineId}`),
-          store.del(`urge:${buildingId}:${machineId}`),
+        // Keep both writes inside the lock until settled, even after one fails.
+        // Urge counters are matched to the task, requiring no unrelated deletes.
+        const [occupancySaved, queueSaved] = await Promise.allSettled([
+          Promise.resolve().then(() => store.put(`occupancy:${buildingId}`, occMap)),
+          qNext.length !== qArr.length ? Promise.resolve().then(() => store.put(`queue:${buildingId}`, qNext)) : Promise.resolve(),
         ])
+        if (occupancySaved.status === 'rejected') {
+          registrationStage = 'occupancy_write'
+          throw occupancySaved.reason
+        }
+        if (queueSaved.status === 'rejected') {
+          registrationStage = 'queue_write'
+          throw queueSaved.reason
+        }
         return task
       }, { queue: true })
       if (result instanceof Response) return result
       const task = result
+      registrationStage = 'registered'
 
       if (mobilePush.providers.length) {
         const wake = mobilePush.notify(userId, { nativeKind: 'TASK_REGISTERED', nativeEventKey: `task-registered:${task.id}`, taskId: task.id })
@@ -2024,6 +2051,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         },
       })
     } catch (e) {
+      c.set('registrationStage', registrationStage)
+      recordRequestFailure(c, e)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -2236,27 +2265,22 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const buildingId = env.BUILDING_ID || 'b1'
 
       // 限频：每台机器 5 分钟一次
-      const lastKey = `urge:${buildingId}:${machineId}`
-      const countKey = `urgecount:${buildingId}:${machineId}`
-      const last = await store.get(lastKey, 0)
+      const occ = await store.get(`occupancy:${buildingId}`, {})
+      const entry = occ && typeof occ === 'object' ? occ[machineId] : null
+      if (!entry || !entry.userId) return apiErr('not_found', '这台机器没有登记中的占用记录', 404)
+      if (entry.userId === userId) return apiErr('bad_param', '不能提醒自己')
+      const state = await readUrgeState(store, buildingId, machineId, entry)
       const waitMs = 5 * 60 * 1000
-      const elapsed = Date.now() - Number(last || 0)
+      const elapsed = Date.now() - state.at
       if (elapsed < waitMs) {
         const leftSec = Math.ceil((waitMs - elapsed) / 1000)
         return apiErr('rate_limited', `刚提醒过了，${leftSec} 秒后可以再点（同一台 5 分钟一次）`, 429)
       }
 
-      const occ = await store.get(`occupancy:${buildingId}`, {})
-      const entry = occ && typeof occ === 'object' ? occ[machineId] : null
-      if (!entry || !entry.userId) return apiErr('not_found', '这台机器没有登记中的占用记录', 404)
-      if (entry.userId === userId) return apiErr('bad_param', '不能提醒自己')
-
       const target = await store.get(`user:${entry.userId}`, null)
 
-      // 累计点击次数：每台机器独立计数，换人登记时清零（见 POST /api/tasks）
-      const count = Number((await store.get(countKey, 0)) || 0) + 1
-      await store.put(countKey, count)
-      await store.put(lastKey, Date.now())
+      const count = state.count + 1
+      await store.put(state.key, { ...state.scope, count, at: Date.now() })
 
       // 尽量还发钉钉（对方绑了就有用）；发不出去也不算失败
       let dmSent = false
@@ -2391,13 +2415,12 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         return apiErr('bad_param', '请上传「机器周围」照片（拍清周围没有空桶）')
 
       const buildingId = env.BUILDING_ID || 'b1'
-      const count = Number((await store.get(`urgecount:${buildingId}:${machineId}`, 0)) || 0)
-      if (count < 3) return apiErr('bad_param', `需先累计提醒 3 次（当前 ${count} 次）`)
-
       const occ = await store.get(`occupancy:${buildingId}`, {})
       const entry = occ && typeof occ === 'object' ? occ[machineId] : null
       if (!entry || !entry.userId) return apiErr('not_found', '这台机器没有登记中的占用记录', 404)
       if (entry.userId === userId) return apiErr('bad_param', '不能查看自己的信息')
+      const { count } = await readUrgeState(store, buildingId, machineId, entry)
+      if (count < 3) return apiErr('bad_param', `需先累计提醒 3 次（当前 ${count} 次）`)
 
       const target = await store.get(`user:${entry.userId}`, null)
       const requester = await store.get(`user:${userId}`, null)
