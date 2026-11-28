@@ -91,3 +91,38 @@ test('Pages can report a traced unavailable board while first synchronization is
     await Promise.allSettled(tasks)
   }
 })
+
+test('transient edge board read failure can reuse a same-dorm public catalogue with unverified states', async () => {
+  const at = new Date().toISOString()
+  let fail = false
+  const rows = new Map([
+    ['machines:b1', JSON.stringify({ board: { updatedAt: at, floors: [{ code: '1F', machines: [
+      { id: 'm', name: '一号机', state: 'idle', dormBuilding: 'guiyuan', privateField: 'fixture-private' },
+    ] }] } })],
+    ['meta:sync', JSON.stringify({ lastAttemptAt: Date.now() })],
+  ])
+  const kv = {
+    async get(key) { if (fail && key === 'machines:b1') throw Error('binding unavailable'); return rows.get(key) ?? null },
+    async put(key, value) { rows.set(key, value) },
+    async delete(key) { rows.delete(key) },
+    async list() { return { keys: [], complete: true } },
+  }
+  const { onRequest } = await import('../functions/api/[[default]].js?restricted-board-fallback')
+  const read = (dorm, headers) => onRequest({
+    env: { LAUNDRY_KV: kv, BUILDING_ID: 'b1', HAIER_MODE: 'mock' },
+    request: new Request('https://site.example/api/machines?dorm=' + dorm, { headers }),
+    waitUntil() {},
+  })
+  assert.equal((await read('guiyuan')).status, 200)
+  fail = true
+  const response = await read('guiyuan')
+  const output = await response.json()
+  assert.equal(response.status, 200)
+  assert.equal(output.board.floors[0].machines[0].state, 'unknown')
+  assert.equal(output.board.idle, 0)
+  assert.equal(output.freshness.stale, true)
+  assert.match(output.freshness.eventId, /^evt_/)
+  assert.doesNotMatch(JSON.stringify(output), /fixture-private/)
+  assert.equal((await read('liuyuan')).status, 503)
+  assert.equal((await read('guiyuan', { authorization: 'Bearer test' })).status, 503)
+})

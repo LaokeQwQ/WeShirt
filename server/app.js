@@ -1703,13 +1703,21 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     }
   })
 
+  // A same-dorm public display fallback carries place names only. Never keep
+  // profiles, registration data or a state that suggests a machine can be used.
+  const publicBoardFallbacks = new Map()
+
   // 看板（公开；无看板时尝试补一次同步）
   app.get('/api/machines', async (c) => {
+    const dorm = c.req.query('dorm') || ''
+    const catalog = env.SITE_BUILDINGS
+    const defaultBuilding = env.BUILDING_ID || 'b1'
+    const buildingId = c.req.query('building') || defaultBuilding
+    const mayFallback = Boolean(dorm && catalog?.some(row => row.code === dorm && row.enabled !== false) &&
+      buildingId === defaultBuilding && !c.req.header('authorization') && !c.req.header('x-admin-token') &&
+      !c.req.header('cookie') && !c.req.query('token'))
     try {
-      const dorm = c.req.query('dorm') || ''
-      const catalog = env.SITE_BUILDINGS
       if (dorm && !normalizeDormBuilding(dorm, catalog)) return apiErr('bad_param', '住宿楼无效')
-      const buildingId = c.req.query('building') || env.BUILDING_ID || 'b1'
       let [entry, sync] = await Promise.all([
         store.get(`machines:${buildingId}`, null),
         store.get('meta:sync', {}),
@@ -1770,6 +1778,18 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       board.unknown = visible.filter((m) => m.state === 'unknown').length
       const serverNow = nowISO()
       const ageMs = Math.max(0, Date.parse(serverNow) - Date.parse(board.updatedAt || ''))
+      if (mayFallback && visible.length && ageMs < 180_000 && !Number(sync.failCount)) {
+        const floors = board.floors.map(floor => ({ code: floor.code, name: floor.name,
+          machines: floor.machines.map(machine => ({
+            id: machine.id, displayName: machine.displayName, name: machine.name, kind: machine.kind,
+            floorCode: machine.floorCode, slot: machine.slot, dormBuilding: dorm,
+            state: 'unknown', health: { stale: true, label: '状态待核对' },
+          })),
+        }))
+        if (!publicBoardFallbacks.has(dorm) && publicBoardFallbacks.size >= 24) publicBoardFallbacks.delete(publicBoardFallbacks.keys().next().value)
+        publicBoardFallbacks.set(dorm, { dormBuilding: dorm, buildingName: board.buildingName, updatedAt: board.updatedAt,
+          total: visible.length, unknown: visible.length, idle: 0, occupied: 0, faulty: 0, floors })
+      }
       // Device state must not pass through a second browser/CDN stale cache.
       // Clients already coalesce requests for 5s; hashed static assets keep long caching.
       return json(
@@ -1782,7 +1802,17 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       )
     } catch (e) {
       recordRequestFailure(c, e)
-      if (e?.code === 'edge_kv_read_failed') return apiErr('board_storage_busy', '设备状态暂时无法读取，请稍后重试', 503)
+      if (e?.code === 'edge_kv_read_failed') {
+        const board = mayFallback && publicBoardFallbacks.get(dorm)
+        const now = Date.now()
+        const ageMs = now - Date.parse(board?.updatedAt || '')
+        if (board && ageMs >= 0 && ageMs < 5 * 60_000) {
+          return json({ board, mapping: {}, freshness: { serverNow: new Date(now).toISOString(), updatedAt: board.updatedAt,
+            ageSeconds: Math.floor(ageMs / 1000), stale: true, syncFailed: true, errorStage: 'board_storage',
+            eventId: c.get('eventId') } }, 200, { 'Cache-Control': 'no-store' })
+        }
+        return apiErr('board_storage_busy', '设备状态暂时无法读取，请稍后重试', 503)
+      }
       if(e?.code==='machine_store_unavailable')return apiErr(e.code,'机器数据暂不可用，请稍后重试',503)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
