@@ -17,7 +17,7 @@ test('CloudBase bridge preserves real null, absence, and paginated prefix reads'
     if (name === 'weshirt_site_store_get') return { data: envelope(data.has(key) ? { found: true, value: data.get(key) } : { found: false }) }
     if (name === 'weshirt_site_store_put') { data.set(key, args.p_value); return { data: envelope(true) } }
     if (name === 'weshirt_site_store_delete') return { data: envelope(data.delete(key)) }
-    assert.equal(name, 'weshirt_site_store_list')
+    assert.equal(name, 'weshirt_site_store_list_keys')
     const matches = [...data].filter(([key]) => key.startsWith(args.p_prefix) && key > (args.p_after ?? '')).sort()
     const rows = matches.slice(0, 1).map(([key, value]) => ({ key, value }))
     return { data: envelope({ rows, next: matches.length > 1 ? rows[0].key : null }) }
@@ -83,4 +83,49 @@ test('a repeated or out-of-scope list page fails instead of returning a partial 
   assert.equal(attempted, 2)
   await assert.rejects(store.list('b:'), unavailable)
   assert.equal(attempted, 3)
+})
+
+test('oversized Unicode JSON round trips through bounded requests and paged listings', async () => {
+  const huge = { text: '界😀\\"'.repeat(45_000), empty: null }
+  const saved = new Map(), parts = new Map()
+  const digest = 'a'.repeat(64)
+  const handle = createSiteStoreHttpHandler({ secret, importSecret, rdb: { async rpc(name, args) {
+    let result
+    switch (name) {
+      case 'weshirt_site_store_stage':
+        assert.equal(args.p_import, false)
+        parts.set(args.p_part, args.p_text)
+        result = true
+        break
+      case 'weshirt_site_store_commit':
+        assert.equal(args.p_import, false)
+        assert.equal(args.p_parts, parts.size)
+        saved.set(args.p_key, JSON.parse(Array.from({ length: parts.size }, (_, n) => parts.get(n)).join('')))
+        result = true
+        break
+      case 'weshirt_site_store_get':
+        result = { found: true, value: saved.get(args.p_key) }
+        break
+      case 'weshirt_site_store_read_chunk': {
+        const value = Array.from(JSON.stringify(saved.get(args.p_key)))
+        const next = args.p_offset + 6000
+        assert.equal(args.p_digest, args.p_offset ? digest : null)
+        result = { found: true, text: value.slice(args.p_offset, next).join(''), digest, next: next < value.length ? next : null }
+        break
+      }
+      case 'weshirt_site_store_list_keys':
+        result = { rows: [{ key: 'large:1', chunked: true }], next: null }
+        break
+      default: assert.fail('Unexpected operation')
+    }
+    return { data: envelope(result) }
+  } } })
+  const store = createRemoteSiteStore({ url, secret, fetch: async (_target, init) => {
+    assert(new TextEncoder().encode(init.body).length <= 96 * 1024)
+    return toResponse(await handle({ httpMethod: init.method, body: init.body, headers: init.headers }))
+  } })
+  assert.deepEqual(await store.put('large:1', huge), huge)
+  assert(parts.size > 1)
+  assert.deepEqual(await store.get('large:1'), huge)
+  assert.deepEqual(await store.list('large:'), [{ key: 'large:1', value: huge }])
 })
