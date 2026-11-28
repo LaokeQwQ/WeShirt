@@ -42,7 +42,7 @@ import { registerSocialRoutes } from './social.js'
 import { registerOperationsRoutes } from './operations.js'
 import { registerFavoriteRoutes } from './favorites.js'
 import { registerMachineFeedbackRoutes } from './machine-feedback.js'
-import { machineLabels } from '../packages/core/machine-labels.js'
+import { machineLabels, projectMachinePlacement } from '../packages/core/machine-labels.js'
 import { readCalibrationSettings, projectCalibratedBoard, calibrateMachineBoard, invalidateMachineCalibration } from '../packages/core/machine-time-calibration.js'
 import { configureMachineDocuments } from '../packages/core/machine-documents.js'
 import { communitySnapshot } from './community-snapshot.js'
@@ -54,6 +54,7 @@ import { taskLifecycle, retainedTasks } from '../packages/core/task-retention.js
 import { pruneUserTasks } from './task-retention.js'
 import { createMobileAuth, registerMobileRoutes } from './mobile.js'
 import { createRemoteMobileAtomicStore } from '../packages/core/mobile-store.js'
+import { createCloudBoardStore } from '../packages/core/cloud-board-store.js'
 import { createMobilePush, mobileNoticeData } from '../packages/core/mobile-push.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { registerPermissionMiddleware, registerPermissionRoutes } from './permissions.js'
@@ -668,6 +669,8 @@ async function runSyncOnce(env, store, opts = {}) {
   configureMachineDocuments(store,{env,atomicStore:opts.mobileAtomicStore || createRemoteMobileAtomicStore(env)})
   const out = { fetched: 0, events: [], notified: 0, error: null }
   const buildingId = env.BUILDING_ID || 'b1'
+  const cloudBoard = env.CLOUDBASE_BOARD_MIRROR === 'true'
+    ? createCloudBoardStore(opts.mobileAtomicStore || createRemoteMobileAtomicStore(env), { partition: buildingId }) : null
   const buildingName = env.BUILDING_NAME || '1 号楼'
   // 账号池状态要在 catch 里也能用（失败时给该账号打冷却）
   let pool = null
@@ -752,12 +755,24 @@ async function runSyncOnce(env, store, opts = {}) {
       const prev = await store.get(`machines:${buildingId}`, null)
       await recordLaundryCycleObservations(store, buildingId, projected, prev?.board, cycleEvidence, prev?.cycleEvidence)
       out.events = machinesMod.diffEvents(prev?.board?.floors?.flatMap(f => f.machines) || [], projected.floors.flatMap(f => f.machines)) || []
-      await store.put(`machines:${buildingId}`, { board: projected, rawUpdatedAt: nowISO(), cycleEvidence })
+      const snapshot = { board: projected, rawUpdatedAt: nowISO(), cycleEvidence }
+      let mirror
+      if (cloudBoard) {
+        const mapping = savedMapping?.mapping || {}
+        const layout = projectMachinePlacement(projected, mapping)
+        mirror = cloudBoard.publish({ board: { ...layout, floors: layout.floors.map(floor => ({
+          ...floor, machines: floor.machines.map(machine => ({ ...machine, ...machineLabels(machine, mapping),
+            dormBuilding: resolveMachineDorm(machine, mapping, env.SITE_BUILDINGS),
+          })),
+        })) } }).catch(() => ({ status: 'failed' }))
+      }
+      await store.put(`machines:${buildingId}`, snapshot)
       await store.put('meta:sync', {
         lastFetchAt: projected.updatedAt || nowISO(), lastAttemptAt: Date.now(),
         failCount: 0, lastError: null, lastErrorStage: null, lastErrorEventId: null, cooldownUntil: 0,
       })
       snapshotCommitted = true
+      if (mirror) out.cloudBoardMirror = (await mirror)?.status
       stage = 'notifications'
     },broadcastTargets:()=>resolveBroadcastTargets(store,env),notify:async(alert)=>{const uid=env.ADMIN_DING_USERID||env.DINGTALK_ADMIN_USERID;if(!uid)return {dm:{ok:false,error:'not_configured'}};const mod=await import('../packages/core/dingtalk.js');const r=await mod.createDingTalk(env).sendSingle(uid,{title:alert.title,text:alert.message});return {dm:{ok:!!r?.ok,error:r?.err||null}}},broadcast:async({board:summary,hourKey,target})=>{
       const mod=await import('../packages/core/dingtalk.js'); const dt=mod.createDingTalk(env)
@@ -1706,6 +1721,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
   // A same-dorm public display fallback carries place names only. Never keep
   // profiles, registration data or a state that suggests a machine can be used.
   const publicBoardFallbacks = new Map()
+  const cloudBoardFallback = env.CLOUDBASE_BOARD_MIRROR === 'true' && mobileAtomicStore
+    ? createCloudBoardStore(mobileAtomicStore, { partition: env.BUILDING_ID || 'b1' }) : null
 
   // 看板（公开；无看板时尝试补一次同步）
   app.get('/api/machines', async (c) => {
@@ -1803,10 +1820,19 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     } catch (e) {
       recordRequestFailure(c, e)
       if (e?.code === 'edge_kv_read_failed') {
-        const board = mayFallback && publicBoardFallbacks.get(dorm)
         const now = Date.now()
+        const recent = board => {
+          const age = now - Date.parse(board?.updatedAt || '')
+          return age >= 0 && age < 5 * 60_000
+        }
+        let board = mayFallback && publicBoardFallbacks.get(dorm)
+        if (!recent(board)) board = null
+        if (!board && mayFallback && cloudBoardFallback) {
+          const remote = await cloudBoardFallback.read({ dorm }).catch(() => null)
+          if (remote) board = { ...remote, buildingName: dormBuildingName(dorm, catalog) }
+        }
         const ageMs = now - Date.parse(board?.updatedAt || '')
-        if (board && ageMs >= 0 && ageMs < 5 * 60_000) {
+        if (recent(board)) {
           return json({ board, mapping: {}, freshness: { serverNow: new Date(now).toISOString(), updatedAt: board.updatedAt,
             ageSeconds: Math.floor(ageMs / 1000), stale: true, syncFailed: true, errorStage: 'board_storage',
             eventId: c.get('eventId') } }, 200, { 'Cache-Control': 'no-store' })
@@ -3770,6 +3796,9 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           ...(it.queryFailed === true || Number(it.queryStatus) >= 400 ? {queryFailed:true,queryStatus:Number.isInteger(Number(it.queryStatus)) ? Number(it.queryStatus) : 0} : {}),
           ...(normalizeMachineCategory(it.categoryCode)?{categoryCode:it.categoryCode}:{}),
           finishTime: it.finishTime ?? null,
+          ...(typeof it.cycleId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(it.cycleId) ? { cycleId: it.cycleId } : {}),
+          ...(typeof it.startTime === 'string' && it.startTime.length <= 40 && Number.isFinite(Date.parse(it.startTime))
+            ? { startTime: new Date(it.startTime).toISOString() } : {}),
         })
       }
       if (!raws.length) return apiErr('bad_param', 'raws 里没有一条合法设备')
