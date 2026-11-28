@@ -137,6 +137,12 @@ test('registration reports a traceable critical occupancy failure without replay
   const logs = (await store.list('auditlog:')).flatMap(entry => entry.value)
   assert.equal(logs.find(entry => entry.type === 'error' && entry.detail.eventId === eventId)?.detail.registrationStage, 'occupancy_write')
   assert.ok(!JSON.stringify({ result, logs }).includes('private-synthetic-occupancy-write-failure'))
+  store.put = originalPut
+  const recovered = await register('one', { key: 'registration-partial-result' })
+  assert.equal(recovered.status, 200)
+  assert.equal((await store.get('tasks:a')).length, 1)
+  assert.equal((await store.get('occupancy:b1')).one.taskId, recovered.data.task.id)
+  assert.equal((await register('two', { key: 'registration-partial-result' })).status, 409)
 })
 
 test('取旧任务与新增登记并发时，旧take不能清掉新任务占用；队列与登记共享顺序', async (t) => {
@@ -186,6 +192,28 @@ test('取衣重试保留首次确认时间并修复未清除的占用', async (t
   assert.equal(repeated.status, 200)
   assert.equal(repeated.data.task.takenAt, finished.takenAt)
   assert.equal((await store.get('occupancy:b1')).one.taskId, next.data.task.id)
+})
+
+test('delete retries safely after critical occupancy failure and can clear old orphan records', async (t) => {
+  const { register, store, call } = await fixture(t)
+  const saved = await register('one')
+  assert.equal(saved.status, 200)
+  const id = saved.data.task.id
+  const originalPut = store.put
+  let shouldFail = true
+  store.put = async (key, value) => {
+    if (key === 'occupancy:b1' && shouldFail) { shouldFail = false; throw new Error('temporary failure') }
+    return originalPut(key, value)
+  }
+  const remove = () => call('/api/tasks/' + id, { method: 'DELETE', key: 'retry-safe-delete-fixture', body: {} })
+  assert.equal((await remove()).status, 500)
+  assert.equal((await store.get('tasks:a'))[0].id, id)
+  assert.equal((await remove()).status, 200)
+  assert.deepEqual(await store.get('tasks:a'), [])
+  assert.deepEqual(await store.get('occupancy:b1'), {})
+  await originalPut('occupancy:b1', { one: { userId: 'a', taskId: id }, two: { userId: 'b', taskId: id } })
+  assert.equal((await remove()).status, 200)
+  assert.deepEqual(await store.get('occupancy:b1'), { two: { userId: 'b', taskId: id } })
 })
 
 test('occupancy读到旧过期快照后，新登记不能被清理逻辑覆盖删除', async (t) => {

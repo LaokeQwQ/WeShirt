@@ -111,6 +111,7 @@ import { loadBoard, filterDormFloors } from '../boardQuery'
 import TaskDetailsForm from '../components/TaskDetailsForm.vue'
 import { WASHER_PROGRAMS, machineRemainingMinutes, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } from '../taskRegistration'
 import { newerRunningMachine, taskTimingConflict } from '../taskTiming'
+import { rememberRemovedTask, removeDeletedTasks } from '../removedTasks'
 import '../userActionConfirm.css'
 import { splitTaskHistory } from '../../../packages/core/task-retention.js'
 
@@ -347,6 +348,7 @@ async function take(t) {
 async function remove(t) {
   try {
     await userStore.ensureAuth()
+    const owner = userStore.user?.id
     const result = await confirmAction({
       read: () => ({ id: t.id, name: t.machineName, userId: userStore.user?.id || '', disposed }),
       describe: (snapshot) => ({ title: '删除登记', message: `${snapshot.name || '这台机器'}\n删除这条登记记录，并释放它对应的登记占用？机器远端状态不会随登记删除而变化。` }),
@@ -354,8 +356,12 @@ async function remove(t) {
       onChanged: () => showToast('登记状态已变化，请重新确认'),
     })
     if (result.status !== 'submitted') return
+    rememberRemovedTask(owner, t.id)
+    if (disposed || owner !== userStore.user?.id) return
     tasks.value = tasks.value.filter((x) => x.id !== t.id)
     showToast('已删除')
+    if (tasksPending) await tasksPending
+    if (!disposed && owner === userStore.user?.id) void loadTasks({ quiet: true })
   } catch (e) {
     showToast(e?.message || '删除失败')
   }
@@ -392,7 +398,7 @@ async function loadTasks({ quiet = false } = {}) {
     const data = await api('/api/tasks')
     if (disposed || owner !== userStore.user?.id) return
     if (!Array.isArray(data.tasks)) throw new Error('洗衣记录格式有误，请重试')
-    tasks.value = data.tasks
+    tasks.value = removeDeletedTasks(owner, data.tasks)
     syncClock(data.serverNow)
     taskError.value = ''
   } catch (e) {

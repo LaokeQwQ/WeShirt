@@ -8,6 +8,12 @@ const valid = value => Number.isFinite(value) && value > 0
  * platform deadline; projecting the same machine twice cannot add it twice. */
 export function resolveMachineTime(machine = {}, { task, now = Date.now(), snapshotAt, timeOffsetMinutes } = {}) {
   now = stamp(now)
+  const completedAt = stamp(task?.platformCompletedAt)
+  if (valid(completedAt) && completedAt <= now) {
+    return { deadline: new Date(completedAt).toISOString(), remainingMinutes: 0,
+      source: 'upstream', stale: false, confirmedFinished: true, platformFinishAt: null,
+      timeOffsetMinutes: 0, observedAt: new Date(completedAt).toISOString() }
+  }
   const observedAt = stamp(snapshotAt ?? machine.timeObservedAt ?? machine.updatedAt)
   const stale = machine.health?.stale === true || machine.timeStale === true || upstreamQueryFailure(machine) !== null
     || Number.isFinite(observedAt) && (now - observedAt > 7 * MINUTE || observedAt > now + 30000)
@@ -23,9 +29,12 @@ export function resolveMachineTime(machine = {}, { task, now = Date.now(), snaps
   let deadlineMs = rawDeadline === null ? null : rawDeadline + (source === 'upstream' ? offset * MINUTE : 0)
   const rawState = machine.upstreamState || (['idle','occupied','abnormal','faulty','unknown'].includes(machine.rawState) ? machine.rawState
     : ({1:'idle',2:'occupied',3:'faulty'})[machine.rawState]) || machine.state
-  const confirmedFinished = !stale && rawState === 'idle' && !machine.registrationPending && (!reported || machine.platformCompletionConfirmed)
-    && (!task || machine.platformCompletionConfirmed || task.platformSeenRunning || task.mode === 'machine')
-  if (confirmedFinished && (deadlineMs !== null || task || machine.platformCompletionConfirmed)) deadlineMs = Math.min(now,valid(observedAt) ? observedAt : now)
+  const taskStart = stamp(task?.startAt ?? task?.createdAt)
+  const completedObservation = stamp(machine.platformCompletionAt ?? observedAt)
+  const completionForTask = machine.platformCompletionConfirmed && (!Number.isFinite(taskStart) || !Number.isFinite(completedObservation) || taskStart < completedObservation)
+  const confirmedFinished = !stale && rawState === 'idle' && !machine.registrationPending && (!reported || completionForTask)
+    && (!task || completionForTask || task.platformSeenRunning || task.mode === 'machine')
+  if (confirmedFinished && (deadlineMs !== null || task || machine.platformCompletionConfirmed)) deadlineMs = Math.min(now,valid(completedObservation) ? completedObservation : now)
   return { deadline: deadlineMs === null ? null : new Date(deadlineMs).toISOString(),
     remainingMinutes: deadlineMs === null || !Number.isFinite(now) ? null : Math.max(0,Math.ceil((deadlineMs-now)/MINUTE)),
     source, stale, confirmedFinished, platformFinishAt:valid(platform) ? new Date(platform).toISOString() : null,

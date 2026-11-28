@@ -49,6 +49,7 @@ test('native time retries refresh their countdown text and stop when the platfor
  const atomicStore={consistency:'linearizable',durable:true,async get(key){return structuredClone(records.get(key)||null)},async compareAndSet(key,version,value){if((records.get(key)?.version??null)!==version)return false;records.set(key,{version:crypto.randomUUID(),value:structuredClone(value)});return true}}
  await store.put('user:owner',{id:'owner',notifyOn:true})
  await store.put('tasks:owner',[{id:'task',machineId:'g1',endAt:iso(AT+10*MINUTE),platformSeenRunning:true}])
+ await store.put('occupancy:b1',{g1:{userId:'owner',taskId:'task'}})
  const board=(finish)=>({updatedAt:iso(at),floors:[{machines:[{id:'g1',name:'桂园机器',state:'occupied',rawState:2,finishAt:iso(finish)}]}]})
  await store.put('machines:b1',{board:board(AT+3*MINUTE)})
  const push=createMobilePush({store,env:{MOBILE_PUSH_ENABLED:'true'},atomicStore,now:()=>at,transports:{fcm:async(_token,data)=>{sent.push(data);return {ok:false}}}})

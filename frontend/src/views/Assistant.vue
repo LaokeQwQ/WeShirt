@@ -1,7 +1,7 @@
 <template>
   <main class="assistant-page page">
     <van-nav-bar title="洗衣助手" />
-    <section class="assistant-top card">
+    <section class="assistant-top card assistant-enter">
       <div><h1>今天怎么安排洗衣？</h1><p class="text-dim">{{ buildingName || '尚未绑定住宿楼' }} · 查询机器、洗护建议、安排时间</p></div>
       <span v-if="status" class="quota">今日剩余 {{ status.usage.dailyRemaining }} / {{ status.usage.dailyLimit }}</span>
     </section>
@@ -35,20 +35,74 @@
       </section>
 
       <section class="conversation card" aria-label="与洗衣助手对话">
-        <div class="section-head"><h2>对话</h2><button type="button" class="text-button" :disabled="sending || clearing || (!messages.length && !partialTurn)" @click="clearHistory">清空对话</button></div>
-        <p class="hint text-dim">回答仅供安排参考；登记、排队与提醒请前往相应页面确认。聊天保留 14 天，最多 256 条；接近128k上下文时自动提取压缩早期对话。</p>
+        <div class="section-head"><h2>对话</h2><button type="button" class="text-button" @click="openHistory">查看历史对话</button></div>
         <p v-if="contextInfo?.compressed" class="hint text-dim" role="status">较早的对话已自动压缩，近期问题保留原文；需要时请补充细节。</p>
         <div ref="messageList" class="messages" aria-live="polite" aria-relevant="additions text" :aria-busy="sending">
-          <div v-if="!messages.length && !draftTurn && !partialTurn && !resources.history.loading" class="empty-state"><span aria-hidden="true">◌</span><p>可以问我「现在有空闲烘干机吗？」</p></div>
+          <div v-if="!messages.length && !draftTurn && !partialTurn" class="empty-state assistant-enter">
+            <p>可以问我现在有哪些空闲机器，或查看你的洗衣记录。</p>
+            <div class="conversation-examples">
+              <button type="button" :disabled="!canChat || voiceBusy" @click="input = '我现在登记了哪些洗衣？预计几点完成？'">当前登记</button>
+              <button type="button" :disabled="!canChat || voiceBusy" @click="input = '帮我查看近期的历史洗衣记录和洗衣时间。'">历史洗衣</button>
+            </div>
+          </div>
           <article v-for="(message, index) in messages" :key="message.at + '-' + index" class="message" :class="message.role"><span class="speaker">{{ message.role === 'user' ? '你' : '洗衣助手' }}</span><p>{{ message.content }}</p><button v-if="message.role === 'assistant'" type="button" class="text-button copy-answer" @click="copy(message.content)">复制回答</button></article>
           <template v-if="draftTurn || partialTurn">
-            <article class="message user"><span class="speaker">你</span><p>{{ (draftTurn || partialTurn).input }}</p></article>
+            <article class="message user">
+              <span class="speaker">你</span>
+              <p v-if="(draftTurn || partialTurn).input">{{ (draftTurn || partialTurn).input }}</p>
+              <p v-if="(draftTurn || partialTurn).hasPhoto" class="hint">已附一张照片</p>
+            </article>
             <article class="message assistant" :class="{ pending: !draftTurn?.text && !partialTurn?.text }"><span class="speaker">洗衣助手<span v-if="partialTurn"> · {{ partialTurn.stopped ? '已停止' : '连接中断' }}，未保存</span><span v-else-if="draftTurn?.text"> · 正在生成</span></span><p>{{ (draftTurn || partialTurn).text || (draftTurn ? '正在查看并整理建议…' : '没有收到完整回答。') }}</p></article>
           </template>
         </div>
-        <form class="composer" @submit.prevent="send"><label class="sr-only" for="assistant-input">向洗衣助手提问</label><textarea id="assistant-input" v-model="input" rows="3" maxlength="1000" :disabled="!canChat || sending" placeholder="输入问题（最多 1000 字）" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send" /><div><span class="text-dim hint">{{ input.length }}/1000 · Ctrl / ⌘ + Enter 发送</span><van-button v-if="sending" native-type="button" size="small" @click="stopAnswer">停止生成</van-button><van-button v-else type="primary" native-type="submit" size="small" :disabled="!canSend">发送</van-button></div></form>
+        <form class="composer" @submit.prevent="send">
+          <label class="sr-only" for="assistant-input">向洗衣助手提问</label>
+          <textarea id="assistant-input" v-model="input" rows="3" maxlength="1000" :disabled="!canChat || sending" placeholder="输入问题（最多 1000 字）" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send" />
+          <input v-if="photoAvailable" ref="cameraInput" class="sr-only" type="file" accept="image/*" capture="environment" aria-label="拍照" tabindex="-1" @change="choosePhoto" />
+          <input v-if="photoAvailable" ref="photoInput" class="sr-only" type="file" accept="image/*" aria-label="选择照片" tabindex="-1" @change="choosePhoto" />
+          <aside v-if="attachment" class="photo-preview">
+            <img :src="attachment" alt="待发送照片预览" />
+            <button type="button" class="text-button" :disabled="sending" @click="removePhoto">移除照片</button>
+            <p class="hint text-dim">发送时，照片会传给当前模型识别。</p>
+          </aside>
+          <p v-if="refusal || suspended" class="safety-notice" role="alert">{{ refusal || '助手暂时停用，恢复时间：' + messageDate(status.blockedUntil) }}</p>
+          <p v-if="photoError" class="hint error" role="alert">{{ photoError }}</p>
+          <p v-else-if="preparingPhoto" class="hint text-dim" role="status">正在处理照片…</p>
+          <div>
+            <div class="composer-tools">
+              <van-button v-if="status?.deepThinkingAvailable" native-type="button" size="small" :type="deepThink ? 'primary' : 'default'" :aria-pressed="deepThink" :disabled="sending" @click="deepThink = !deepThink">深度思考</van-button>
+              <van-button v-if="voiceAvailable" native-type="button" size="small" icon="service-o" :disabled="!canChat || sending || transcribing" :aria-pressed="recording" @click="toggleVoice">{{ recording ? '结束录音' : '语音输入' }}</van-button>
+              <template v-if="photoAvailable">
+                <van-button native-type="button" size="small" icon="photograph" :disabled="!canChat || sending || preparingPhoto" @click="cameraInput?.click()">拍照</van-button>
+                <van-button native-type="button" size="small" icon="photo-o" :disabled="!canChat || sending || preparingPhoto" @click="photoInput?.click()">选图</van-button>
+              </template>
+            </div>
+            <van-button v-if="sending" native-type="button" size="small" @click="stopAnswer">停止生成</van-button>
+            <van-button v-else type="primary" native-type="submit" size="small" :disabled="!canSend">发送</van-button>
+          </div>
+          <p v-if="recording || transcribing" class="hint text-dim" role="status">{{ recording ? '正在听，最多录制 30 秒。' : '正在识别语音…' }}</p>
+          <p v-else-if="voiceError" class="hint error" role="alert">{{ voiceError }}</p>
+          <p v-else-if="voiceAvailable" class="hint text-dim">{{ serverVoice ? '语音由 DeepSeek 转写，识别结果会填入输入框。' : '语音由浏览器的语音服务转写，识别结果会填入输入框。' }}</p>
+        </form>
         <p v-if="status?.ready && !status.usage.dailyRemaining" class="hint text-dim">今日额度已用完，明天再来；看板仍可正常查询。</p>
       </section>
+
+      <van-popup v-model:show="showHistory" position="bottom" round class="history-sheet">
+        <section aria-label="历史对话">
+          <div class="section-head"><h2>历史对话</h2><button type="button" class="text-button" @click="showHistory = false">关闭</button></div>
+          <p class="hint text-dim">保留最近 14 天的聊天，最多 256 条。</p>
+          <p v-if="resources.history.loading" role="status">正在读取历史对话…</p>
+          <p v-else-if="resources.history.error" role="alert">{{ resources.history.error }} <button type="button" class="text-button" @click="loadResource('history', true)">重试</button></p>
+          <p v-else-if="!savedMessages.length" class="hint text-dim">暂无历史对话。</p>
+          <div v-else class="messages">
+            <article v-for="(message, index) in savedMessages" :key="message.at + '-' + index" class="message" :class="message.role">
+              <span class="speaker">{{ message.role === 'user' ? '你' : '洗衣助手' }} · {{ messageDate(message.at) }}</span>
+              <p>{{ message.content }}</p>
+            </article>
+          </div>
+          <button v-if="savedMessages.length" type="button" class="text-button danger" :disabled="sending || clearing" @click="clearHistory">清空历史对话</button>
+        </section>
+      </van-popup>
 
       <section v-if="memory" class="memory card">
         <div class="section-head"><h2>个人记忆</h2><label class="memory-toggle"><span>{{ memory.enabled ? '已开启' : '已关闭' }}</span><input type="checkbox" :checked="memory.enabled" :disabled="memorySaving || sending" @change="toggleMemory($event.target.checked)" /></label></div>
@@ -66,39 +120,126 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showToast, showConfirmDialog } from 'vant'
-import { api, BASE, streamAssistantChat } from '../api'
+import { api, BASE, streamAssistantChat, transcribeAssistantAudio } from '../api'
 import QRCode from '../components/QRCode.vue'
 import { dormBuildingName } from '../../../packages/core/buildings.js'
 import { useUserStore } from '../stores/user'
 import { assistantData } from '../assistantData'
+import { ASSISTANT_WARMUP_RESOURCES } from '../assistantResourceCache'
+import { createAssistantMic, createAssistantSpeech } from '../assistantSpeech'
+import { prepareAssistantPhoto } from '../assistantPhoto'
+import assistantRecordingWorkletUrl from '../assistantRecordingWorklet.js?url&no-inline'
 const route = useRoute(), router = useRouter()
 const userStore = useUserStore(), resources = assistantData.state
-const resourceLabels = [{key:'history',label:'对话记录'},{key:'skills',label:'Skills'},{key:'memory',label:'个人记忆'},{key:'preferences',label:'回答风格'}]
+const resourceLabels = [{key:'skills',label:'Skills'},{key:'memory',label:'个人记忆'},{key:'preferences',label:'回答风格'}]
 const pendingResources = computed(() => resourceLabels.filter(row => resources[row.key].loading && !resources[row.key].data))
 const failedResources = computed(() => resourceLabels.filter(row => resources[row.key].error))
 const status = ref(null), messages = ref([]), skills = ref([]), memory = ref(null), memoryNote = ref(''), input = ref(''), error = ref('')
+const deepThink = ref(false), refusal = ref('')
 const loading = ref(false), sending = ref(false), clearing = ref(false), memorySaving = ref(false), busySkill = ref(false), showSkills = ref(false), importTicket = ref(''), share = ref(null), messageList = ref(null)
 const preferences=ref(null),promptSaving=ref(false),contextInfo=ref(null)
 const draftTurn = ref(null), partialTurn = ref(null)
+const showHistory = ref(false), recording = ref(false), transcribing = ref(false), voiceError = ref('')
+const cameraInput = ref(null), photoInput = ref(null), attachment = ref(''), photoError = ref(''), preparingPhoto = ref(false)
+const savedMessages = computed(() => resources.history.data?.messages || [])
 const activePrompt=computed(()=>preferences.value?.promptProfiles.find(row=>row.id===preferences.value.activePromptId))
 const draft = reactive({ title: '', description: '', prompt: '' })
 let alive = true
 let activeRequest = null
+let voiceRequest = null
+let activeMic = null
+let photoRevision = 0
+let conversationId = crypto.randomUUID()
 const sessionIdentity = {id:userStore.user?.id,token:userStore.token}
 function currentSession(){return alive && userStore.ready && userStore.isLoggedIn && sessionIdentity.id===userStore.user?.id && sessionIdentity.token===userStore.token}
 watch(() => [userStore.ready,userStore.user?.id,userStore.token], () => {
   if (currentSession()) return
   activeRequest?.abort(); activeRequest = null
+  stopVoice()
+  removePhoto()
+  showHistory.value = false
   sending.value = false; draftTurn.value = null; partialTurn.value = null
   status.value=null;messages.value=[];skills.value=[];memory.value=null;memoryNote.value='';preferences.value=null;input.value='';share.value=null;contextInfo.value=null;error.value=''
   Object.assign(draft,{title:'',description:'',prompt:''})
 }, {flush:'sync'})
 const buildingName = computed(() => status.value?.buildingName || dormBuildingName(status.value?.dormBuilding))
-const canChat = computed(() => !!(userStore.ready && userStore.isLoggedIn && status.value?.ready && status.value?.dormBuilding && status.value?.usage.dailyRemaining > 0))
-const canSend = computed(() => canChat.value && !sending.value && !clearing.value && !memorySaving.value && input.value.trim().length > 0 && input.value.length <= 1000)
+const suspended = computed(() => Date.parse(status.value?.blockedUntil || '') > Date.now())
+const canChat = computed(() => !!(userStore.ready && userStore.isLoggedIn && status.value?.ready && status.value?.dormBuilding && status.value?.usage.dailyRemaining > 0 && !suspended.value))
+const voiceBusy = computed(() => recording.value || transcribing.value)
+const photoAvailable = computed(() => status.value?.ready === true && status.value.imageInputReady !== false)
+const canSend = computed(() => canChat.value && !voiceBusy.value && !preparingPhoto.value && !sending.value && !clearing.value && !memorySaving.value && (input.value.trim().length > 0 || Boolean(attachment.value && photoAvailable.value)) && input.value.length <= 1000)
 const habitText = computed(() => memory.value?.habits?.count ? `常用时段（北京时间）：${memory.value.habits.commonHours.map((hour) => String(hour).padStart(2, '0') + ':00').join('、')}，来自你近 14 天的 ${memory.value.habits.count} 次登记。` : '登记记录积累后，会显示你的常用洗衣时段。')
 const mcpUrl = computed(() => new URL((BASE || '') + '/api/mcp', window.location.origin).href)
 function showError(e, fallback) { if (currentSession()) error.value = e?.message || fallback }
+function addVoiceText(text) {
+  if (currentSession()) input.value = [input.value.trim(), text].filter(Boolean).join(' ').slice(0, 1000)
+}
+const browserSpeech = createAssistantSpeech(window, {
+  onActive: value => { recording.value = value },
+  onText: addVoiceText,
+  onError: value => { if (currentSession()) voiceError.value = value },
+})
+const deepSeekMic = createAssistantMic(window, assistantRecordingWorkletUrl, {
+  onActive: value => { recording.value = value },
+  onAudio: recognizeAudio,
+  onError: value => { if (currentSession()) voiceError.value = value },
+})
+const serverVoice = computed(() => status.value?.voiceRecognitionReady === true && deepSeekMic.supported)
+const voiceAvailable = computed(() => serverVoice.value || browserSpeech.supported)
+async function recognizeAudio(audio) {
+  if (!currentSession()) return
+  const controller = new AbortController()
+  voiceRequest = controller
+  transcribing.value = true
+  try {
+    const text = await transcribeAssistantAudio(audio, controller.signal)
+    if (voiceRequest === controller) addVoiceText(text)
+  } catch (problem) {
+    if (voiceRequest === controller && currentSession()) voiceError.value = problem?.message || '语音识别失败，请重试。'
+  } finally {
+    if (voiceRequest === controller) {
+      voiceRequest = null
+      transcribing.value = false
+    }
+  }
+}
+function toggleVoice() {
+  if (!currentSession() || !canChat.value || sending.value || transcribing.value) return
+  if (recording.value) { activeMic?.stop(); return }
+  voiceError.value = ''
+  activeMic = serverVoice.value ? deepSeekMic : browserSpeech
+  void activeMic.start()
+}
+function stopVoice() {
+  activeMic?.abort()
+  activeMic = null
+  voiceRequest?.abort()
+  voiceRequest = null
+  transcribing.value = false
+  voiceError.value = ''
+}
+function removePhoto() {
+  photoRevision++
+  attachment.value = ''
+  photoError.value = ''
+  preparingPhoto.value = false
+}
+async function choosePhoto(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file || !currentSession() || !canChat.value || !photoAvailable.value || sending.value) return
+  const revision = ++photoRevision
+  preparingPhoto.value = true
+  photoError.value = ''
+  try {
+    const data = await prepareAssistantPhoto(file)
+    if (revision === photoRevision && currentSession()) attachment.value = data
+  } catch (problem) {
+    if (revision === photoRevision && currentSession()) photoError.value = problem?.message || '照片无法读取，请重试。'
+  } finally {
+    if (revision === photoRevision) preparingPhoto.value = false
+  }
+}
 async function scrollMessages({ follow = false } = {}) {
   const list = messageList.value
   if (follow && list && list.scrollHeight - list.scrollTop - list.clientHeight > 80) return
@@ -109,12 +250,11 @@ function applyResource(key, value) {
   if(value !== null && !currentSession()) return
   const data = value == null ? null : JSON.parse(JSON.stringify(value))
   if (key === 'status') status.value = data
-  if (key === 'history') { messages.value = data?.messages || []; scrollMessages() }
   if (key === 'skills') skills.value = data?.skills || []
   if (key === 'memory') { memory.value = data; memoryNote.value = data?.note || '' }
   if (key === 'preferences') preferences.value = data
 }
-for (const key of ['status','history','skills','memory','preferences']) {
+for (const key of ASSISTANT_WARMUP_RESOURCES) {
   watch(() => resources[key].data, value => applyResource(key, value), { immediate: true, flush: 'sync' })
 }
 watch(() => resources.status.loading, value => { loading.value = value }, {immediate:true})
@@ -125,8 +265,14 @@ async function loadResource(key, force = false) {
 }
 function load() {
   error.value = ''
-  for (const key of ['status','history','skills','memory','preferences']) loadResource(key, true)
+  for (const key of ASSISTANT_WARMUP_RESOURCES) loadResource(key, true)
 }
+function openHistory() {
+  if (!currentSession()) return
+  showHistory.value = true
+  void loadResource('history', true)
+}
+function messageDate(at) { return new Date(at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) }
 function publish(key, data) { if (currentSession()) assistantData.publish(key, data) }
 async function savePreferences() {
   if(!currentSession())return
@@ -140,15 +286,16 @@ async function resetPreferences(){if(promptSaving.value||sending.value||!await c
 async function send() {
   if (!currentSession() || !canSend.value) return
   const text = input.value.trim()
+  const photoData = photoAvailable.value ? attachment.value : ''
   const controller = new AbortController()
   activeRequest = controller
   const ownsRequest = () => currentSession() && activeRequest === controller
-  sending.value = true; error.value = ''
+  sending.value = true; error.value = ''; refusal.value = ''
   partialTurn.value = null
-  draftTurn.value = { input: text, text: '' }
+  draftTurn.value = { input: text, text: '', hasPhoto: Boolean(photoData) }
   scrollMessages()
   try {
-    const data = await streamAssistantChat({ input: text }, {
+    const data = await streamAssistantChat({ input: text, conversationId, ...(status.value?.deepThinkingAvailable && deepThink.value ? { deepThink: true } : {}), ...(photoData ? { photoData } : {}) }, {
       signal: controller.signal,
       onDelta: delta => {
         if (!ownsRequest()) return
@@ -158,19 +305,23 @@ async function send() {
       onReset: () => { if (ownsRequest()) draftTurn.value.text = '' },
     })
     if (!ownsRequest()) return
-    publish('history', { messages: data.messages })
+    messages.value = data.messages
+    if (showHistory.value) void loadResource('history', true)
     contextInfo.value = data.context
     input.value = ''
+    removePhoto()
     publish('status', { ...status.value, usage: data.usage })
     scrollMessages({ follow: true })
   } catch (problem) {
     if (!ownsRequest()) return
     const stopped = controller.signal.aborted
-    if (draftTurn.value.text || stopped) {
+    const safetyFailure = ['assistant_refusal', 'assistant_suspended'].includes(problem?.code)
+    if (safetyFailure) refusal.value = problem.message
+    else if (draftTurn.value.text || stopped) {
       partialTurn.value = { ...draftTurn.value, stopped }
       scrollMessages({ follow: true })
     }
-    if (!stopped) showError(problem, '提问失败，内容已保留')
+    if (!stopped && !safetyFailure) showError(problem, '提问失败，内容已保留')
     void loadResource('status', true)
   } finally {
     if (ownsRequest()) { activeRequest = null; draftTurn.value = null; sending.value = false }
@@ -182,7 +333,7 @@ async function clearHistory() {
   if(!currentSession())return
   if (sending.value || clearing.value || !await confirm('清空对话？', '会删除当前账号保存的聊天记录，个人记忆单独管理。')) return
   clearing.value = true; error.value = ''
-  try { await api('/api/assistant/history', { method: 'DELETE', retry: false }); if (currentSession()) { partialTurn.value = null; publish('history',{messages:[]}) } }
+  try { await api('/api/assistant/history', { method: 'DELETE', retry: false }); if (currentSession()) { conversationId = crypto.randomUUID(); messages.value = []; partialTurn.value = null; contextInfo.value = null; publish('history',{messages:[]}) } }
   catch (e) { showError(e, '清空失败') }
   finally { if (currentSession()) clearing.value = false }
 }
@@ -247,10 +398,34 @@ async function copy(text) {
   try { await navigator.clipboard.writeText(text); if (currentSession()) showToast('已复制') }
   catch { showError(null, '当前浏览器无法自动复制，请长按文字复制') }
 }
-onMounted(() => { if (typeof route.query.skill === 'string' && route.query.skill.length <= 10000) { importTicket.value = route.query.skill; showSkills.value = true } for(const key of ['status','history','skills','memory','preferences'])loadResource(key) })
-onUnmounted(() => { alive = false; activeRequest?.abort(); activeRequest = null })
+function stopVoiceWhenHidden() { if (document.hidden) stopVoice() }
+onMounted(() => {
+  if (typeof route.query.skill === 'string' && route.query.skill.length <= 10000) { importTicket.value = route.query.skill; showSkills.value = true }
+  for (const key of ASSISTANT_WARMUP_RESOURCES) loadResource(key)
+  document.addEventListener('visibilitychange', stopVoiceWhenHidden)
+})
+onUnmounted(() => {
+  alive = false
+  activeRequest?.abort()
+  activeRequest = null
+  stopVoice()
+  removePhoto()
+  document.removeEventListener('visibilitychange', stopVoiceWhenHidden)
+})
 </script>
 
 <style scoped>
+.safety-notice{margin:10px 0;padding:10px 12px;border:1px solid #dc2626;border-radius:10px;color:var(--danger,#dc2626);background:rgba(220,38,38,.09);overflow-wrap:anywhere}
 .assistant-page{max-width:840px;margin:0 auto;padding-bottom:24px}.assistant-page .card{margin:12px;padding:18px}.assistant-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;background:linear-gradient(130deg,rgba(37,99,235,.13),rgba(14,165,233,.04))}.assistant-top h1{font-size:20px;margin:0 0 8px}.assistant-top p{font-size:12px;margin:0;line-height:1.7}.quota{font-size:11px;border:1px solid var(--border,#334155);border-radius:999px;padding:6px 10px;white-space:nowrap}.notice{font-size:13px;line-height:1.8}.notice p{margin:8px 0}.notice a{color:#7dd3fc}.notice.error{margin:12px;padding:12px;border:1px solid rgba(248,113,113,.25);border-radius:10px;overflow-wrap:anywhere}.error{color:#fca5a5}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.section-head h2{font-size:15px;margin:0}.hint{font-size:11px;line-height:1.8}.text-button{border:0;background:transparent;color:#7dd3fc;cursor:pointer;font:inherit;font-size:12px;padding:6px 2px;min-height:32px}.text-button:disabled{opacity:.4;cursor:default}.text-button.danger{color:#fca5a5}.skill-options{display:flex;gap:8px;flex-wrap:wrap}.skill-options button{border:1px solid var(--border,#334155);background:var(--bg,#0b1526);color:var(--text,#e8f0fb);padding:8px 12px;border-radius:999px;min-height:38px;font-size:12px;cursor:pointer}.skill-options button.active{background:rgba(59,130,246,.18);border-color:#3b82f6;color:#bfdbfe}.skill-management{margin-top:14px;border-top:1px solid var(--border,#334155)}.skill-row{display:flex;justify-content:space-between;gap:12px;align-items:center;border-bottom:1px solid var(--border,#334155);padding:9px 0;flex-wrap:wrap}.skill-row b{font-size:12px;overflow-wrap:anywhere}.skill-row span{font-size:10px;margin-left:8px}.row-actions{display:flex;gap:10px;flex-wrap:wrap}.assistant-page summary{cursor:pointer;font-size:12px;padding:12px 0}.stack{display:grid;gap:12px}.stack label{display:grid;gap:6px;font-size:12px}.stack .van-button{justify-self:end}.resource-notice{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--text-dim);font-size:12px;overflow-wrap:anywhere}.resource-notice span{min-width:0}.resource-notice button{flex:none}.assistant-page input:not([type=checkbox]),.assistant-page textarea,.assistant-page select{box-sizing:border-box;display:block;width:100%;max-width:100%;min-width:0;padding:10px;background:var(--bg,#0b1526);color:var(--text,#e8f0fb);border:1px solid var(--border,#334155);border-radius:9px;font:inherit;font-size:14px;line-height:1.7;resize:vertical}.assistant-page input:focus-visible,.assistant-page select:focus-visible,.assistant-page textarea:focus-visible,.assistant-page button:focus-visible{outline:2px solid #60a5fa;outline-offset:2px}.assistant-page textarea:disabled{opacity:.5}.share-box{display:grid;gap:10px;margin-top:16px;padding:14px;border:1px solid var(--border,#334155);border-radius:10px}.share-box :deep(canvas),.share-box :deep(img){max-width:100%;height:auto;justify-self:center}.share-box .van-button{justify-self:start}.share-box b{font-size:13px}.messages{max-height:min(60vh,620px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;padding:4px 0 12px;display:flex;flex-direction:column;gap:14px}.message{max-width:91%;border-radius:12px;padding:12px 14px;background:rgba(148,163,184,.08);box-sizing:border-box;overflow-wrap:anywhere}.message.user{align-self:flex-end;background:rgba(59,130,246,.15)}.speaker{font-size:10px;color:var(--text-dim,#94a3b8)}.message p{font-size:14px;line-height:1.85;white-space:pre-wrap;margin:5px 0 0}.copy-answer{font-size:10px;margin-top:2px;min-height:28px}.pending p{color:var(--text-dim,#94a3b8);font-size:12px}.empty-state{text-align:center;padding:30px 8px;color:var(--text-dim,#94a3b8);font-size:12px}.empty-state span{font-size:38px;color:#7dd3fc}.composer{border-top:1px solid var(--border,#334155);padding-top:14px}.composer>div{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:10px}.memory-toggle{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text-dim,#94a3b8)}.memory-toggle input{width:20px;height:20px;accent-color:#3b82f6}.habit{font-size:12px;line-height:1.8;color:#bfdbfe}.forget{margin-top:12px}.mcp code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;color:#bfdbfe}.mcp summary{padding:0}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:400px){.assistant-page .card{margin:10px;padding:14px}.assistant-top h1{font-size:18px}.message{max-width:96%}.composer .hint{font-size:10px}.composer>div{gap:8px}.skill-options button{padding:8px 10px}}
+.assistant-enter{animation:assistant-appear .36s cubic-bezier(.2,.75,.2,1) both}
+@keyframes assistant-appear{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){.assistant-enter{animation:none}}
+.conversation-examples{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
+.conversation-examples button{min-height:40px;padding:6px 12px;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--text);font:inherit;cursor:pointer}
+.conversation-examples button:disabled{opacity:.55;cursor:default}
+.history-sheet{max-height:75dvh;padding:18px max(18px,calc((100% - 750px)/2)) calc(18px + env(safe-area-inset-bottom));box-sizing:border-box;overflow:auto}
+.history-sheet .messages{max-height:48dvh}
+.composer-tools{display:flex;gap:6px;flex-wrap:wrap;min-width:0}
+.photo-preview{display:flex;align-items:center;gap:10px;margin-top:10px}
+.photo-preview img{width:76px;height:76px;object-fit:cover;border-radius:10px;border:1px solid var(--border)}
 </style>

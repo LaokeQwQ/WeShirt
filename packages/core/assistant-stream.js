@@ -8,6 +8,12 @@ export const isEventStream = response => /^text\/event-stream(?:\s*;|\s*$)/i.tes
 const invalidStream = () => new AssistantError('upstream_format', 'AI 返回的流式内容格式无效', 502)
 const streamError = () => new AssistantError('upstream_error', 'AI 服务暂时不可用，请稍后重试', 502)
 const tooLarge = () => new AssistantError('upstream_size', 'AI 响应过大，请缩短问题后重试', 502)
+export const assistantRefusal = () => new AssistantError('assistant_refusal', '内容审核未通过，请调整问题后再试', 422)
+export function checkAssistantRefusal(data) {
+  if (data?.stop_reason === 'refusal' || data?.incomplete_details?.reason === 'content_filter' ||
+    data?.choices?.some?.(choice => choice?.finish_reason === 'content_filter' || choice?.message?.refusal) ||
+    data?.output?.some?.(item => item?.content?.some?.(part => part?.type === 'refusal'))) throw assistantRefusal()
+}
 
 async function* eventData(body, { maxBytes, maxEventBytes, signal }) {
   if (!body) throw invalidStream()
@@ -71,7 +77,9 @@ async function responses(events, emit) {
   for await (const value of events) {
     const data = streamObject(value)
     if (data.type === 'response.output_text.delta') await emit(data.delta)
-    else if (data.type === 'response.completed') return data.response
+    else if (data.type === 'response.completed') { checkAssistantRefusal(data.response); return data.response }
+    else if (data.type === 'response.refusal.delta' || data.type === 'response.refusal.done') throw assistantRefusal()
+    else if (data.type === 'response.incomplete') { checkAssistantRefusal(data.response); throw streamError() }
     else if (['error', 'response.failed', 'response.incomplete'].includes(data.type)) throw streamError()
   }
   throw invalidStream()
@@ -92,6 +100,8 @@ async function chatCompletions(events, emit) {
     const choice = Array.isArray(data.choices) && data.choices.find(row => row?.index === 0)
     if (!choice) continue
     const delta = choice.delta || {}
+    if (choice.finish_reason === 'content_filter' || delta.refusal) throw assistantRefusal()
+    if (typeof delta.reasoning_content === 'string') message.reasoning_content = (message.reasoning_content || '') + delta.reasoning_content
     if (typeof delta.content === 'string') {
       await emit(delta.content)
       message.content += delta.content
@@ -118,9 +128,11 @@ async function anthropic(events, emit) {
   for await (const value of events) {
     const data = streamObject(value)
     if (data.type === 'error') throw streamError()
-    if (data.type === 'message_delta') finish = data.delta?.stop_reason ?? finish
+    if (data.type === 'message_delta') {
+      finish = data.delta?.stop_reason ?? finish
+      if (finish === 'refusal') throw assistantRefusal()
+    }
     if (data.type === 'message_stop') {
-      if (finish === 'refusal') throw streamError()
       if (blocks.some(block => !block.closed)) throw invalidStream()
       return { content: blocks.filter(Boolean).map(block => block.content) }
     }

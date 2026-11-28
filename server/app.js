@@ -69,6 +69,7 @@ import { deliverTaskNotificationChannels } from '../packages/core/task-notificat
 import { mobileDigest } from '../packages/core/mobile-auth.js'
 import { resolveMachineKind, normalizeMachineCategory } from '../packages/core/machine-kind.js'
 import { applyRegisteredAvailability } from '../packages/core/availability.js'
+import { observeLaundryCycle, takeMachineCycleEvidence, taskMatchesOccupancy } from '../packages/core/laundry-cycle.js'
 import { processCommunityNotices } from '../packages/core/community-notices.js'
 import { pruneCommunityMedia } from './community-media.js'
 import { createContentModeration } from '../packages/core/content-moderation.js'
@@ -125,6 +126,36 @@ function ownsTaskOccupancy(occupancy, task, userId) {
   if (occupancy.taskId) return occupancy.taskId === task.id
   if (occupancy.startAt && task.startAt) return occupancy.startAt === task.startAt
   return true // 兼容没有关联字段的旧占用记录
+}
+
+async function recordLaundryCycleObservations(store, buildingId, board, previousBoard, cycleEvidence, previousEvidence) {
+  const machines = new Map(board.floors.flatMap(floor => floor.machines).map(machine => [String(machine.id), machine]))
+  const previous = new Map((previousBoard?.floors || []).flatMap(floor => floor.machines || []).map(machine => [String(machine.id), machine]))
+  await withTaskMutation(store, buildingId, async () => {
+    const occupancy = await store.get('occupancy:' + buildingId, {})
+    const owners = new Map()
+    for (const [id, row] of Object.entries(occupancy || {})) {
+      if (!machines.has(id) || !row?.userId || !row.taskId && !row.startAt) continue
+      if (!owners.has(row.userId)) owners.set(row.userId, new Map())
+      owners.get(row.userId).set(id, row)
+    }
+    await Promise.all([...owners].map(async ([owner, registrations]) => {
+      const key = 'tasks:' + owner
+      const tasks = await store.get(key, [])
+      let updated = false
+      const projected = (Array.isArray(tasks) ? tasks : []).map(task => {
+        const id = String(task?.machineId), registration = registrations.get(id)
+        if (!task || task.done || task.takenAt || !taskMatchesOccupancy(task, registration, owner)) return task
+        const machine = { ...machines.get(id), ...cycleEvidence?.[id] }
+        const prior = { ...previous.get(id), ...previousEvidence?.[id] }
+        const observation = observeLaundryCycle(task, machine, prior, board.updatedAt, previousBoard?.updatedAt)
+        if (!observation) return task
+        updated = true
+        return { ...task, ...observation }
+      })
+      if (updated) await store.put(key, projected)
+    }))
+  })
 }
 
 async function readUrgeState(store, buildingId, machineId, occupancy) {
@@ -689,6 +720,7 @@ async function runSyncOnce(env, store, opts = {}) {
     const raws = injected || (await haierMod.createHaierClient(clientEnv).fetchStatus())
     stage = 'normalize'
     const normalized = haierMod.normalizeMachines(raws, haierMod.resolveStateMap(env))
+    const cycleEvidence = Object.fromEntries(await Promise.all(normalized.map(async machine => [String(machine.id), await takeMachineCycleEvidence(machine)])))
     stage = 'mapping'
     const savedMapping = await store.get(`mapping:${buildingId}`, null)
     for (const machine of normalized) machine.kind = machineKind(machine, savedMapping?.mapping || {})
@@ -703,7 +735,14 @@ async function runSyncOnce(env, store, opts = {}) {
     const previousMachines = new Map((previousBoard?.floors || []).flatMap(f=>f.machines).map(machine=>[String(machine.id),machine]))
     for (const machine of board.floors.flatMap(f=>f.machines)) {
       const prior = previousMachines.get(String(machine.id))
-      if (machine.state==='idle' && prior && (prior.platformCompletionConfirmed || ['occupied','abnormal'].includes(prior.upstreamState || prior.state) && prior.availabilitySource!=='user_report')) machine.platformCompletionConfirmed=true
+      if (machine.state !== 'idle' || !prior) continue
+      if (['occupied','abnormal','busy'].includes(prior.upstreamState || prior.state) && prior.availabilitySource !== 'user_report') {
+        machine.platformCompletionConfirmed = true
+        machine.platformCompletionAt = board.updatedAt
+      } else if (prior.platformCompletionConfirmed) {
+        machine.platformCompletionConfirmed = true
+        machine.platformCompletionAt = prior.platformCompletionAt || previousBoard.updatedAt
+      }
     }
     board = await calibrateMachineBoard({store,buildingId,board,previousBoard})
     stage = 'health'
@@ -711,8 +750,9 @@ async function runSyncOnce(env, store, opts = {}) {
     const operations = await runOperations({store,board,env,reviewRequired:true,atomicStore:opts.mobileAtomicStore || createRemoteMobileAtomicStore(env),beforeNotify:async projected=>{
       stage = 'snapshot_write'
       const prev = await store.get(`machines:${buildingId}`, null)
+      await recordLaundryCycleObservations(store, buildingId, projected, prev?.board, cycleEvidence, prev?.cycleEvidence)
       out.events = machinesMod.diffEvents(prev?.board?.floors?.flatMap(f => f.machines) || [], projected.floors.flatMap(f => f.machines)) || []
-      await store.put(`machines:${buildingId}`, { board: projected, rawUpdatedAt: nowISO() })
+      await store.put(`machines:${buildingId}`, { board: projected, rawUpdatedAt: nowISO(), cycleEvidence })
       await store.put('meta:sync', {
         lastFetchAt: projected.updatedAt || nowISO(), lastAttemptAt: Date.now(),
         failCount: 0, lastError: null, lastErrorStage: null, lastErrorEventId: null, cooldownUntil: 0,
@@ -813,6 +853,7 @@ async function runSyncOnce(env, store, opts = {}) {
     for (const { key } of taskEntries) {
       const userId = key.slice('tasks:'.length)
       const value = await pruneUserTasks(store, buildingId, userId)
+      const registration = await store.get('occupancy:' + buildingId, {})
       const user = await store.get(`user:${userId}`, null)
       // 取衣提醒关闭时不推；旧用户没有这个字段，默认开启
       if (user && (user.disabled || user.blocked || user.notifyOn === false)) continue
@@ -821,22 +862,15 @@ async function runSyncOnce(env, store, opts = {}) {
       for (const original of value) {
         const t = { ...original }
         if (taskLifecycle(t).archived || t.done || t.takenAt) continue
+        if (!taskMatchesOccupancy(t, registration?.[t.machineId], userId)) continue
         const latestBoard = (await store.get(`machines:${buildingId}`,null))?.board || board
         const currentMachine = latestBoard.floors.flatMap(f=>f.machines).find((machine) => String(machine.id) === String(t.machineId))
         if (!currentMachine) continue
         const clock = resolveMachineTime(currentMachine,{task:t,now:Date.now(),snapshotAt:latestBoard.updatedAt})
-        const running = ['occupied','abnormal'].includes(currentMachine.upstreamState || currentMachine.state) && currentMachine.availabilitySource !== 'user_report'
-        if (running && !clock.stale && !t.platformSeenRunning) {
-          t.platformSeenRunning = true
-          notificationUpdates.set(t.id,{platformSeenRunning:true})
-        }
-        const confirmed = clock.confirmedFinished && (currentMachine.platformCompletionConfirmed || t.platformSeenRunning || t.mode === 'machine')
-        if (confirmed && !t.platformSeenRunning) {
-          t.platformSeenRunning=true
-          notificationUpdates.set(t.id,{platformSeenRunning:true})
-        }
+        const confirmed = clock.confirmedFinished
+        const running = ['occupied','abnormal','busy'].includes(currentMachine.upstreamState || currentMachine.state) && currentMachine.availabilitySource !== 'user_report'
         const left = confirmed ? 0 : clock.remainingMinutes
-        const phase = confirmed ? 'end' : left > 0 && left <= lead ? 'lead' : null
+        const phase = confirmed ? 'end' : running && left > 0 && left <= lead ? 'lead' : null
         // Preserve old completed receipts, but partial new deliveries remain
         // eligible independently of a different channel's success.
         if (!phase || clock.stale || phase === 'lead' && t.notified && !t.notifyChannels?.lead || t.notifyPhases?.[phase]) continue
@@ -915,7 +949,7 @@ async function runSyncOnce(env, store, opts = {}) {
         } else if (delivery.attempted) {
           t.notifyTries = (Number(t.notifyTries) || 0) + 1
         }
-        notificationUpdates.set(t.id, { platformSeenRunning:t.platformSeenRunning,notifyPhases:t.notifyPhases,notifyChannels:t.notifyChannels,notified: t.notified, notifyAttemptAt: t.notifyAttemptAt, notifyTries: t.notifyTries, notifyFailed:false })
+        notificationUpdates.set(t.id, { notifyPhases:t.notifyPhases,notifyChannels:t.notifyChannels,notified: t.notified, notifyAttemptAt: t.notifyAttemptAt, notifyTries: t.notifyTries, notifyFailed:false })
         // 提醒结果也留痕：用户说「没收到通知」时，第一件事就是查这条
         await audit(store, {
           type: 'notify',
@@ -1719,7 +1753,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       board=applyRegisteredAvailability(board,{occupancy,tasksByUser})
       const tasksByMachine = new Map(Object.entries(occupancy).map(([machineId, entry]) => {
         const tasks=tasksByUser.get(entry.userId)
-        return [machineId, Array.isArray(tasks) ? tasks.find(task => ownsTaskOccupancy(entry, task, entry.userId)) : undefined]
+        return [machineId, Array.isArray(tasks) ? tasks.find(task => !task.platformCompletedAt && !task.done && !task.takenAt && ownsTaskOccupancy(entry, task, entry.userId)) : undefined]
       }))
       board=projectCalibratedBoard(board, calibration, { tasksByMachine })
       board.floors=(board.floors||[]).map(floor=>({...floor,machines:(floor.machines||[]).filter(machine=>!catalog.some(building=>building.enabled===false&&building.code===resolveMachineDorm(machine,slotMap,catalog)))})).filter(floor=>floor.machines.length)
@@ -1748,6 +1782,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       )
     } catch (e) {
       recordRequestFailure(c, e)
+      if (e?.code === 'edge_kv_read_failed') return apiErr('board_storage_busy', '设备状态暂时无法读取，请稍后重试', 503)
       if(e?.code==='machine_store_unavailable')return apiErr(e.code,'机器数据暂不可用，请稍后重试',503)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
@@ -1785,12 +1820,12 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           const currentTask = !t.done && !t.takenAt && ownsTaskOccupancy(holder, t, userId)
           // Old occupancy rows without a cycle ID or start time are tolerated by
           // the server, but can't authorize using a newer public clock on clients.
-          const matchedCycle = currentTask && Boolean(holder.taskId || (holder.startAt && t.startAt))
+          const matchedCycle = currentTask && !t.platformCompletedAt && Boolean(holder.taskId || (holder.startAt && t.startAt))
           const time = resolveMachineTime(currentTask ? machine || {} : {}, { task: t, now: nowMs, snapshotAt: calibratedBoard?.updatedAt })
           const endAt = time.deadline || t.endAt
           const endMs = Date.parse(endAt || '')
-          const confirmed = currentTask && time.confirmedFinished && (t.platformSeenRunning || machine?.platformCompletionConfirmed || t.mode==='machine')
-          const ended = currentTask ? confirmed : Number.isFinite(endMs) && endMs <= nowMs
+          const confirmed = time.confirmedFinished && (Boolean(t.platformCompletedAt) || currentTask && (t.platformSeenRunning || machine?.platformCompletionConfirmed || t.mode==='machine'))
+          const ended = confirmed || !currentTask && Number.isFinite(endMs) && endMs <= nowMs
           return {
             id: t.id,
             ...taskDetailsView(t),
@@ -1877,6 +1912,10 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const body = await c.req.json().catch(() => null)
       if (!body || typeof body !== 'object' || Array.isArray(body)) return apiErr('bad_param', '登记内容须为 JSON 对象')
       const { machineId, minutes, note, mode, useDisinfectant, selfCleaned, program } = body
+      const requestKey = c.req.header('Idempotency-Key')
+      const registrationId = requestKey && /^[A-Za-z0-9_.:-]{8,128}$/.test(requestKey)
+        ? 'tr_' + (await mobileDigest(JSON.stringify([userId, requestKey]))).slice(0, 40) : null
+      const registrationPayload = registrationId ? await mobileDigest(JSON.stringify([machineId, minutes, note, mode, useDisinfectant, selfCleaned, program])) : null
       if(program!==undefined&&program!==null&&program!=='self_clean')return apiErr('bad_param','所选程序无效')
       if (!machineId) return apiErr('bad_param', '缺少 machineId')
       if (Object.hasOwn(body, 'note') && typeof note !== 'string') return apiErr('bad_param', '备注必须是文字')
@@ -1956,8 +1995,14 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         if (current?.userId && current.userId !== userId && Date.parse(current.endAt) >= Date.now() - DAY_MS) return apiErr('machine_occupied', '这台机器已有他人登记，请刷新确认现场状态', 409)
         const startAt = nowISO()
         const taskEndAt = endAt || new Date(Date.now() + mins * 60000).toISOString()
-        const task = {
-          id: 't_' + randomCode(10),
+        const previous = registrationId && Array.isArray(list) ? list.find(item => item.id === registrationId) : null
+        if (previous && previous.registrationPayload !== registrationPayload)
+          return apiErr('idempotency_conflict', '请求标识已用于不同内容，请重新提交', 409)
+        if (previous?.done || previous?.takenAt || previous && current?.taskId && current.taskId !== previous.id)
+          return apiErr('registration_superseded', '请到我的洗衣确认这次登记的最新状态', 409)
+        const task = previous || {
+          id: registrationId || 't_' + randomCode(10),
+          ...(registrationId ? { registrationPayload } : {}),
           machineId,
           machineName,
           kind,
@@ -1978,10 +2023,12 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           done: false,
           notified: false,
         }
-        const tasks = retainedTasks(list)
-        tasks.push(task)
-        registrationStage = 'task_write'
-        await store.put(`tasks:${userId}`, tasks)
+        if (!previous) {
+          const tasks = retainedTasks(list)
+          tasks.push(task)
+          registrationStage = 'task_write'
+          await store.put(`tasks:${userId}`, tasks)
+        }
 
         // 占用登记：记录"谁在这台机器上开洗"（面板展示头像+昵称打码+几分钟前）
         const occMap = occ && typeof occ === 'object' ? { ...occ } : {}
@@ -1991,8 +2038,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           nick: user.nick,
           avatar: normalizeAvatar(user.avatar),
           avatarUrl: normalizeAvatarUrl(user.avatarUrl),
-          startAt,
-          endAt: taskEndAt,
+          startAt: task.startAt,
+          endAt: task.endAt,
           urgeTaskScoped: true,
         }
 
@@ -2071,17 +2118,17 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const list = await store.get(`tasks:${userId}`, [])
       const removed = (Array.isArray(list) ? list : []).find((t) => t.id === id)
       const next = (Array.isArray(list) ? list : []).filter((t) => t.id !== id)
-      await store.put(`tasks:${userId}`, next)
-      // 同步清掉该机的占用登记（如果占用者就是这个人）
-      if (removed?.machineId) {
-        const buildingId = env.BUILDING_ID || 'b1'
-        const occ = await store.get(`occupancy:${buildingId}`, {})
-        const occMap = occ && typeof occ === 'object' ? occ : {}
-        if (ownsTaskOccupancy(occMap[removed.machineId], removed, userId)) {
-          delete occMap[removed.machineId]
-          await store.put(`occupancy:${buildingId}`, occMap)
-        }
+      const occupancyKey = `occupancy:${env.BUILDING_ID || 'b1'}`
+      const occ = { ...await store.get(occupancyKey, {}) }
+      let released = false
+      for (const [machineId, holder] of Object.entries(occ)) {
+        if (holder?.userId !== userId || !(holder.taskId === id || !holder.taskId && removed && String(removed.machineId) === machineId && taskMatchesOccupancy(removed, holder, userId))) continue
+        delete occ[machineId]
+        released = true
       }
+      // This order preserves retry evidence and also repairs old orphaned holders.
+      if (released) await store.put(occupancyKey, occ)
+      if (removed) await store.put(`tasks:${userId}`, next)
       return json({ ok: true })
     } catch (e) {
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
@@ -2237,7 +2284,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         out[machineId] = {
           userId: o.userId,
           suspectedUncollected: Boolean(task && idle && fresh && Date.parse(task.endAt) <= now - 300_000),
-          care: task ? { ...taskDetailsView(task), source: 'user_report' } : null,
+          care: task && !task.platformCompletedAt ? { ...taskDetailsView(task), source: 'user_report' } : null,
           nick: maskNick(o.nick),
           avatar: o.avatar || '',
           avatarUrl: normalizeAvatarUrl(o.avatarUrl),

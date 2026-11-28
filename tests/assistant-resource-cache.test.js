@@ -10,12 +10,12 @@ function fixture(){
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve))
 
-test('preload and page share inflight GETs; fast cards appear before slow history and failures are local',async()=>{
+test('preload and page share inflight GETs; history is excluded and failures are local',async()=>{
   const {cache,calls}=fixture();cache.prefetch();const status=cache.read('status');const memory=cache.read('memory');await tick()
-  assert.equal(calls.length,5)
+  assert.equal(calls.length,4)
   calls.find(r=>r.key==='status').resolve({ready:true});await status
   assert.equal(cache.state.status.data.ready,true)
-  assert.equal(cache.state.history.loading,true)
+  assert.equal(cache.state.history.loading,false)
   calls.find(r=>r.key==='memory').reject(new Error('memory HTTP 503, event fixture'));await memory
   assert.match(cache.state.memory.error,/503/)
   assert.equal(cache.state.status.error,'');assert.equal(cache.state.history.error,'')
