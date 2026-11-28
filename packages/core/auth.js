@@ -117,17 +117,21 @@ export async function verifyToken(token, secret) {
 
 // Native sessions are opaque/revocable and must never be accepted by legacy
 // HMAC validation. Every server module uses this request-aware entry point.
+export function verifyRequestMobileAccess(c, service = c.get?.('mobileAuthService')) {
+  const token = (c.req.header('authorization') || '').match(/^Bearer\s+(ma1\..+)$/i)?.[1]
+  if (!token) return null
+  let verification = c.get?.('mobileAccessVerification')
+  if (!verification) {
+    verification = Promise.resolve(service?.verifyAccessContext(token) || null)
+    c.set?.('mobileAccessVerification', verification)
+  }
+  return verification
+}
+
 export async function verifyRequestUser(c, secret) {
   const match = (c.req.header('authorization') || '').match(/^Bearer\s+(.+)$/i)
   if (!match) return null
-  if (match[1].startsWith('ma1.')) {
-    let verification = c.get?.('mobileAccessVerification')
-    if (!verification) {
-      verification = Promise.resolve(c.get?.('mobileAuthService')?.verifyAccessToken(match[1]) || null)
-      c.set?.('mobileAccessVerification', verification)
-    }
-    return verification
-  }
+  if (match[1].startsWith('ma1.')) return (await verifyRequestMobileAccess(c))?.userId || null
   const key = String(secret || '').trim()
   return key.length >= 16 ? verifyToken(match[1], key) : null
 }

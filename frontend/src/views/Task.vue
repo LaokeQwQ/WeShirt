@@ -52,6 +52,7 @@
     <!-- 任务列表 -->
     <div class="tasks">
       <div class="section-heading"><h2>近期洗衣</h2><span>{{ activeTasks.length }} 条登记</span></div>
+      <div v-if="taskError" class="form-tip">{{ taskError }} <button @click="refresh(true)">重试</button></div>
       <div v-if="loading && !tasks.length" class="empty text-dim">加载中…</div>
       <div v-else-if="!activeTasks.length" class="empty text-dim">暂无近期洗衣登记</div>
       <div v-for="t in activeTasks" :key="t.id" class="task-item card" :class="{ done: t.done }">
@@ -109,6 +110,7 @@ import { useDormStore } from '../stores/dorm'
 import { loadBoard, filterDormFloors } from '../boardQuery'
 import TaskDetailsForm from '../components/TaskDetailsForm.vue'
 import { WASHER_PROGRAMS, machineRemainingMinutes, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } from '../taskRegistration'
+import { newerRunningMachine, taskTimingConflict } from '../taskTiming'
 import '../userActionConfirm.css'
 import { splitTaskHistory } from '../../../packages/core/task-retention.js'
 
@@ -122,6 +124,7 @@ const pickups = ref([])
 const board = ref(null)
 const machines = computed(() => filterDormFloors(board.value, dorm.code, dorm.buildings).flatMap((f) => (f.machines || []).map((m) => ({ ...m, floorCode: m.floorCode || f.code }))))
 const machineError = ref('')
+const taskError = ref('')
 const selected = ref('')
 const minutes = ref(42)
 const program = ref('')
@@ -138,13 +141,27 @@ let timer = null
 let clockTimer = null
 const now = ref(Date.now())
 let clockOffset = 0
+let clockReceivedAt = 0
 const partition = computed(() => splitTaskHistory(tasks.value, now.value))
 const activeTasks = computed(() => partition.value.activeTasks)
 const taskHistory = computed(() => partition.value.history)
 function formatTime(value) { const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN') : '登记时间未知' }
 let tasksPending = null
 let machinesPending = null
+let pickupsPending = null
 let disposed = false
+let lastTimingRecheck = 0
+let lastRecheckedObservation = ''
+const machinesById = computed(() => new Map(machines.value.map(machine => [String(machine.id), machine])))
+
+function syncClock(serverTime, receivedAt = Date.now()) {
+  const server = Date.parse(serverTime || '')
+  if (Number.isFinite(server) && receivedAt >= clockReceivedAt) {
+    clockOffset = server - receivedAt
+    clockReceivedAt = receivedAt
+  }
+  now.value = Date.now() + clockOffset
+}
 
 // 洗衣机时长白名单（与后端一致）
 const DURATIONS = WASHER_PROGRAMS
@@ -195,8 +212,14 @@ function stateText(s) {
 // 旧版只用 leftMin 并把负数夹成 0，所以三天前的任务也显示「即将完成」。
 function stateTextOf(t) {
   if (t.takeState === 'taken' || t.done) return '已取'
-  const end = t.endAt ? new Date(t.endAt).getTime() : NaN
   if (t.completionConfirmed === true) return '平台已确认完成 · 等待取衣'
+  const running = freshRunningMachine(t)
+  if (running) {
+    if (!Number.isFinite(running.end)) return '机器仍在运行 · 结束时间待确认'
+    const left = Math.max(0, Math.ceil((running.end - now.value) / 60000))
+    return left > 0 ? `平台剩余 ${left} 分` : '即将完成 · 等待设备确认'
+  }
+  const end = t.endAt ? new Date(t.endAt).getTime() : NaN
   if (t.takeState === 'pending' || (t.timingSource !== 'upstream' && Number.isFinite(end) && end <= now.value)) {
     const over = Number.isFinite(end) ? Math.max(0, Math.floor((now.value - end) / 60000)) : Number(t.overdueMin) || 0
     return over > 0 ? `登记计时结束${agoText(over)} · 请确认机器和衣物` : '登记计时已到 · 请现场确认'
@@ -208,7 +231,12 @@ function stateTextOf(t) {
 }
 
 function reminderSource(task) {
-  if (task.timingSource === 'upstream') return '按最新平台时间同步' + (task.timeOffsetMinutes ? ` · 校准 ${task.timeOffsetMinutes > 0 ? '+' : ''}${task.timeOffsetMinutes} 分钟` : '')
+  const running = freshRunningMachine(task)
+  if (running && !Number.isFinite(running.end)) return '等待设备更新剩余时间'
+  if (running || task.timingSource === 'upstream') {
+    const offset = running ? running.timeOffsetMinutes : task.timeOffsetMinutes
+    return '按最新平台时间同步' + (offset ? ` · 校准 ${offset > 0 ? '+' : ''}${offset} 分钟` : '')
+  }
   if (task.mode === 'machine') return task.estimated ? '按估算时间提醒；请核对现场状态' : '按机器时间提醒 · 程序未提供'
   if (task.program === 'self_clean') return '自行选择桶自洁 · 6分钟提醒'
   return `自行设置${task.minutes ? ' ' + task.minutes + ' 分钟' : ''}提醒；不代表机器远端状态`
@@ -216,8 +244,13 @@ function reminderSource(task) {
 
 function canTake(t) {
   if (t.archived || t.done || t.takeState === 'taken') return false
+  if (freshRunningMachine(t)) return false
   const end = t.endAt ? new Date(t.endAt).getTime() : NaN
   return t.completionConfirmed === true || t.takeState === 'pending' || (t.timingSource !== 'upstream' && Number.isFinite(end) && end <= now.value)
+}
+
+function freshRunningMachine(task) {
+  return newerRunningMachine(task, machinesById.value.get(String(task.machineId)), board.value, now.value)
 }
 
 function stateClass(t) {
@@ -282,13 +315,19 @@ async function submit() {
 
 // 我已取衣：标记完成（不是删除，留一条记录）
 async function take(t) {
-  if (takingId.value) return
+  if (takingId.value || !canTake(t)) return
   takingId.value = t.id
   try {
     const result = await confirmAction({
-      read: () => ({ id: t.id, name: t.machineName, done: t.done, userId: userStore.user?.id || '', disposed }),
+      read: () => {
+        const current = activeTasks.value.find(item => item.id === t.id)
+        return { id: t.id, name: t.machineName, available: Boolean(current && canTake(current)), userId: userStore.user?.id || '', disposed }
+      },
       describe: (snapshot) => ({ title: '确认已取衣', message: `${snapshot.name || '这台机器'}\n确认已取走自己的衣物后，将结束这条登记并释放登记占用。` }),
-      execute: (snapshot) => api(`/api/tasks/${snapshot.id}/take`, { method: 'POST' }),
+      execute: (snapshot) => {
+        if (!snapshot.available) throw new Error('机器状态已变化，请核对后再确认取衣')
+        return api(`/api/tasks/${snapshot.id}/take`, { method: 'POST' })
+      },
       onChanged: () => showToast('登记状态已变化，请刷新后重新确认'),
     })
     if (result.status !== 'submitted') return
@@ -332,9 +371,7 @@ async function loadMachines(force = false) {
     const data = await loadBoard({ force, dorm: code })
     if (disposed || dorm.code !== code) return
     board.value = data.board
-    const server = Date.parse(data.freshness?.serverNow || '')
-    if (Number.isFinite(server)) clockOffset = server - Date.now()
-    now.value = Date.now() + clockOffset
+    syncClock(data.freshness?.serverNow, data.board.freshness?.receivedAt)
     machineError.value = ''
   } catch (e) {
     machineError.value = e?.message || '请稍后再试'
@@ -345,49 +382,81 @@ async function loadMachines(force = false) {
 }
 
 // 拉取我的任务（契约 GET /api/tasks）
-async function loadTasks() {
+async function loadTasks({ quiet = false } = {}) {
   if (tasksPending) return tasksPending
   tasksPending = (async () => {
   loading.value = true
   try {
     await userStore.ensureAuth()
+    const owner = userStore.user?.id
     const data = await api('/api/tasks')
-    if (disposed) return
-    tasks.value = data.tasks || []
-    const server = Date.parse(data.serverNow || '')
-    if (Number.isFinite(server)) clockOffset = server - Date.now()
-    now.value = Date.now() + clockOffset
+    if (disposed || owner !== userStore.user?.id) return
+    if (!Array.isArray(data.tasks)) throw new Error('洗衣记录格式有误，请重试')
+    tasks.value = data.tasks
+    syncClock(data.serverNow)
+    taskError.value = ''
   } catch (e) {
     if (disposed) return
     if (e?.message === NEED_LOGIN) router.replace({ path: '/login', query: { to: '/task' } })
-    else showToast(e?.message || '加载失败')
+    else {
+      taskError.value = e?.message || '加载失败'
+      if (!quiet) showToast(taskError.value)
+    }
   } finally {
     loading.value = false
   }
   })()
-  try { return await tasksPending } finally { tasksPending = null }
+  try { return await tasksPending } finally {
+    tasksPending = null
+    recheckTaskTiming()
+  }
 }
 
 watch(() => dorm.code, () => { board.value = null; selected.value = ''; machineError.value = ''; loadMachines() })
 
-async function loadPickups() { try { const d = await api('/api/social/pickups'); if (!disposed) pickups.value = (d.received || d.pickups || []).filter((p)=>['pending','accepted'].includes(p.state)) } catch {} }
-function refresh() { return Promise.all([loadMachines(), loadTasks(), loadPickups()]) }
-function startPoll() { stopPoll(); if (document.visibilityState === 'visible') timer = setInterval(refresh, 30000) }
+const conflictingObservation = computed(() => board.value?.updatedAt &&
+  activeTasks.value.some(task => taskTimingConflict(task, freshRunningMachine(task))) ? board.value.updatedAt : '')
+function recheckTaskTiming() {
+  const at = Date.now()
+  const observation = conflictingObservation.value
+  if (disposed || tasksPending || document.visibilityState !== 'visible' ||
+      !observation || observation === lastRecheckedObservation || at - lastTimingRecheck < 15000) return
+  lastRecheckedObservation = observation
+  lastTimingRecheck = at
+  void loadTasks({ quiet: true })
+}
+watch(conflictingObservation, recheckTaskTiming)
+
+async function loadPickups() {
+  if (pickupsPending) return pickupsPending
+  pickupsPending = (async () => {
+    try {
+      const d = await api('/api/social/pickups')
+      if (!disposed) pickups.value = (d.received || d.pickups || []).filter(p => ['pending', 'accepted'].includes(p.state))
+    } catch { /* A delayed pickup request must not block machine or task refresh. */ }
+  })()
+  try { return await pickupsPending } finally { pickupsPending = null }
+}
+function refresh(force = false) { return Promise.all([loadMachines(force), loadTasks({ quiet: !force }), loadPickups()]) }
+function startPoll() { stopPoll(); if (document.visibilityState === 'visible') timer = setInterval(() => refresh(), 30000) }
 function stopPoll() { if (timer) clearInterval(timer); timer = null }
-function onVis() { if (document.visibilityState === 'visible') { now.value = Date.now() + clockOffset; refresh(); startPoll() } else stopPoll() }
+function onVis() { if (document.visibilityState === 'visible') { now.value = Date.now() + clockOffset; refresh(true); startPoll() } else stopPoll() }
 
 onMounted(async () => {
-  await refresh()
-  if (disposed) return
-  if (route.query.machine && machines.value.some((m) => String(m.id) === String(route.query.machine))) {
-    selected.value = String(route.query.machine)
-    syncMode()
-  }
   startPoll()
   document.addEventListener('visibilitychange', onVis)
   window.addEventListener('online', onVis)
   window.addEventListener('pageshow', onVis)
   clockTimer = setInterval(() => { now.value = Date.now() + clockOffset }, 1000)
+  const initialMachines = loadMachines()
+  void loadTasks()
+  void loadPickups()
+  await initialMachines
+  if (disposed) return
+  if (route.query.machine && machines.value.some((m) => String(m.id) === String(route.query.machine))) {
+    selected.value = String(route.query.machine)
+    syncMode()
+  }
 })
 onUnmounted(() => {
   disposed = true

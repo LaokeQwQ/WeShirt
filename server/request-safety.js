@@ -3,6 +3,7 @@ import { logEvent } from '../packages/core/auditlog.js'
 import { getUserIdentity } from '../packages/core/identity.js'
 import { withOperationLock } from '../packages/core/operations.js'
 import { readStreamBytes as limitedBytes } from '../packages/core/stream-bytes.js'
+import { persistAudit } from './audit-middleware.js'
 
 const MAX_BODY = 64 * 1024
 const MAX_REPLY = 32 * 1024
@@ -32,6 +33,7 @@ export function recordRequestFailure(c, error) {
   }
   const types = { TypeError: 'invalid_data_type', SyntaxError: 'invalid_data_format', TimeoutError: 'timeout', AbortError: 'aborted' }
   const category = Object.hasOwn(categories, error?.code) ? categories[error.code] :
+    error?.message === 'mobile_store_unavailable' ? 'mobile_store_unavailable' :
     Object.hasOwn(types, error?.name) ? types[error.name] : 'unclassified'
   c.set('failureCategory', category)
 }
@@ -69,7 +71,7 @@ async function finalize(c, store) {
   c.res = new Response(JSON.stringify(payload), { status: response.status, headers })
   const failureCategory = c.get('failureCategory')
   const authStage = c.get('authStage')
-  await logEvent(store, { type: 'error', level: response.status >= 500 ? 'error' : 'warn', action: '接口请求失败', target: requestRoute(c), detail: { eventId: id, status: response.status, method: c.req.method, code: typeof code === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(code) ? code : typeof code === 'number' ? code : 'http_error', ...(failureCategory ? { failureCategory } : {}), ...(typeof authStage === 'string' && /^(?:challenge|exchange|refresh)_[a-z_]{1,40}$/.test(authStage) ? { authStage } : {}) } }).catch(() => {})
+  await persistAudit(c, logEvent(store, { type: 'error', level: response.status >= 500 ? 'error' : 'warn', action: '接口请求失败', target: requestRoute(c), detail: { eventId: id, status: response.status, method: c.req.method, code: typeof code === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(code) ? code : typeof code === 'number' ? code : 'http_error', ...(failureCategory ? { failureCategory } : {}), ...(typeof authStage === 'string' && /^(?:challenge|exchange|refresh)_[a-z_]{1,40}$/.test(authStage) ? { authStage } : {}) } }).catch(() => {}))
 }
 
 export function registerRequestSafety(app, { store, authenticate, now = () => Date.now() } = {}) {

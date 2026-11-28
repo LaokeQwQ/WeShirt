@@ -4,6 +4,7 @@ import { normalizeDormBuilding, dormBuildingName } from '../packages/core/buildi
 import { ASSISTANT_LIMITS, AssistantError, BUILTIN_SKILLS, MACHINE_TOOL, assistantConfig, publicAssistantConfig, patchAssistantConfig, validateSkill, beijingDay, pruneHistory, memoryHabits, machineStatus, callAssistant, readBoundedJson, plainObject, discoverAssistantModels, normalizePromptProfiles } from '../packages/core/assistant.js'
 import { mobileDigest } from '../packages/core/mobile-auth.js'
 import { logEvent } from '../packages/core/auditlog.js'
+import { recordRequestFailure } from './request-safety.js'
 
 const STREAM_TIMEOUT_MS = 45000
 const STREAM_LEASE_MS = 90000
@@ -174,7 +175,10 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     try { promptProfiles = saved ? normalizePromptProfiles(saved.promptProfiles) : config.promptProfiles } catch { promptProfiles = config.promptProfiles }
     return {promptProfiles,activePromptId:promptProfiles.some(row=>row.id===saved?.activePromptId) ? saved.activePromptId : promptProfiles.some(row=>row.id===config.activePromptId) ? config.activePromptId : promptProfiles[0].id,customized:!!saved}
   }
-  const wrap = (action) => async (c) => { try { return await action(c) } catch (error) { return fail(error) } }
+  const wrap = (action) => async (c) => {
+    try { return await action(c) }
+    catch (error) { if (!(error instanceof AssistantError)) recordRequestFailure(c, error); return fail(error) }
+  }
   const ownSkills = async (id) => {
     const data = await store.get(skillsKey(id), [])
     return (Array.isArray(data) ? data : []).slice(0, 20)
@@ -191,10 +195,9 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     return { ...memory, habits }
   }
   async function readHistory(user) {
-    const source = await store.get(historyKey(user.id), [])
-    const messages = pruneHistory(source)
-    if (JSON.stringify(source) !== JSON.stringify(messages)) await store.put(historyKey(user.id), messages)
-    return messages
+    // Maintenance and a completed chat persist pruning. A history read must
+    // not wait for a write or overwrite chat content appended after its read.
+    return pruneHistory(await store.get(historyKey(user.id), []))
   }
   app.get('/api/admin/assistant', wrap(async (c) => {
     if (!await checkAdmin(c)) throw new AssistantError('forbidden', '请先登录管理后台', 401)

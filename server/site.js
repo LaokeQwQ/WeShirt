@@ -81,8 +81,8 @@ async function siteAccess(c, { store, env, checkSuperAdmin, checkAdmin }) {
   return { allowed: Boolean(await checkAdmin?.(c)), superAdmin: false, role: 'admin', userId: null }
 }
 
-export async function loadSiteRuntime(store, env = {}) {
-  const [site, saved] = await Promise.all([getSiteConfig(store), store.get('meta:dingtalk', {})])
+export async function loadSiteRuntime(store, env = {}, siteConfig = getSiteConfig(store)) {
+  const [site, saved] = await Promise.all([siteConfig, store.get('meta:dingtalk', {})])
   const runtime = { ...env }
   for (const [field, key] of Object.entries(CREDENTIALS)) {
     // 同时读取早期管理配置保存的环境变量名，兼容已有部署。
