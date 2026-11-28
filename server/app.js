@@ -1136,9 +1136,9 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     }
   }
 
-  async function refreshIfStale(c, entry) {
+  async function refreshIfStale(c, entry, meta = null) {
     const hasBoard = Boolean(entry && entry.board)
-    const meta = (await store.get('meta:sync', null).catch(() => null)) || {}
+    meta = (meta ?? await store.get('meta:sync', null).catch(() => null)) || {}
     const now = Date.now()
     // 失败冷却中：谁都别再打上游（CloudBase 的定时器除外，它直接调 runSync）
     const cool = Number(meta.cooldownUntil) || 0
@@ -1172,11 +1172,12 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     // 第一次没有任何数据，必须等；已有旧数据就先返回，让同步在后台跑
     if (!hasBoard) {
       await withTimeout(task, FIRST_WAIT_MS)
+      // The board may already have been committed while notification delivery continues.
       return true
     }
     // 没有 waitUntil：短暂等一下，尽量让同步至少把提醒这一段跑完
-    if (!registered) await withTimeout(task, 2500)
-    return true
+    if (!registered) return withTimeout(task, 2500)
+    return false
   }
 
   // 只要用户打开任意需要看板的页面，就顺带把同步推一下。
@@ -1672,30 +1673,35 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
   app.get('/api/machines', async (c) => {
     try {
       const dorm = c.req.query('dorm') || ''
-      if (dorm && !normalizeDormBuilding(dorm,env.SITE_BUILDINGS)) return apiErr('bad_param', '住宿楼无效')
+      const catalog = env.SITE_BUILDINGS
+      if (dorm && !normalizeDormBuilding(dorm, catalog)) return apiErr('bad_param', '住宿楼无效')
       const buildingId = c.req.query('building') || env.BUILDING_ID || 'b1'
-      let entry = await store.get(`machines:${buildingId}`, null)
+      let [entry, sync] = await Promise.all([
+        store.get(`machines:${buildingId}`, null),
+        store.get('meta:sync', {}),
+      ])
       // 数据超过 STALE_MS（默认 30s）就顺带刷新，前端轮询即可拿到接近实时的状态
-      if (await refreshIfStale(c, entry)) {
-        entry = await store.get(`machines:${buildingId}`, null)
+      if (await refreshIfStale(c, entry, sync)) {
+        [entry, sync] = await Promise.all([store.get(`machines:${buildingId}`, null), store.get('meta:sync', {})])
       }
       if (!entry || !entry.board) {
         return apiErr('board_unavailable', '看板正在同步，稍后再试', 503)
       }
       // 二次确认「已恢复」的机器：海乐仍报故障时，看板改成可再上报，不继续当故障机
-      const [overrides, savedMapping, health] = await Promise.all([
+      const [overrides, savedMapping, health, calibration, savedOccupancy] = await Promise.all([
         store.get(`faults:${buildingId}`, {}),
         store.get(`mapping:${buildingId}`, null),
         store.get(`operations:health:${buildingId}`, {}),
+        readCalibrationSettings(store,buildingId),
+        store.get(`occupancy:${buildingId}`,{}),
       ])
       const slotMap = savedMapping?.mapping || {}
       const map = overrides && typeof overrides === 'object' ? overrides : {}
-      const calibration=await readCalibrationSettings(store,buildingId)
       let board = applyMachineHealth(projectCalibratedBoard(entry.board, calibration, { mapping: slotMap }), health)
       for (const floor of board.floors || []) {
         for (const m of floor.machines || []) {
           m.kind = machineKind(m, slotMap)
-          m.dormBuilding = resolveMachineDorm(m, slotMap,env.SITE_BUILDINGS)
+          m.dormBuilding = resolveMachineDorm(m, slotMap, catalog)
           Object.assign(m, machineLabels(m, slotMap))
           const ov = map[m.id]
           if (ov && ov.state === 'recovered' && Date.now()-Date.parse(ov.recoveredAt)<3600000 && (m.state === 'faulty' || m.health?.suspectedFault)) {
@@ -1706,8 +1712,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           }
         }
       }
-      const savedOccupancy=await store.get(`occupancy:${buildingId}`,{})
-      const occupancy=Object.fromEntries(Object.entries(savedOccupancy||{}).filter(([,entry])=>typeof entry?.userId==='string'&&entry.userId))
+      const inDorm = dorm ? new Set(filterDormFloors(board, dorm, catalog).flatMap(floor => floor.machines.map(machine => String(machine.id)))) : null
+      const occupancy=Object.fromEntries(Object.entries(savedOccupancy||{}).filter(([id,entry])=>(!inDorm || inDorm.has(id))&&typeof entry?.userId==='string'&&entry.userId))
       const ownerIds=[...new Set(Object.values(occupancy).map(entry=>entry.userId))]
       const tasksByUser=new Map(await Promise.all(ownerIds.map(async id=>[id,await store.get('tasks:'+id,[])])))
       board=applyRegisteredAvailability(board,{occupancy,tasksByUser})
@@ -1716,11 +1722,11 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         return [machineId, Array.isArray(tasks) ? tasks.find(task => ownsTaskOccupancy(entry, task, entry.userId)) : undefined]
       }))
       board=projectCalibratedBoard(board, calibration, { tasksByMachine })
-      board.floors=(board.floors||[]).map(floor=>({...floor,machines:(floor.machines||[]).filter(machine=>!env.SITE_BUILDINGS.some(building=>building.enabled===false&&building.code===resolveMachineDorm(machine,slotMap,env.SITE_BUILDINGS)))})).filter(floor=>floor.machines.length)
+      board.floors=(board.floors||[]).map(floor=>({...floor,machines:(floor.machines||[]).filter(machine=>!catalog.some(building=>building.enabled===false&&building.code===resolveMachineDorm(machine,slotMap,catalog)))})).filter(floor=>floor.machines.length)
       if (dorm) {
-        board.floors = filterDormFloors({ ...board, slotMapping: slotMap }, dorm,env.SITE_BUILDINGS)
+        board.floors = filterDormFloors({ ...board, slotMapping: slotMap }, dorm, catalog)
         board.dormBuilding = dorm
-        board.buildingName = dormBuildingName(dorm,env.SITE_BUILDINGS)
+        board.buildingName = dormBuildingName(dorm, catalog)
       }
       const visible = board.floors.flatMap((floor) => floor.machines || [])
       board.total = visible.length
@@ -1728,7 +1734,6 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       board.occupied = visible.filter((m) => ['occupied', 'abnormal'].includes(m.state)).length
       board.faulty = visible.filter((m) => m.state === 'faulty').length
       board.unknown = visible.filter((m) => m.state === 'unknown').length
-      const sync = await store.get('meta:sync', {})
       const serverNow = nowISO()
       const ageMs = Math.max(0, Date.parse(serverNow) - Date.parse(board.updatedAt || ''))
       // Device state must not pass through a second browser/CDN stale cache.
