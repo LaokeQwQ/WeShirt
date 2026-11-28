@@ -173,19 +173,87 @@ test('reading history filters expired data without depending on a storage write'
   assert.deepEqual(await store.get('assistant:history:u_a'), [recent])
 })
 
-test('MCP initializes and advertises a single readonly tool independent of LLM configuration', async () => {
+test('new visits isolate old chat from both model and stream reply while the saved archive stays available', async () => {
+  const sent = []
+  const { req, store } = await fixture({ fetchImpl: async (_, options) => { sent.push(JSON.parse(options.body)); return result() } })
+  const a = crypto.randomUUID(), b = crypto.randomUUID()
+  const at = new Date().toISOString()
+  await store.put('assistant:history:u_a', [{ role: 'user', content: 'old context', at }])
+  await store.put('assistant:history:u_b', [{ role: 'user', content: 'another account', at, conversationId: a }])
+  const ask = async (input, conversationId) => {
+    const response = await req('/api/assistant/chat', { input, conversationId })
+    assert.equal(response.status, 200)
+    assert.ok(response.data.messages.every(message => !message.conversationId))
+    return response.data.messages
+  }
+  assert.equal((await ask('visit one', a)).length, 2)
+  assert.equal((await ask('visit two', b)).length, 2)
+  assert.equal((await ask('follow-up one', a)).length, 4)
+  assert.doesNotMatch(JSON.stringify(sent[0]), /old context|another account/)
+  assert.doesNotMatch(JSON.stringify(sent[1]), /visit one|old context|another account/)
+  assert.match(JSON.stringify(sent[2]), /visit one/)
+  assert.doesNotMatch(JSON.stringify(sent[2]), /visit two|old context|another account/)
+  assert.equal((await req('/api/assistant/chat', { input: 'bad', conversationId: 'wrong' })).status, 400)
+  const archive = (await req('/api/assistant/history')).data.messages
+  assert.equal(archive.length, 7)
+  assert.ok(archive.every(message => !message.conversationId))
+  assert.equal((await pruneAssistantStorage(store)).pruned, 0)
+})
+
+test('MCP initializes and advertises readonly tools independent of LLM configuration', async () => {
   const { req } = await fixture({ env: {} })
   const initialized = await req('/api/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } } })
   assert.equal(initialized.data.result.protocolVersion, '2025-06-18')
   assert.ok(initialized.data.result.capabilities.tools)
   assert.equal((await req('/api/mcp', { jsonrpc: '2.0', method: 'notifications/initialized' })).status, 204)
   const tools = await req('/api/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' })
-  assert.equal(tools.data.result.tools.length, 1)
-  assert.equal(tools.data.result.tools[0].annotations.readOnlyHint, true)
+  assert.deepEqual(tools.data.result.tools.map(tool => tool.name), ['get_machine_status', 'get_my_laundry'])
+  assert.ok(tools.data.result.tools.every(tool => tool.annotations.readOnlyHint === true))
   const called = await req('/api/mcp', { jsonrpc: '2.0', id: 'call', method: 'tools/call', params: { name: 'get_machine_status', arguments: { kind: 'all' } } })
   const status = JSON.parse(called.data.result.content[0].text)
   assert.equal(status.dormBuilding, 'guiyuan')
   assert.equal(status.machines.length, 1)
+})
+
+test('MCP own laundry separates current and retained history, honoring scope and device time', async () => {
+  const now = Date.now(), iso = minutes => new Date(now + minutes * 60000).toISOString()
+  const first = { id: 'current-own', machineId: '1F-01', machineName: '本人的机器', note: '不要传给助手的备注', startAt: iso(-31), endAt: iso(-1) }
+  const archived = { id: 'archived-own', machineId: '1F-01', machineName: '归档洗衣', startAt: iso(-4*1440), endAt: iso(-4*1440+35), takenAt: iso(-4*1440+40), done: true }
+  const { req, store } = await fixture({ getBoard: async () => ({
+    updatedAt: iso(0), floors: [{ machines: [
+      { id: '1F-01', name: '本楼机器', kind: 'washer', state: 'occupied', platformFinishAt: iso(26), finishAt: iso(28), timeOffsetMinutes: 2 },
+      { id: 'outside', name: '另一栋机器', dormBuilding: 'liuyuan', kind: 'dryer', state: 'idle' },
+    ] }],
+  }) })
+  await store.put('tasks:u_a', [
+    first, archived,
+    { ...archived, id: 'other-dorm', machineId: 'outside', machineName: '超出楼栋权限' },
+    { ...archived, id: 'expired', startAt: iso(-15*1440), endAt: iso(-15*1440+30), machineName: '超过保留期' },
+    { ...first, id: 'cancelled', cancelled: true, machineName: '已取消' },
+    { ...first, id: 'foreign', userId: 'u_b', machineName: '其他人的私有记录' },
+  ])
+  await store.put('tasks:u_b', [{ ...first, machineName: '他人存储分区' }])
+  await store.put('occupancy:b1', { '1F-01': { userId: 'u_a', taskId: first.id } })
+  await store.put('access:user:u_a', { permissions: { tasks: { viewBuildings: ['guiyuan'], operateBuildings: ['guiyuan'] } } })
+  const query = scope => req('/api/mcp', { jsonrpc: '2.0', id: scope, method: 'tools/call', params: { name: 'get_my_laundry', arguments: { scope } } })
+  const currentResponse = await query('current')
+  const current = JSON.parse(currentResponse.data.result.content[0].text)
+  assert.equal(current.records.length, 1)
+  assert.equal(current.records[0].remainingMinutes, 28)
+  assert.equal(current.records[0].finishAt, iso(28))
+  assert.equal(current.records[0].timingSource, 'upstream')
+  const history = JSON.parse((await query('history')).data.result.content[0].text)
+  assert.deepEqual(history.records.map(row => [row.machineName, row.takenAt, row.state]), [['归档洗衣', archived.takenAt, 'taken']])
+  const full = (await query('all')).data.result.content[0].text
+  for (const hidden of ['备注', '超出楼栋权限', '超过保留期', '已取消', '其他人的私有记录', '他人存储分区', 'current-own', 'u_a', 'u_b']) assert.equal(full.includes(hidden), false)
+  await store.put('occupancy:b1', { '1F-01': { userId: 'u_b', taskId: 'replacement' } })
+  const unmatched = JSON.parse((await query('current')).data.result.content[0].text).records[0]
+  assert.equal(unmatched.finishAt, first.endAt)
+  assert.equal(unmatched.remainingMinutes, null)
+  await store.put('access:user:u_a', { permissions: { tasks: { view: false, operate: false } } })
+  assert.equal((await query('all')).data.result.isError, true)
+  const attacked = await req('/api/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_my_laundry', arguments: { scope: 'all', userId: 'u_b' } } })
+  assert.equal(attacked.data.error.code, -32602)
 })
 
 test('MCP uses JSONRPC error codes, rejects unknown/writing tools and auth failures, and rate limits', async () => {

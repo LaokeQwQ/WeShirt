@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 
 export const ASSISTANT_RESOURCES = ['status', 'history', 'skills', 'memory', 'preferences']
+export const ASSISTANT_WARMUP_RESOURCES = ASSISTANT_RESOURCES.filter(key => key !== 'history')
 const TTL = { status: 15000, history: 15000, skills: 300000, memory: 60000, preferences: 60000 }
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value))
 
@@ -39,5 +40,5 @@ export function createAssistantResourceCache({ request, now = Date.now }) {
     pending.set(key, job)
     return job
   }
-  return { state, setSession, read, publish, prefetch: () => ASSISTANT_RESOURCES.forEach(key => { read(key) }) }
+  return { state, setSession, read, publish, prefetch: () => ASSISTANT_WARMUP_RESOURCES.forEach(key => { read(key) }) }
 }

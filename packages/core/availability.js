@@ -25,7 +25,7 @@ function activeRegistration(machine, occupancy, tasksByUser, now) {
   const task = list.find((item) => item && String(item.machineId) === String(machine.id)
     && (entry.taskId ? String(item.id) === String(entry.taskId)
       : Boolean(entry.startAt && item.startAt && entry.startAt === item.startAt)))
-  if (!task || task.done || task.takenAt) return null
+  if (!task || task.done || task.takenAt || task.platformCompletedAt) return null
   // tasksByUser 的键来自占用 owner，旧任务若额外存 owner 字段也必须一致。
   if ((task.userId != null && task.userId !== entry.userId) || (task.ownerId != null && task.ownerId !== entry.userId)) return null
   const end = Date.parse(task.endAt || '')
@@ -45,8 +45,11 @@ export function applyRegisteredAvailability(board, { occupancy = {}, tasksByUser
       if (!active) return machine
       // Registration is only a short startup bridge. Once the platform has
       // actually run this cycle, its return to idle outranks a later local timer.
-      if (active.task.platformSeenRunning || active.task.mode === 'machine' || machine.platformCompletionConfirmed) return {...machine,platformCompletionConfirmed:true}
-      if (Number.isFinite(active.startedAt) && now - active.startedAt > 2 * 60000) return machine
+      const observedAt = Date.parse(machine.platformCompletionAt || board.updatedAt || machine.timeObservedAt || '')
+      const completionForTask = machine.platformCompletionConfirmed && (!Number.isFinite(active.startedAt) ||
+        !Number.isFinite(observedAt) || active.startedAt < observedAt)
+      if (active.task.platformSeenRunning || active.task.mode === 'machine' || completionForTask) return {...machine,platformCompletionConfirmed:true}
+      if (active.task.program !== 'self_clean' && Number.isFinite(active.startedAt) && now - active.startedAt > 2 * 60000) return machine
       return { ...machine, state: 'occupied', upstreamState: 'idle', finishAt: active.endAt,
         leftMin: Math.max(1, Math.ceil((active.end - now) / 60000)), estimated: true,
         availabilitySource: 'user_report', registrationPending: true,

@@ -11,6 +11,18 @@ const json=value=>new Response(JSON.stringify(value))
 const final={responses:()=>json({output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'本楼有空闲机器'}]}]}),'chat-completions':()=>json({choices:[{message:{role:'assistant',content:'本楼有空闲机器'}}]}),anthropic:()=>json({content:[{type:'text',text:'本楼有空闲机器'}]})}
 const tool={responses:()=>json({output:[{type:'reasoning',id:'r1',summary:[]},{type:'function_call',name:'get_machine_status',call_id:'c1',arguments:'{"kind":"washer"}'}]}),'chat-completions':()=>json({choices:[{message:{role:'assistant',content:null,tool_calls:[{type:'function',id:'c1',function:{name:'get_machine_status',arguments:'{"kind":"washer"}'}}]}}]}),anthropic:()=>json({content:[{type:'thinking',thinking:'private-reasoning',signature:'signed-block'},{type:'tool_use',name:'get_machine_status',id:'c1',input:{kind:'washer'}}]})}
 
+test('DeepSeek sends low or max reasoning with high content safety in every protocol', async () => {
+  for (const protocol of Object.keys(final)) for (const deepThink of [false, true]) {
+    const config = assistantConfig({ ...base, protocol, model: 'deepseek-flash' })
+    await callAssistant({ config, input: '洗衣时间', deepThink, getStatus: async () => ({}), fetchImpl: async (_, { body }) => {
+      const request = JSON.parse(body)
+      assert.deepEqual(request.safety_check, { level: 'high' })
+      assert.equal(request.reasoning?.effort ?? request.output_config?.effort ?? request.reasoning_effort, deepThink ? 'max' : 'low')
+      return final[protocol]()
+    } })
+  }
+})
+
 for(const protocol of Object.keys(final))test(`${protocol} preserves its tool-chain format and counts every outbound request`,async()=>{
   const requests=[];let count=0,queries=0
   const config=assistantConfig({...base,protocol})
@@ -46,6 +58,22 @@ test('all protocol adapters reject unknown writes and cross-building tool argume
       assert.equal(queries,0)
     }
   }
+})
+
+for (const protocol of Object.keys(final)) test(protocol + ' advertises and dispatches own-laundry queries', async () => {
+  const initial = await tool[protocol]().json(), requests = []
+  const item = protocol === 'responses' ? initial.output.at(-1) : protocol === 'anthropic' ? initial.content.at(-1) : initial.choices[0].message.tool_calls[0].function
+  item.name = 'get_my_laundry'
+  if (protocol === 'anthropic') item.input = { scope: 'history' }
+  else item.arguments = '{"scope":"history"}'
+  const getOwnLaundry = async scope => { assert.equal(scope, 'history'); return { records: [{ startedAt: '2026-01-01T08:00:00.000Z' }] } }
+  await callAssistant({
+    config: assistantConfig({ ...base, protocol }), input: '查询我的洗衣记录', getOwnLaundry,
+    getStatus: async () => { throw new Error('wrong tool') },
+    fetchImpl: async (_, options) => { requests.push(JSON.parse(options.body)); return requests.length === 1 ? json(initial) : final[protocol]() },
+  })
+  assert.ok(requests[0].tools.some(tool => (tool.name || tool.function?.name) === 'get_my_laundry'))
+  assert.match(JSON.stringify(requests[1]), /2026-01-01T08:00:00\.000Z/)
 })
 
 test('reasoning follows capability metadata and unknown models omit unsupported parameters',async()=>{

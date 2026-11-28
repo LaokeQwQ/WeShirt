@@ -84,6 +84,8 @@ export function normalizeMachines(raws, stateMap = DEFAULT_STATE_MAP) {
     // 真实 API 数据是原始形态（带 finishTime 字符串），走北京时间解析。
     const finishAt =
       raw.finishAt !== undefined ? raw.finishAt : parseBeijing(raw.finishTime)
+    const cycleOrder = raw.cycleOrder ?? raw.cycleId ?? raw.orderId
+    const platformStartedAt = parseBeijing(raw.platformStartedAt ?? raw.startTime ?? raw.orderStartTime)
     const queryFailure = upstreamQueryFailure(raw)
     return {
       id,
@@ -96,6 +98,8 @@ export function normalizeMachines(raws, stateMap = DEFAULT_STATE_MAP) {
       state: queryFailure === null ? state : 'unknown',
       ...(queryFailure === null ? {} : { queryFailed: true, queryStatus: queryFailure }),
       finishAt,
+      ...(typeof cycleOrder === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(cycleOrder) || Number.isSafeInteger(cycleOrder) && cycleOrder >= 0 ? { cycleOrder: String(cycleOrder) } : {}),
+      ...(platformStartedAt ? { platformStartedAt } : {}),
       // 上游原始状态码，原样带出来：面板上直接显示，
       // 免得「为什么是故障」只能靠猜（4号机 state=3 那次就是靠它定位的）
       rawState: raw.rawState !== undefined ? raw.rawState : raw.state,
@@ -632,6 +636,8 @@ export function createHaierClient(env = {}, { fetch: fetchImpl = globalThis.fetc
                 state: it.state,
                 ...(upstreamQueryFailure(it) === null ? {} : {queryFailed:true,queryStatus:upstreamQueryFailure(it)}),
                 finishTime: it.finishTime ?? null,
+                cycleId: it.cycleId ?? it.orderId,
+                startTime: it.startTime ?? it.orderStartTime,
               })
             }
             got += items.length

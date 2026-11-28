@@ -6,6 +6,7 @@ import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
 import * as policy from '../frontend/src/taskRegistration.js'
 import { newerRunningMachine, taskTimingConflict } from '../frontend/src/taskTiming.js'
 import { splitTaskHistory } from '../packages/core/task-retention.js'
+import { rememberRemovedTask, removeDeletedTasks } from '../frontend/src/removedTasks.js'
 
 const { WASHER_PROGRAMS, machineRemainingMinutes, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } = policy
 const after = (min) => new Date(Date.now() + min * 60000).toISOString()
@@ -115,7 +116,7 @@ test('登记、3D、巡检与机器卡片修改后Vue脚本和模板均可编译
 
 function taskPanel({ confirm, api } = {}) {
   const user = reactive({ user: { id: 'u' }, ensureAuth: async () => {} })
-  return evaluate(sources.Task, { ...policy, newerRunningMachine, taskTimingConflict, splitTaskHistory, ref, computed, watch, document: { visibilityState: 'visible' }, onMounted() {}, onUnmounted() {}, useRoute: () => ({ query: {} }), useRouter: () => ({ push() {}, replace() {} }), useUserStore: () => user, useDormStore: () => ({ code: 'example', buildings: [] }), filterDormFloors: board => board?.floors || [], showToast() {}, showConfirmDialog: confirm || (async () => {}), api: api || (async () => ({ tasks: [] })), NEED_LOGIN: 'login', loadBoard: async () => ({ board: { floors: [] } }) }, '({ board, selected, mode, minutes, note, selfCleaned, selectProgram, submit, submitting, stateTextOf, canTake, reminderSource, take, tasks, now })')
+  return evaluate(sources.Task, { ...policy, newerRunningMachine, taskTimingConflict, splitTaskHistory, rememberRemovedTask, removeDeletedTasks, ref, computed, watch, document: { visibilityState: 'visible' }, onMounted() {}, onUnmounted() {}, useRoute: () => ({ query: {} }), useRouter: () => ({ push() {}, replace() {} }), useUserStore: () => user, useDormStore: () => ({ code: 'example', buildings: [] }), filterDormFloors: board => board?.floors || [], showToast() {}, showConfirmDialog: confirm || (async () => {}), api: api || (async () => ({ tasks: [] })), NEED_LOGIN: 'login', loadBoard: async () => ({ board: { floors: [] } }) }, '({ board, selected, mode, minutes, note, selfCleaned, selectProgram, submit, submitting, stateTextOf, canTake, reminderSource, take, remove, loadTasks, tasks, now })')
 }
 
 test('真实Task提交先确认：取消保留备注/标记且不调用API；明确桶自洁只写一次6分钟', async () => {
@@ -166,9 +167,10 @@ test('Task到期仅声称登记计时到点；公共卡片优先展示登记来�
 })
 
 test('热水洗平台延长余时后任务面板立即采用同一截止时间并去掉过早的取衣操作', async () => {
+  const observedAt = Date.now()
   const newer = {
-    updatedAt: after(0),
-    floors: [{ machines: [washer({ finishAt: after(26), timeSource: 'upstream' })] }],
+    updatedAt: new Date(observedAt).toISOString(),
+    floors: [{ machines: [washer({ finishAt: new Date(observedAt + 26 * 60_000).toISOString(), timeSource: 'upstream' })] }],
   }
   const task = {
     id: 'active', machineId: 'washer', currentTask: true, mode: 'duration',
@@ -222,6 +224,31 @@ test('公共看板不能为旧任务、已取任务或已确认结束的任务�
   const runningWithoutDeadline = newerRunningMachine(task, { ...machine, finishAt: null }, board, now)
   assert.equal(Number.isFinite(runningWithoutDeadline.end), false)
   assert.equal(taskTimingConflict({ ...task, takeState: 'pending' }, runningWithoutDeadline), true)
+})
+
+test('并发轮询和重新进入页面时，已删除登记不会被旧任务读取恢复', async () => {
+  const old = { id: 'deleted', machineId: 'washer', startAt: after(-20) }
+  const next = { id: 'new-cycle', machineId: 'washer', startAt: after(0) }
+  const delayed = deferred()
+  let reads = 0
+  const api = async (_, options) => {
+    if (options?.method === 'DELETE') return { ok: true }
+    if (++reads === 1) return delayed.promise
+    return { tasks: [old, next] }
+  }
+  const panel = taskPanel({ api })
+  panel.tasks.value = [old]
+  const read = panel.loadTasks()
+  const deletion = panel.remove(old)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(panel.tasks.value, [])
+  delayed.resolve({ tasks: [old, next] })
+  await Promise.all([read, deletion])
+  assert.deepEqual(panel.tasks.value.map(row => row.id), [next.id])
+  const reopened = taskPanel({ api })
+  await reopened.loadTasks()
+  assert.deepEqual(reopened.tasks.value.map(row => row.id), [next.id])
+  assert.deepEqual(removeDeletedTasks('another-user', [old]), [old])
 })
 
 test('公共机器卡片在账号恢复期间不登记或收藏，验证就绪后恢复操作', async () => {

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {createMemoryStore} from '../packages/core/store.js'
-import {createApp} from '../server/app.js'
+import {createApp,runSync} from '../server/app.js'
 import {issueToken} from '../packages/core/auth.js'
 import {updateCalibrationSettings} from '../packages/core/machine-time-calibration.js'
 
@@ -99,4 +99,75 @@ test('a new registration on an idle platform remains pending while a confirmed r
  task=(await get('/api/tasks')).tasks[0]
  assert.equal(task.completionConfirmed,true);assert.equal(task.takeState,'pending');assert.equal(task.leftMin,0)
  assert.equal((await get('/api/machines?dorm=guiyuan')).board.floors[0].machines[0].state,'idle')
+})
+
+test('a synced idle edge fixes the old task deadline even if another person immediately starts', async t => {
+  const { store, get, env } = await fixture(t)
+  await runSync(env, store, { raws: [{ id: 'm', state: 'occupied', finishAt: iso(T + 6 * M) }] })
+  t.mock.timers.setTime(T + 6 * M)
+  await runSync(env, store, { raws: [{ id: 'm', state: 'idle' }] })
+  assert.equal((await get('/api/tasks')).tasks[0].completionConfirmed, true)
+  t.mock.timers.setTime(T + 7 * M)
+  await runSync(env, store, { raws: [{ id: 'm', state: 'occupied', finishAt: iso(T + 47 * M) }] })
+  const task = (await get('/api/tasks')).tasks[0]
+  const machine = (await get('/api/machines')).board.floors[0].machines[0]
+  assert.equal(task.endAt, iso(T + 6 * M))
+  assert.equal(task.leftMin, 0)
+  assert.equal(task.takeState, 'pending')
+  assert.equal(task.currentTask, false)
+  assert.equal(machine.finishAt, iso(T + 47 * M))
+})
+
+test('only affirmative cycle evidence separates continuous busy snapshots and a longer same cycle stays attached', async t => {
+  const { get, store, env } = await fixture(t)
+  const sync = (minutes, orderId, end) => {
+    t.mock.timers.setTime(T + minutes * M)
+    return runSync(env, store, { raws: [{ id: 'm', state: 'occupied', orderId, finishAt: iso(T + end * M) }] })
+  }
+  await sync(0, 'previous-private-order', 6)
+  await sync(7, 'previous-private-order', 33)
+  assert.equal((await get('/api/tasks')).tasks[0].leftMin, 26)
+  await sync(8, 'replacement-private-order', 43)
+  const data = await get('/api/machines')
+  assert.equal(JSON.stringify(data).includes('replacement-private-order'), false)
+  assert.equal(JSON.stringify(data).includes('platformCycleKey'), false)
+  const task = (await get('/api/tasks')).tasks[0]
+  assert.equal(task.endAt, iso(T + 8 * M))
+  assert.equal(task.completionConfirmed, true)
+  assert.equal(task.currentTask, false)
+})
+
+test('a registered six-minute drum clean can remain occupied while the platform stays idle', async t => {
+  const { store, get } = await fixture(t)
+  t.mock.timers.setTime(T + 3 * M)
+  await store.put('meta:sync', { lastAttemptAt: T + 3 * M })
+  const [task] = await store.get('tasks:owner')
+  await store.put('tasks:owner', [{ ...task, startAt: iso(T), endAt: iso(T + 6 * M), program: 'self_clean' }])
+  const board = (await store.get('machines:b1')).board
+  board.updatedAt = iso(T + 3 * M)
+  Object.assign(board.floors[0].machines[0], { state: 'idle', upstreamState: 'idle', rawState: 1, finishAt: null })
+  await store.put('machines:b1', { board })
+  const machine = (await get('/api/machines')).board.floors[0].machines[0]
+  assert.equal(machine.state, 'occupied')
+  assert.equal(machine.availabilitySource, 'user_report')
+  assert.equal(machine.leftMin, 3)
+  assert.equal((await get('/api/tasks')).tasks[0].completionConfirmed, false)
+})
+
+test('a previous idle edge is not applied to a new drum clean after subsequent idle refreshes', async t => {
+  const { store, get, env } = await fixture(t)
+  t.mock.timers.setTime(T + M)
+  await runSync(env, store, { raws: [{ id: 'm', state: 'idle' }] })
+  t.mock.timers.setTime(T + 2 * M)
+  await store.put('tasks:owner', [{ id: 'new-clean', machineId: 'm', startAt: iso(T + 2 * M), endAt: iso(T + 8 * M), program: 'self_clean' }])
+  await store.put('occupancy:b1', { m: { userId: 'owner', taskId: 'new-clean' } })
+  t.mock.timers.setTime(T + 5 * M)
+  await runSync(env, store, { raws: [{ id: 'm', state: 'idle' }] })
+  const machine = (await get('/api/machines')).board.floors[0].machines[0]
+  const task = (await get('/api/tasks')).tasks[0]
+  assert.equal(machine.platformCompletionAt, iso(T + M))
+  assert.equal(machine.registrationPending, true)
+  assert.equal(machine.leftMin, 3)
+  assert.equal(task.completionConfirmed, false)
+  assert.equal(task.leftMin, 3)
 })

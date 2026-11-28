@@ -1,10 +1,18 @@
 import { getSiteConfig } from './site.js'
 import { issueTicket, verifyTicket } from '../packages/core/auth.js'
-import { normalizeDormBuilding, dormBuildingName } from '../packages/core/buildings.js'
-import { ASSISTANT_LIMITS, AssistantError, BUILTIN_SKILLS, MACHINE_TOOL, assistantConfig, publicAssistantConfig, patchAssistantConfig, validateSkill, beijingDay, pruneHistory, memoryHabits, machineStatus, callAssistant, readBoundedJson, plainObject, discoverAssistantModels, normalizePromptProfiles } from '../packages/core/assistant.js'
+import { normalizeDormBuilding, dormBuildingName, resolveMachineDorm } from '../packages/core/buildings.js'
+import { ASSISTANT_LIMITS, AssistantError, BUILTIN_SKILLS, MACHINE_TOOL, READ_ONLY_TOOLS, validAssistantToolArgs, assistantConfig, publicAssistantConfig, patchAssistantConfig, validateSkill, beijingDay, pruneHistory, memoryHabits, machineStatus, callAssistant, readBoundedJson, plainObject, discoverAssistantModels, normalizePromptProfiles, deepSeekAssistant, assistantConversationId } from '../packages/core/assistant.js'
 import { mobileDigest } from '../packages/core/mobile-auth.js'
 import { logEvent } from '../packages/core/auditlog.js'
+import { getUserPermissions } from '../packages/core/permissions.js'
+import { retainedTasks, taskLifecycle } from '../packages/core/task-retention.js'
+import { resolveMachineTime } from '../packages/core/machine-time.js'
+import { applyRegisteredAvailability } from '../packages/core/availability.js'
+import { applyMachineHealth } from '../packages/core/operations.js'
 import { recordRequestFailure } from './request-safety.js'
+import { ASSISTANT_PHOTO_BODY_BYTES, ASSISTANT_PHOTO_PROMPT, normalizeAssistantPhoto } from '../packages/core/assistant-vision.js'
+import { deepSeekSpeechKey, readSpeechWav, transcribeSpeech } from './assistant-speech.js'
+import { assistantRefusalGuard, speechOrChatBlocked } from './assistant-refusal.js'
 
 const STREAM_TIMEOUT_MS = 45000
 const STREAM_LEASE_MS = 90000
@@ -12,7 +20,7 @@ const STREAM_LEASE_MS = 90000
 const runtimes = new WeakMap()
 function runtime(store) { if (!runtimes.has(store)) runtimes.set(store, new Set()); return runtimes.get(store) }
 const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers } })
-const publicError = error => error instanceof AssistantError ? { code: error.code, message: error.message, status: error.status }
+const publicError = error => error instanceof AssistantError ? { code: error.code, message: error.message, status: error.status, ...(error.blockedUntil ? { blockedUntil: error.blockedUntil } : {}) }
   : { code: 'unavailable', message: '助手服务暂时不可用，请稍后再试', status: 503 }
 const fail = error => { const { status, ...body } = publicError(error); return json({ error: body }, status) }
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key)
@@ -29,8 +37,8 @@ async function locked(store, key, action) {
   active.add(key)
   try { return await action() } finally { active.delete(key) }
 }
-async function readBody(c) {
-  const body = await readBoundedJson(c.req.raw, 196608)
+async function readBody(c, maxBytes = 196608) {
+  const body = await readBoundedJson(c.req.raw, maxBytes)
   if (!plainObject(body)) throw new AssistantError('bad_param', '请求须为 JSON 对象')
   return body
 }
@@ -97,7 +105,7 @@ export async function pruneAssistantStorage(store, now = Date.now()) {
   for (const { key, value } of await store.list('assistant:history:')) {
     const userId = key.slice('assistant:history:'.length)
     if (runtime(store).has(`chat:${userId}`)) continue
-    const messages = pruneHistory(value, now)
+    const messages = pruneHistory(value, now, { keepConversation: true })
     if (JSON.stringify(value) !== JSON.stringify(messages)) {
       if (messages.length) await store.put(key, messages)
       else await store.del(key)
@@ -113,6 +121,7 @@ export async function deleteAssistantUserData(store, userId) {
 
 /** All identity and board access is resolved server-side; clients cannot pass a user or building. */
 export function registerAssistantRoutes(app, { store, env = {}, authenticate, checkAdmin, getBoard, fetchImpl = globalThis.fetch, atomicStore }) {
+  const refusals = assistantRefusalGuard(store, atomicStore)
   async function userFor(c) {
     const identity = await authenticate(c)
     const id = typeof identity === 'string' ? identity : identity?.id || identity?.userId
@@ -189,15 +198,70 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     const result = await getBoard({ userId: user.id, dormBuilding: user.dormBuilding })
     return machineStatus({ ...(result?.board ? result : { board: result }), buildings: catalog }, user, kind)
   }
+  async function ownLaundryFor(user, scope) {
+    const bid = env.BUILDING_ID || 'b1'
+    const catalog = (await getSiteConfig(store)).buildings
+    const { permissions } = await getUserPermissions(store, user, catalog)
+    if (!permissions.assistant.view || !permissions.tasks.view) throw new AssistantError('forbidden', '当前账号没有查看洗衣记录的权限', 403)
+    const now = Date.now()
+    const tasks = retainedTasks(await store.get('tasks:' + user.id, []), now)
+      .filter(t => !t.cancelled && !t.cancelledAt && !t.canceledAt && !['cancelled', 'canceled'].includes(t.status)
+        && (!t.userId || t.userId === user.id) && (!t.ownerId || t.ownerId === user.id))
+    const wanted = tasks.map(t => ({ task: t, lifecycle: taskLifecycle(t, now) }))
+      .filter(({ lifecycle }) => lifecycle.createdAt)
+      .filter(({ task, lifecycle }) => {
+        const history = lifecycle.archived || task.done || task.takenAt
+        return scope === 'all' || (scope === 'history' ? history : !history)
+      })
+      .sort((a, b) => Date.parse(b.lifecycle.createdAt) - Date.parse(a.lifecycle.createdAt))
+    const scopeBuildings = permissions.tasks.viewBuildings
+    const needsLiveTiming = wanted.some(({ task, lifecycle }) => !lifecycle.archived && !task.done && !task.takenAt)
+    const needsBoard = needsLiveTiming || wanted.length > 0 && scopeBuildings !== null
+    const [result, occupancy, health] = await Promise.all([
+      needsBoard ? getBoard({ buildingId: bid }) : null,
+      needsLiveTiming ? store.get('occupancy:' + bid, {}) : {},
+      needsLiveTiming ? store.get('operations:health:' + bid, {}) : {},
+    ])
+    const board = result?.board || result
+    const mapping = result?.mapping || board?.slotMapping || {}
+    const projected = board && applyRegisteredAvailability(applyMachineHealth(board, health), { occupancy, tasksByUser: new Map([[user.id, tasks]]), now })
+    const machines = new Map((projected?.floors || []).flatMap(floor => floor.machines || []).map(machine => [String(machine.id), machine]))
+    const records = []
+    const asIso = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null
+    for (const { task, lifecycle } of wanted) {
+      const machine = machines.get(String(task.machineId))
+      if (scopeBuildings !== null && (!machine || !scopeBuildings.includes(resolveMachineDorm(machine, mapping, catalog)))) continue
+      const holder = occupancy?.[task.machineId]
+      const taken = Boolean(task.done || task.takenAt)
+      const current = !taken && !lifecycle.archived && holder?.userId === user.id &&
+        (holder.taskId ? holder.taskId === task.id : Boolean(holder.startAt && holder.startAt === task.startAt))
+      const time = resolveMachineTime(current ? machine || {} : {}, { task, now, snapshotAt: projected?.updatedAt })
+      const confirmed = Boolean(current && machine && time.confirmedFinished && (task.platformSeenRunning || machine.platformCompletionConfirmed || task.mode === 'machine'))
+      const remaining = current && !confirmed ? time.remainingMinutes : null
+      const startedAt = asIso(task.startAt) || lifecycle.createdAt
+      records.push({
+        machineName: String(machine?.displayName || task.machineName || '').slice(0, 100),
+        kind: task.kind === 'dryer' || machine?.kind === 'dryer' ? 'dryer' : 'washer',
+        ...(task.program === 'self_clean' ? { program: 'self_clean' } : {}),
+        archived: lifecycle.archived, startedAt, takenAt: asIso(task.takenAt),
+        finishAt: time.deadline, timingSource: time.source, completionConfirmed: confirmed,
+        state: taken ? 'taken' : confirmed ? 'pending_pickup' : current ? 'running_or_waiting_for_confirmation' : 'unconfirmed',
+        remainingMinutes: remaining > 0 ? remaining : null,
+        timeLabel: remaining === 0 ? '预计时间已到，等待设备确认' : null,
+      })
+      if (records.length > 25) break
+    }
+    return { scope, serverNow: new Date(now).toISOString(), retentionDays: 14, truncated: records.length > 25, records: records.slice(0, 25) }
+  }
   async function readMemory(user) {
     const memory = cleanMemory(await store.get(memoryKey(user.id), emptyMemory()))
     const habits = memory.enabled ? memoryHabits(await store.get(`tasks:${user.id}`, []), Date.now(), memory.since) : null
     return { ...memory, habits }
   }
-  async function readHistory(user) {
+  async function readHistory(user, keepConversation = false) {
     // Maintenance and a completed chat persist pruning. A history read must
     // not wait for a write or overwrite chat content appended after its read.
-    return pruneHistory(await store.get(historyKey(user.id), []))
+    return pruneHistory(await store.get(historyKey(user.id), []), Date.now(), { keepConversation })
   }
   app.get('/api/admin/assistant', wrap(async (c) => {
     if (!await checkAdmin(c)) throw new AssistantError('forbidden', '请先登录管理后台', 401)
@@ -240,9 +304,23 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     const [site, config, memory] = await Promise.all([
       getSiteConfig(store), loadConfig(), store.get(memoryKey(user.id), emptyMemory()),
     ])
-    const usage = await readUsage(user.id,config)
+    const [usage, blockedUntil] = await Promise.all([readUsage(user.id,config), refusals.blockedUntil(user.id)])
     const catalog = site.buildings
-    return json({ enabled: config.enabled, ready: publicAssistantConfig(config).ready, dormBuilding: normalizeDormBuilding(user.dormBuilding, catalog), buildingName: dormBuildingName(user.dormBuilding, catalog), usage: visibleUsage(usage), limits: { input: ASSISTANT_LIMITS.input, history: ASSISTANT_LIMITS.history, retentionDays: 14,context:128000,minuteHardLimit:30 },skillsEnabled:true,mcpEnabled:true,readonlyTools:[MACHINE_TOOL.name], memoryEnabled: cleanMemory(memory).enabled })
+    const ready = publicAssistantConfig(config).ready
+    return json({ enabled: config.enabled, ready, imageInputReady: ready, voiceRecognitionReady: Boolean(deepSeekSpeechKey(config, env)), deepThinkingAvailable: deepSeekAssistant(config), blockedUntil: blockedUntil ? new Date(blockedUntil).toISOString() : null, dormBuilding: normalizeDormBuilding(user.dormBuilding, catalog), buildingName: dormBuildingName(user.dormBuilding, catalog), usage: visibleUsage(usage), limits: { input: ASSISTANT_LIMITS.input, history: ASSISTANT_LIMITS.history, retentionDays: 14,context:128000,minuteHardLimit:30 },skillsEnabled:true,mcpEnabled:true,readonlyTools:READ_ONLY_TOOLS.map(tool => tool.name), memoryEnabled: cleanMemory(memory).enabled })
+  }))
+  app.post('/api/assistant/transcribe', wrap(async c => {
+    const user = await userFor(c)
+    const until = await refusals.blockedUntil(user.id)
+    if (until) throw speechOrChatBlocked(until)
+    const config = await loadConfig()
+    const key = deepSeekSpeechKey(config, env)
+    if (!key) throw new AssistantError('speech_not_configured', '语音识别暂未配置', 503)
+    const bytes = await readSpeechWav(c.req.raw)
+    return locked(store, `speech:${user.id}`, async () => {
+      await reserveRequest(user.id, config, true)
+      return json(await transcribeSpeech(bytes, key, { fetchImpl, signal: c.req.raw.signal }))
+    })
   }))
   app.get('/api/assistant/history', wrap(async (c) => json({ messages: await readHistory(await userFor(c)) })))
   app.delete('/api/assistant/history', wrap(async (c) => {
@@ -310,8 +388,18 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
   }))
   const chat = (streaming) => wrap(async (c) => {
     const user = await userFor(c)
-    const body = await readBody(c)
-    if (typeof body.input !== 'string' || !body.input.trim() || body.input.length > 1000 || body.input.includes('\0') || Object.keys(body).some((key) => !['input', 'skillId'].includes(key)) || (body.skillId != null && (typeof body.skillId !== 'string' || body.skillId.length > 100))) throw new AssistantError('bad_param', '请输入 1 至 1000 字的问题')
+    const body = await readBody(c, ASSISTANT_PHOTO_BODY_BYTES)
+    if (Object.keys(body).some(key => !['input', 'skillId', 'conversationId', 'photoData', 'deepThink'].includes(key))
+      || (own(body, 'deepThink') && typeof body.deepThink !== 'boolean')
+      || own(body, 'input') && (typeof body.input !== 'string' || body.input.length > ASSISTANT_LIMITS.input || body.input.includes('\0'))
+      || body.skillId != null && (typeof body.skillId !== 'string' || body.skillId.length > 100)) {
+      throw new AssistantError('bad_param', '请输入 1 至 1000 字的问题或上传照片')
+    }
+    const photoData = own(body, 'photoData') ? normalizeAssistantPhoto(body.photoData) : null
+    const input = body.input?.trim() || (photoData ? ASSISTANT_PHOTO_PROMPT : '')
+    if (!input) throw new AssistantError('bad_param', '请输入问题或上传照片')
+    const conversationId = body.conversationId
+    if (own(body, 'conversationId') && !assistantConversationId(conversationId)) throw new AssistantError('bad_param', '对话标识无效')
     const config = await loadConfig()
     if (!publicAssistantConfig(config).ready) throw new AssistantError('not_configured', 'AI 助手暂未启用，请先使用看板查询', 503)
     if (!normalizeDormBuilding(user.dormBuilding,(await getSiteConfig(store)).buildings)) throw new AssistantError('building_required', '请先在设置中绑定住宿楼', 409)
@@ -320,21 +408,31 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     const generate = (streamOptions = {}) => locked(store, `chat:${user.id}`, () => withChatLease(user.id, async () => {
       const signal = streamOptions.signal
       if (signal?.aborted) throw new AssistantError('cancelled', '已停止生成', 499)
+      const until = await refusals.blockedUntil(user.id)
+      if (until) throw speechOrChatBlocked(until)
       let usage = await readUsage(user.id,config)
       if (!usage.dailyRemaining || !usage.minuteRemaining) throw new AssistantError('rate_limit', !usage.dailyRemaining ? '今日 AI 额度已用完，明天再来' : '本分钟模型请求已达上限，请稍后重试', 429)
       const memory = await readMemory(user)
-      const history = await readHistory(user)
+      const savedHistory = await readHistory(user, true)
+      const history = conversationId ? savedHistory.filter(message => message.conversationId === conversationId) : savedHistory
       const preferences = await readPreferences(user,config)
       const prompt = preferences.promptProfiles.find(row=>row.id===preferences.activePromptId)?.text
       let first = true, context = null
-      const reply = await callAssistant({ config, input: body.input.trim(), history, skill, skills:[...BUILTIN_SKILLS,...await ownSkills(user.id)], prompt, memory: memory.enabled ? { note: memory.note, habits: memory.habits } : null, getStatus: (kind) => statusFor(user, kind), fetchImpl, resolveHost: env.ASSISTANT_RESOLVE_HOST,
+      const reply = await callAssistant({ config, input, photoData, deepThink:body.deepThink === true, history, skill, skills:[...BUILTIN_SKILLS,...await ownSkills(user.id)], prompt, memory: memory.enabled ? { note: memory.note, habits: memory.habits } : null, getStatus: (kind) => statusFor(user, kind), getOwnLaundry: scope => ownLaundryFor(user, scope), fetchImpl, resolveHost: env.ASSISTANT_RESOLVE_HOST,
         beforeRequest:async()=>{usage=await reserveRequest(user.id,config,first);first=false},onContext:value=>{context=value},
-        ...streamOptions, ...(streaming ? { timeoutMs: STREAM_TIMEOUT_MS } : {}) })
+        ...streamOptions, ...(streaming ? { timeoutMs: STREAM_TIMEOUT_MS } : {}) }).catch(async error => {
+        if (error?.code !== 'assistant_refusal') throw error
+        await streamOptions.onReset?.()
+        const blocked = await refusals.record(user.id, true)
+        throw blocked ? speechOrChatBlocked(blocked) : error
+      })
+      await refusals.record(user.id, false)
       if (signal?.aborted) throw new AssistantError('cancelled', '已停止生成', 499)
       const at = new Date().toISOString()
-      const messages = pruneHistory([...history, { role: 'user', content: body.input.trim(), at }, { role: 'assistant', content: reply, at }])
+      const scope = conversationId ? { conversationId } : {}
+      const messages = pruneHistory([...savedHistory, { role: 'user', content: input, at, ...scope }, { role: 'assistant', content: reply, at, ...scope }], Date.now(), { keepConversation: true })
       await store.put(historyKey(user.id), messages)
-      return { reply, messages, context, usage: visibleUsage(usage) }
+      return { reply, messages: pruneHistory(conversationId ? messages.filter(message => message.conversationId === conversationId) : messages), context, usage: visibleUsage(usage) }
     }, streaming ? STREAM_LEASE_MS : undefined))
     return streaming ? chatStream(c, store, generate) : json(await generate())
   })
@@ -345,6 +443,8 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
     let id = null
     try {
       const user = await userFor(c)
+      const until = await refusals.blockedUntil(user.id)
+      if (until) return rpcError(null, -32003, speechOrChatBlocked(until).message, 403)
       let body
       try { body = await readBody(c) } catch (error) { return rpcError(null, error.code === 'bad_json' ? -32700 : -32600, 'Invalid Request', 400) }
       if (body.jsonrpc !== '2.0' || typeof body.method !== 'string' || (own(body, 'id') && body.id !== null && typeof body.id !== 'string' && !(typeof body.id === 'number' && Number.isFinite(body.id)))) return rpcError(null, -32600, 'Invalid Request', 400)
@@ -363,12 +463,16 @@ export function registerAssistantRoutes(app, { store, env = {}, authenticate, ch
           if (!plainObject(body.params) || typeof body.params.protocolVersion !== 'string' || !plainObject(body.params.capabilities) || !plainObject(body.params.clientInfo) || typeof body.params.clientInfo.name !== 'string' || typeof body.params.clientInfo.version !== 'string') return rpcError(id, -32602, 'Invalid initialize params')
           result = { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'weshirt-readonly', version: '1.0.0' } }
         } else if (body.method === 'ping') result = {}
-        else if (body.method === 'tools/list') result = { tools: [{ name: MACHINE_TOOL.name, description: MACHINE_TOOL.description, inputSchema: MACHINE_TOOL.parameters, annotations: { title: '当前住宿楼机器状态', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }] }
+        else if (body.method === 'tools/list') result = { tools: READ_ONLY_TOOLS.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.parameters, annotations: { title: tool === MACHINE_TOOL ? '当前住宿楼机器状态' : '本人的洗衣记录', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })) }
         else if (body.method === 'tools/call') {
           const params = body.params
-          if (!plainObject(params) || params.name !== 'get_machine_status' || !plainObject(params.arguments) || Object.keys(params.arguments).some((key) => key !== 'kind') || !['all', 'washer', 'dryer'].includes(params.arguments.kind)) return rpcError(id, -32602, 'Unknown tool or invalid arguments')
-          try { result = { content: [{ type: 'text', text: JSON.stringify(await statusFor(user, params.arguments.kind)) }], isError: false } }
-          catch (error) { result = { content: [{ type: 'text', text: error instanceof AssistantError ? error.message : '机器状态暂时不可用' }], isError: true } }
+          const tool = plainObject(params) && READ_ONLY_TOOLS.find(tool => tool.name === params.name)
+          if (!tool || !validAssistantToolArgs(tool, params.arguments)) return rpcError(id, -32602, 'Unknown tool or invalid arguments')
+          try {
+            const data = tool === MACHINE_TOOL ? await statusFor(user, params.arguments.kind) : await ownLaundryFor(user, params.arguments.scope)
+            result = { content: [{ type: 'text', text: JSON.stringify(data) }], isError: false }
+          }
+          catch (error) { result = { content: [{ type: 'text', text: error instanceof AssistantError ? error.message : '查询数据暂时不可用' }], isError: true } }
         } else return rpcError(id, -32601, 'Method not found')
         return json({ jsonrpc: '2.0', id, result })
       })

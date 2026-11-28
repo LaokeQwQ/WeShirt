@@ -107,7 +107,8 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
       // Taking clothes is idempotent under the task lock. Retrying must run the
       // handler again if the first attempt saved the task but not the occupancy.
       const taskPickup = c.req.method === 'POST' && requestRoute(c) === '/api/tasks/:id/take'
-      const eligible = writes.has(c.req.method) && key && !accessCodeRoute && !taskPickup && !c.get('temporaryAdminAccess') && !excluded.test(c.req.path) && (c.req.header('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json'
+      const taskDelete = c.req.method === 'DELETE' && requestRoute(c) === '/api/tasks/:id'
+      const eligible = writes.has(c.req.method) && key && !accessCodeRoute && !taskPickup && !taskDelete && !c.get('temporaryAdminAccess') && !excluded.test(c.req.path) && (c.req.header('content-type') || '').split(';')[0].trim().toLowerCase() === 'application/json'
       if (!eligible) { await next(); return }
       if (!/^[A-Za-z0-9_.:-]{8,128}$/.test(key)) { c.res = json({ error: { code: 'bad_idempotency_key', message: '请求标识无效，请重新提交' } }, 400); return }
       const actor = await authenticate?.(c)
@@ -165,7 +166,8 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
           if (snapshot?.status === 409) {
             try { moderationPending = JSON.parse(snapshot.body)?.error?.code === 'moderation_pending' } catch { /* ordinary conflict */ }
           }
-          await store.put(bucket, moderationPending || [401, 403].includes(c.res.status) ? entries : [...entries, { scope, bodyHash, authHash, state: 'complete', snapshot, expiresAt: now() + CACHE_TTL }].slice(-CACHE_LIMIT))
+          const registrationRetry = c.req.method === 'POST' && c.req.path === '/api/tasks' && c.res.status >= 500
+          await store.put(bucket, moderationPending || registrationRetry || [401, 403].includes(c.res.status) ? entries : [...entries, { scope, bodyHash, authHash, state: 'complete', snapshot, expiresAt: now() + CACHE_TTL }].slice(-CACHE_LIMIT))
         })
       } finally { pending.delete(flightKey); decision.leader.resolve(snapshot) }
     } catch (error) {

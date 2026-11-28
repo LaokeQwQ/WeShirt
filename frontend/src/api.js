@@ -266,6 +266,35 @@ export async function streamAssistantChat(body, { signal, onDelta, onReset }) {
   }
 }
 
+export async function transcribeAssistantAudio(audio, signal) {
+  const path = '/api/assistant/transcribe'
+  const sentToken = token
+  if (!sentToken) throw apiError('请先登录再使用语音输入', { status: 401, code: 'unauthorized' })
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (signal.aborted) abort()
+  else signal.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(abort, 25000)
+  try {
+    const response = await fetch(BASE + path, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + sentToken, 'Content-Type': 'audio/wav' },
+      body: audio, signal: controller.signal, cache: 'no-store', redirect: 'error',
+    })
+    if (!response.ok) throw await responseError(response, '语音识别失败')
+    const data = await response.json()
+    if (token !== sentToken || signal.aborted) throw new DOMException('Session changed', 'AbortError')
+    if (typeof data.text !== 'string' || !data.text.trim()) throw apiError('没有识别到语音，请再试一次', { status: 502, code: 'invalid_response', eventId: response.headers.get('X-Event-ID') })
+    return data.text.trim()
+  } catch (problem) {
+    if (signal.aborted || token !== sentToken) throw new DOMException('Request aborted', 'AbortError')
+    throw problem?.eventId ? problem : apiError('语音识别连接失败，请再试或改用文字输入', { code: 'network_error' })
+  } finally {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', abort)
+  }
+}
+
 async function performApi(path, opts, timing) {
   const { method = 'GET', body, auth = true, retry = true, headers: extra, timeout = 20000, silent = false, idempotencyKey } = opts
   // auth: 'optional' —— 有 token 就带上，没有也照常请求；

@@ -6,6 +6,7 @@ import { getUserPermissions } from './permissions.js'
 import { readQueueNotices } from './queue-reminders.js'
 import { machineFaultRecipientAllowed } from './machine-fault-notices.js'
 import { resolveMachineTime } from './machine-time.js'
+import { taskMatchesOccupancy } from './laundry-cycle.js'
 import { buildTakeNotice,hhmm } from './notice.js'
 
 const enc = new TextEncoder(), DAY = 86400000
@@ -161,10 +162,14 @@ export function createMobilePush({ store, env = {}, atomicStore = createRemoteMo
     if (!user || user.disabled || user.blocked || user.notifyOn === false) return false
     if (policy.machineFault && !await machineFaultRecipientAllowed(store,uid,policy.machineFault,env,now())) return false
     if (policy.machineTime) {
-      const board=(await store.get('machines:'+(env.BUILDING_ID||'b1'),null))?.board
+      const partition = env.BUILDING_ID || 'b1'
+      const [snapshot, tasks, occupancy] = await Promise.all([
+        store.get('machines:' + partition, null), store.get('tasks:' + uid, []), store.get('occupancy:' + partition, {}),
+      ])
+      const board = snapshot?.board
       const machine=board?.floors?.flatMap(f=>f.machines||[]).find(machine=>String(machine.id)===policy.machineTime.machineId)
-      const task=(await store.get('tasks:'+uid,[])).find(task=>task.id===policy.taskId&&!task.done&&!task.takenAt)
-      if (!machine || !task) return false
+      const task=(Array.isArray(tasks) ? tasks : []).find(task=>task.id===policy.taskId&&!task.done&&!task.takenAt)
+      if (!machine || !task || !taskMatchesOccupancy(task, occupancy?.[policy.machineTime.machineId], uid)) return false
       const time=resolveMachineTime(machine,{task,now:now(),snapshotAt:board.updatedAt})
       if(time.stale || now()-Date.parse(board.updatedAt)>90000 || policy.machineTime.phase==='end'&&!time.confirmedFinished || policy.machineTime.phase==='lead'&&(time.confirmedFinished||time.remainingMinutes===null||time.remainingMinutes<=0||time.remainingMinutes>policy.machineTime.leadMinutes)) return false
     }
