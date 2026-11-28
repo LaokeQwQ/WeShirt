@@ -82,6 +82,63 @@ test('并发重复Idempotency-Key只写一个任务，缓存重试也不重复�
   assert.equal((await store.get('tasks:a')).length, 1)
 })
 
+test('registration succeeds without delete operations and old reminders cannot unlock a new occupier', async (t) => {
+  const { store, register, call } = await fixture(t)
+  await store.put('occupancy:b1', { one: { userId: 'b', taskId: 'old', endAt: new Date(Date.now() - 2 * 86400000).toISOString() } })
+  await store.put('urgecount:b1:one', 3)
+  await store.put('urge:b1:one', Date.now())
+  const photos = { machineId: 'one', confirmEmpty: true, photoOccupied: 'https://example.test/one.jpg', photoAround: 'https://example.test/two.jpg' }
+  assert.equal((await call('/api/urge/reveal', { user: 'c', body: photos })).status, 200, 'legacy session preserves its accrued reminder count')
+  const originalDel = store.del
+  let urgeDeletes = 0
+  store.del = async key => {
+    if (key === 'urgecount:b1:one' || key === 'urge:b1:one') { urgeDeletes++; throw new Error('delete unavailable') }
+    return originalDel(key)
+  }
+  const saved = await register('one', { key: 'registration-cooldown-not-required' })
+  assert.equal(saved.status, 200)
+  assert.equal((await store.get('occupancy:b1')).one.taskId, saved.data.task.id)
+  assert.equal((await store.get('tasks:a')).length, 1)
+  assert.equal(urgeDeletes, 0)
+  const denied = await call('/api/urge/reveal', { user: 'c', body: photos })
+  assert.equal(denied.status, 400)
+  assert.match(denied.data.error.message, /当前 0 次/)
+  const first = await call('/api/urge', { user: 'c', body: { machineId: 'one' } })
+  assert.equal(first.status, 200)
+  assert.equal(first.data.count, 1)
+  const repeated = await call('/api/urge', { user: 'c', body: { machineId: 'one' } })
+  assert.equal(repeated.status, 429)
+  const state = await store.get('urge-state:b1:one')
+  assert.deepEqual(state, { taskId: saved.data.task.id, userId: 'a', count: 1, at: state.at })
+  assert.ok(Number.isFinite(state.at))
+  assert.equal(await store.get('urgecount:b1:one'), 3, 'preexisting legacy values remain readable as numbers by older binaries')
+  await store.put('urge-state:b1:one', { taskId: 'old', userId: 'b', count: 3, at: state.at })
+  assert.equal((await call('/api/urge/reveal', { user: 'c', body: photos })).status, 400)
+})
+
+test('registration reports a traceable critical occupancy failure without replaying the task write', async (t) => {
+  const { store, register } = await fixture(t)
+  const originalPut = store.put
+  let attemptedWrites = 0
+  store.put = async (key, value) => {
+    if (key === 'occupancy:b1') {
+      attemptedWrites++
+      throw new Error('private-synthetic-occupancy-write-failure')
+    }
+    return originalPut(key, value)
+  }
+  const result = await register('one', { key: 'registration-partial-result' })
+  assert.equal(result.status, 500)
+  const eventId = result.data.error.eventId
+  assert.match(eventId, /^evt_[a-f0-9]{24}$/)
+  assert.equal(attemptedWrites, 1)
+  assert.equal((await store.get('tasks:a')).length, 1)
+  assert.equal(await store.get('occupancy:b1', null), null)
+  const logs = (await store.list('auditlog:')).flatMap(entry => entry.value)
+  assert.equal(logs.find(entry => entry.type === 'error' && entry.detail.eventId === eventId)?.detail.registrationStage, 'occupancy_write')
+  assert.ok(!JSON.stringify({ result, logs }).includes('private-synthetic-occupancy-write-failure'))
+})
+
 test('取旧任务与新增登记并发时，旧take不能清掉新任务占用；队列与登记共享顺序', async (t) => {
   const { register, store, call } = await fixture(t)
   const old = await register('one')

@@ -127,6 +127,21 @@ function ownsTaskOccupancy(occupancy, task, userId) {
   return true // 兼容没有关联字段的旧占用记录
 }
 
+async function readUrgeState(store, buildingId, machineId, occupancy) {
+  const key = `urge-state:${buildingId}:${machineId}`
+  const scope = { taskId: occupancy.taskId || '', userId: occupancy.userId }
+  const saved = await store.get(key, null)
+  if (saved?.taskId === scope.taskId && saved?.userId === scope.userId) {
+    return { key, scope, count: Number.isFinite(saved.count) ? saved.count : 0, at: Number.isFinite(saved.at) ? saved.at : 0 }
+  }
+  if (occupancy.urgeTaskScoped === true) return { key, scope, count: 0, at: 0 }
+  const [legacyCount, legacyAt] = await Promise.all([
+    store.get(`urgecount:${buildingId}:${machineId}`, 0),
+    store.get(`urge:${buildingId}:${machineId}`, 0),
+  ])
+  return { key, scope, count: Number.isFinite(legacyCount) ? legacyCount : 0, at: Number.isFinite(legacyAt) ? legacyAt : 0 }
+}
+
 // ── 惰性加载 machines（computeLeftMin 用），缺失时回退到 util.minutesBetween ──
 let _machinesMod = null
 let _machinesLoading = null
@@ -1121,9 +1136,9 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     }
   }
 
-  async function refreshIfStale(c, entry) {
+  async function refreshIfStale(c, entry, meta = null) {
     const hasBoard = Boolean(entry && entry.board)
-    const meta = (await store.get('meta:sync', null).catch(() => null)) || {}
+    meta = (meta ?? await store.get('meta:sync', null).catch(() => null)) || {}
     const now = Date.now()
     // 失败冷却中：谁都别再打上游（CloudBase 的定时器除外，它直接调 runSync）
     const cool = Number(meta.cooldownUntil) || 0
@@ -1157,11 +1172,12 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     // 第一次没有任何数据，必须等；已有旧数据就先返回，让同步在后台跑
     if (!hasBoard) {
       await withTimeout(task, FIRST_WAIT_MS)
+      // The board may already have been committed while notification delivery continues.
       return true
     }
     // 没有 waitUntil：短暂等一下，尽量让同步至少把提醒这一段跑完
-    if (!registered) await withTimeout(task, 2500)
-    return true
+    if (!registered) return withTimeout(task, 2500)
+    return false
   }
 
   // 只要用户打开任意需要看板的页面，就顺带把同步推一下。
@@ -1657,30 +1673,35 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
   app.get('/api/machines', async (c) => {
     try {
       const dorm = c.req.query('dorm') || ''
-      if (dorm && !normalizeDormBuilding(dorm,env.SITE_BUILDINGS)) return apiErr('bad_param', '住宿楼无效')
+      const catalog = env.SITE_BUILDINGS
+      if (dorm && !normalizeDormBuilding(dorm, catalog)) return apiErr('bad_param', '住宿楼无效')
       const buildingId = c.req.query('building') || env.BUILDING_ID || 'b1'
-      let entry = await store.get(`machines:${buildingId}`, null)
+      let [entry, sync] = await Promise.all([
+        store.get(`machines:${buildingId}`, null),
+        store.get('meta:sync', {}),
+      ])
       // 数据超过 STALE_MS（默认 30s）就顺带刷新，前端轮询即可拿到接近实时的状态
-      if (await refreshIfStale(c, entry)) {
-        entry = await store.get(`machines:${buildingId}`, null)
+      if (await refreshIfStale(c, entry, sync)) {
+        [entry, sync] = await Promise.all([store.get(`machines:${buildingId}`, null), store.get('meta:sync', {})])
       }
       if (!entry || !entry.board) {
         return apiErr('board_unavailable', '看板正在同步，稍后再试', 503)
       }
       // 二次确认「已恢复」的机器：海乐仍报故障时，看板改成可再上报，不继续当故障机
-      const [overrides, savedMapping, health] = await Promise.all([
+      const [overrides, savedMapping, health, calibration, savedOccupancy] = await Promise.all([
         store.get(`faults:${buildingId}`, {}),
         store.get(`mapping:${buildingId}`, null),
         store.get(`operations:health:${buildingId}`, {}),
+        readCalibrationSettings(store,buildingId),
+        store.get(`occupancy:${buildingId}`,{}),
       ])
       const slotMap = savedMapping?.mapping || {}
       const map = overrides && typeof overrides === 'object' ? overrides : {}
-      const calibration=await readCalibrationSettings(store,buildingId)
       let board = applyMachineHealth(projectCalibratedBoard(entry.board, calibration, { mapping: slotMap }), health)
       for (const floor of board.floors || []) {
         for (const m of floor.machines || []) {
           m.kind = machineKind(m, slotMap)
-          m.dormBuilding = resolveMachineDorm(m, slotMap,env.SITE_BUILDINGS)
+          m.dormBuilding = resolveMachineDorm(m, slotMap, catalog)
           Object.assign(m, machineLabels(m, slotMap))
           const ov = map[m.id]
           if (ov && ov.state === 'recovered' && Date.now()-Date.parse(ov.recoveredAt)<3600000 && (m.state === 'faulty' || m.health?.suspectedFault)) {
@@ -1691,8 +1712,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           }
         }
       }
-      const savedOccupancy=await store.get(`occupancy:${buildingId}`,{})
-      const occupancy=Object.fromEntries(Object.entries(savedOccupancy||{}).filter(([,entry])=>typeof entry?.userId==='string'&&entry.userId))
+      const inDorm = dorm ? new Set(filterDormFloors(board, dorm, catalog).flatMap(floor => floor.machines.map(machine => String(machine.id)))) : null
+      const occupancy=Object.fromEntries(Object.entries(savedOccupancy||{}).filter(([id,entry])=>(!inDorm || inDorm.has(id))&&typeof entry?.userId==='string'&&entry.userId))
       const ownerIds=[...new Set(Object.values(occupancy).map(entry=>entry.userId))]
       const tasksByUser=new Map(await Promise.all(ownerIds.map(async id=>[id,await store.get('tasks:'+id,[])])))
       board=applyRegisteredAvailability(board,{occupancy,tasksByUser})
@@ -1701,11 +1722,11 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         return [machineId, Array.isArray(tasks) ? tasks.find(task => ownsTaskOccupancy(entry, task, entry.userId)) : undefined]
       }))
       board=projectCalibratedBoard(board, calibration, { tasksByMachine })
-      board.floors=(board.floors||[]).map(floor=>({...floor,machines:(floor.machines||[]).filter(machine=>!env.SITE_BUILDINGS.some(building=>building.enabled===false&&building.code===resolveMachineDorm(machine,slotMap,env.SITE_BUILDINGS)))})).filter(floor=>floor.machines.length)
+      board.floors=(board.floors||[]).map(floor=>({...floor,machines:(floor.machines||[]).filter(machine=>!catalog.some(building=>building.enabled===false&&building.code===resolveMachineDorm(machine,slotMap,catalog)))})).filter(floor=>floor.machines.length)
       if (dorm) {
-        board.floors = filterDormFloors({ ...board, slotMapping: slotMap }, dorm,env.SITE_BUILDINGS)
+        board.floors = filterDormFloors({ ...board, slotMapping: slotMap }, dorm, catalog)
         board.dormBuilding = dorm
-        board.buildingName = dormBuildingName(dorm,env.SITE_BUILDINGS)
+        board.buildingName = dormBuildingName(dorm, catalog)
       }
       const visible = board.floors.flatMap((floor) => floor.machines || [])
       board.total = visible.length
@@ -1713,7 +1734,6 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       board.occupied = visible.filter((m) => ['occupied', 'abnormal'].includes(m.state)).length
       board.faulty = visible.filter((m) => m.state === 'faulty').length
       board.unknown = visible.filter((m) => m.state === 'unknown').length
-      const sync = await store.get('meta:sync', {})
       const serverNow = nowISO()
       const ageMs = Math.max(0, Date.parse(serverNow) - Date.parse(board.updatedAt || ''))
       // Device state must not pass through a second browser/CDN stale cache.
@@ -1850,6 +1870,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
 
   // 登记任务（鉴权）
   app.post('/api/tasks', async (c) => {
+    let registrationStage = 'auth'
     try {
       const userId = await bearerUser(c, env)
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
@@ -1864,6 +1885,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       if (Object.hasOwn(body, 'useDisinfectant') && typeof useDisinfectant !== 'boolean') return apiErr('bad_param', '是否使用消毒液须为布尔值')
       if (Object.hasOwn(body, 'selfCleaned') && typeof selfCleaned !== 'boolean') return apiErr('bad_param', '自清洁记录须为布尔值')
       const buildingId = env.BUILDING_ID || 'b1'
+      registrationStage = 'machine_and_user_read'
       const [entry, savedMapping, user] = await Promise.all([
         store.get(`machines:${buildingId}`, null),
         store.get(`mapping:${buildingId}`, null),
@@ -1923,6 +1945,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const result = await withTaskMutation(store, buildingId, async () => {
         // Mutable snapshots must be read after acquiring the shared task/queue
         // locks. Read-only machine/user setup and provider I/O stay outside.
+        registrationStage = 'registration_state_read'
         const [occ, qList, list] = await Promise.all([
           store.get(`occupancy:${buildingId}`, {}),
           store.get(`queue:${buildingId}`, []),
@@ -1957,6 +1980,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         }
         const tasks = retainedTasks(list)
         tasks.push(task)
+        registrationStage = 'task_write'
         await store.put(`tasks:${userId}`, tasks)
 
         // 占用登记：记录"谁在这台机器上开洗"（面板展示头像+昵称打码+几分钟前）
@@ -1969,24 +1993,32 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           avatarUrl: normalizeAvatarUrl(user.avatarUrl),
           startAt,
           endAt: taskEndAt,
+          urgeTaskScoped: true,
         }
 
         // 开洗（任意机器）= 自动退出自己的所有排队
         const qArr = Array.isArray(qList) ? qList : []
         const qNext = qArr.filter((q) => q.userId !== userId)
 
-        // 上面三次写也并发落盘
-        await Promise.all([
-          store.put(`occupancy:${buildingId}`, occMap),
-          qNext.length !== qArr.length ? store.put(`queue:${buildingId}`, qNext) : Promise.resolve(),
-          // 有人重新登记这台机器 → 「提醒取衣」的累计次数与冷却清零
-          store.del(`urgecount:${buildingId}:${machineId}`),
-          store.del(`urge:${buildingId}:${machineId}`),
+        // Keep both writes inside the lock until settled, even after one fails.
+        // Urge counters are matched to the task, requiring no unrelated deletes.
+        const [occupancySaved, queueSaved] = await Promise.allSettled([
+          Promise.resolve().then(() => store.put(`occupancy:${buildingId}`, occMap)),
+          qNext.length !== qArr.length ? Promise.resolve().then(() => store.put(`queue:${buildingId}`, qNext)) : Promise.resolve(),
         ])
+        if (occupancySaved.status === 'rejected') {
+          registrationStage = 'occupancy_write'
+          throw occupancySaved.reason
+        }
+        if (queueSaved.status === 'rejected') {
+          registrationStage = 'queue_write'
+          throw queueSaved.reason
+        }
         return task
       }, { queue: true })
       if (result instanceof Response) return result
       const task = result
+      registrationStage = 'registered'
 
       if (mobilePush.providers.length) {
         const wake = mobilePush.notify(userId, { nativeKind: 'TASK_REGISTERED', nativeEventKey: `task-registered:${task.id}`, taskId: task.id })
@@ -2024,6 +2056,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         },
       })
     } catch (e) {
+      c.set('registrationStage', registrationStage)
+      recordRequestFailure(c, e)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -2236,27 +2270,22 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const buildingId = env.BUILDING_ID || 'b1'
 
       // 限频：每台机器 5 分钟一次
-      const lastKey = `urge:${buildingId}:${machineId}`
-      const countKey = `urgecount:${buildingId}:${machineId}`
-      const last = await store.get(lastKey, 0)
+      const occ = await store.get(`occupancy:${buildingId}`, {})
+      const entry = occ && typeof occ === 'object' ? occ[machineId] : null
+      if (!entry || !entry.userId) return apiErr('not_found', '这台机器没有登记中的占用记录', 404)
+      if (entry.userId === userId) return apiErr('bad_param', '不能提醒自己')
+      const state = await readUrgeState(store, buildingId, machineId, entry)
       const waitMs = 5 * 60 * 1000
-      const elapsed = Date.now() - Number(last || 0)
+      const elapsed = Date.now() - state.at
       if (elapsed < waitMs) {
         const leftSec = Math.ceil((waitMs - elapsed) / 1000)
         return apiErr('rate_limited', `刚提醒过了，${leftSec} 秒后可以再点（同一台 5 分钟一次）`, 429)
       }
 
-      const occ = await store.get(`occupancy:${buildingId}`, {})
-      const entry = occ && typeof occ === 'object' ? occ[machineId] : null
-      if (!entry || !entry.userId) return apiErr('not_found', '这台机器没有登记中的占用记录', 404)
-      if (entry.userId === userId) return apiErr('bad_param', '不能提醒自己')
-
       const target = await store.get(`user:${entry.userId}`, null)
 
-      // 累计点击次数：每台机器独立计数，换人登记时清零（见 POST /api/tasks）
-      const count = Number((await store.get(countKey, 0)) || 0) + 1
-      await store.put(countKey, count)
-      await store.put(lastKey, Date.now())
+      const count = state.count + 1
+      await store.put(state.key, { ...state.scope, count, at: Date.now() })
 
       // 尽量还发钉钉（对方绑了就有用）；发不出去也不算失败
       let dmSent = false
@@ -2391,13 +2420,12 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         return apiErr('bad_param', '请上传「机器周围」照片（拍清周围没有空桶）')
 
       const buildingId = env.BUILDING_ID || 'b1'
-      const count = Number((await store.get(`urgecount:${buildingId}:${machineId}`, 0)) || 0)
-      if (count < 3) return apiErr('bad_param', `需先累计提醒 3 次（当前 ${count} 次）`)
-
       const occ = await store.get(`occupancy:${buildingId}`, {})
       const entry = occ && typeof occ === 'object' ? occ[machineId] : null
       if (!entry || !entry.userId) return apiErr('not_found', '这台机器没有登记中的占用记录', 404)
       if (entry.userId === userId) return apiErr('bad_param', '不能查看自己的信息')
+      const { count } = await readUrgeState(store, buildingId, machineId, entry)
+      if (count < 3) return apiErr('bad_param', `需先累计提醒 3 次（当前 ${count} 次）`)
 
       const target = await store.get(`user:${entry.userId}`, null)
       const requester = await store.get(`user:${userId}`, null)
