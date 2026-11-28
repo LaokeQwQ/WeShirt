@@ -1329,22 +1329,16 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     }
     const info = env.__STORE_INFO__ || { kind: 'unknown', name: null }
     const probeKey = 'probe:last'
-    let previous = null
-    let wrote = false
-    try {
-      previous = await store.get(probeKey, null)
-      await store.put(probeKey, { at: nowISO(), n: (previous && previous.n ? previous.n : 0) + 1 })
-      wrote = true
-    } catch (e) {
-      wrote = false
-    }
+    const previous = await store.get(probeKey, null)
+    const hits = (previous?.n || 0) + 1
+    await store.put(probeKey, { at: nowISO(), n: hits })
     // 能读到上一次的值 → 跨请求持久成立
     const persisted = Boolean(previous && previous.at)
     return json({
       store: info,
-      wrote,
+      wrote: true,
       previousAt: previous ? previous.at : null,
-      hits: previous ? (previous.n || 0) + 1 : 1,
+      hits,
       // 第一次调用必然是 false，再调一次就应为 true
       persistent: persisted,
       hint: persisted ? '存储已跨请求持久' : '首次调用或存储未持久：再请求一次这个地址，仍为 false 就说明没落盘',
@@ -1623,6 +1617,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const token = await issueToken(user.id, secret)
       return json({ token, user: publicUser(user) })
     } catch (e) {
+      if (e?.code === 'site_store_unavailable') throw e
       return apiErr('auth_failed', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -1647,7 +1642,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const code = String((body && body.code) || '')
       if (code.length < 16 || code.length > 512) return apiErr('bad_code', '取回码不合法')
 
-      // 新格式：签名票据（不依赖 KV）。老格式：claim:<code> 记录，保留兼容。
+      // 签名票据也需要持久记录其一次性 nonce；兼容旧格式 claim:<code>。
       let userId = ''
       try {
         const authMod = await import('../packages/core/auth.js')
@@ -1661,7 +1656,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
           }
           userId=String(t.u)
         }
-      } catch {
+      } catch (error) {
+        if (error?.code === 'site_store_unavailable') throw error
         /* 落到老格式 */
       }
 
@@ -1688,6 +1684,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const token = await issueToken(user.id, secret)
       return json({ token, user: publicUser(user), merged })
     } catch (e) {
+      if (e?.code === 'site_store_unavailable') throw e
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -1714,6 +1711,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       if (user.transient) return apiErr('account_out_of_sync', '账号资料正在同步，请稍后重试，当前昵称将保留', 409)
       return json({ user: publicUser(user) })
     } catch (e) {
+      if (e?.code === 'site_store_unavailable') throw e
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -1819,7 +1817,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       )
     } catch (e) {
       recordRequestFailure(c, e)
-      if (e?.code === 'edge_kv_read_failed') {
+      if (e?.code === 'site_store_unavailable' || e?.code === 'edge_kv_read_failed') {
         const now = Date.now()
         const recent = board => {
           const age = now - Date.parse(board?.updatedAt || '')
@@ -1911,6 +1909,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const byDate = (a, b) => Date.parse(b.createdAt || b.startAt || '') - Date.parse(a.createdAt || a.startAt || '')
       return json({ serverNow:now, tasks, activeTasks: tasks.filter(t => !t.archived).sort(byDate), history: tasks.filter(t => t.archived).sort(byDate), retention: { archiveHours: 72, deleteHours: 336, basis: 'createdAt' } })
     } catch (e) {
+      if (e?.code === 'site_store_unavailable') throw e
       if(e?.code==='machine_store_unavailable')return apiErr(e.code,'机器数据暂不可用，请稍后重试',503)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
@@ -2161,6 +2160,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     } catch (e) {
       c.set('registrationStage', registrationStage)
       recordRequestFailure(c, e)
+      if (e?.code === 'site_store_unavailable') return apiErr(e.code, '站点存储暂不可用，请稍后重试', 503)
       return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
     }
   })
@@ -3065,9 +3065,11 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
 
       return c.redirect(`${origin}/#/login?k=${encodeURIComponent(claim)}`)
     } catch (e) {
-      warn('钉钉登录回调异常:', safeErrorCategory(e))
-      reportError(env, store, 'dingtalk-oauth', safeErrorCategory(e)).catch(() => {})
-      return back('error',{status:500,category:safeErrorCategory(e)})
+      const unavailable = e?.code === 'site_store_unavailable'
+      const category = unavailable ? e.code : safeErrorCategory(e)
+      warn('钉钉登录回调异常:', category)
+      reportError(env, store, 'dingtalk-oauth', category).catch(() => {})
+      return back('error', { status: unavailable ? 503 : 500, category })
     }
   })
 

@@ -31,11 +31,11 @@
 
 推荐使用 **腾讯 CloudBase + 腾讯 EdgeOne Pages**，搭建自己的全云端 SaaS 洗衣房站点，无需自建服务器。
 
-<img src="docs/assets/cloud.svg" alt="CloudBase 触发同步，EdgeOne Pages 承载页面、API 和持久化 KV，手机浏览器访问站点。" width="100%" />
+<img src="docs/assets/cloud.svg" alt="CloudBase 定时同步并保存数据，EdgeOne Pages 承载网页和 API。" width="100%" />
 
-EdgeOne Pages 负责网页、Edge API 和持久化 KV；CloudBase 定时触发同步，也可作为独立抓取出口，将完整设备快照交回同一套处理流程。无人访问时也会检查机器状态，不使用 CloudBase 数据库。
+EdgeOne Pages 承载网页和 API，CloudBase PostgreSQL 保存账号、任务和设备状态。CloudBase 定时触发同步，也可独立抓取完整设备快照并交回 API 处理。无人访问时也会检查机器状态。
 
-生产分支选 `master`，构建命令为 `npm ci && npm run build`，输出目录为 `dist`。KV 绑定、登录配置和定时触发步骤见[部署指南](docs/DEPLOYMENT.md)。
+生产分支选 `master`，构建命令为 `npm ci && npm run build`，输出目录为 `dist`。数据库、登录和定时同步配置见[部署指南](docs/DEPLOYMENT.md)。
 
 ## 先在本地看看
 
@@ -70,7 +70,7 @@ PowerShell 复制配置可用 `Copy-Item .env.example .env`。真实设备、钉
 | 文档 | 内容 |
 | --- | --- |
 | [配置](docs/CONFIGURATION.md) | 数据源、楼栋、登录、通知和网站设置 |
-| [部署](docs/DEPLOYMENT.md) | EdgeOne Pages、CloudBase、KV 和可选 Node 部署 |
+| [部署](docs/DEPLOYMENT.md) | EdgeOne Pages、CloudBase PostgreSQL 和可选 Node 部署 |
 | [开发](docs/DEVELOPMENT.md) | 本地开发、验证，以及 `dev` → `master` 发布 |
 | [隐私与使用](docs/PRIVACY.md) | 哪些信息公开、保存什么数据、如何管理偏好 |
 | [同步与网络](docs/EGRESS.md) | 定时同步和上游连接排查 |

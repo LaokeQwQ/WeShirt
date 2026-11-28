@@ -13,8 +13,7 @@ export function createBoardQuery(request, { ttlMs = 5000, cooldownMs = 5000, now
       if (dorm && data.board.dormBuilding !== dorm) throw new Error('楼栋数据不匹配，请刷新重试')
       const previous = Date.parse(entry.cached?.board?.updatedAt || '')
       const incoming = Date.parse(data.board.updatedAt || '')
-      // Edge KV is eventually consistent across locations: a late read must
-      // never roll an already newer snapshot back to an older device state.
+      // Requests can finish out of order. Keep the newest device snapshot.
       if (Number.isFinite(previous) && Number.isFinite(incoming) && incoming < previous) return entry.cached
       entry.cached = { ...data, board: { ...data.board, slotMapping: data.mapping || {}, freshness: data.freshness ? { ...data.freshness, receivedAt: now() } : null } }
       entry.cachedAt = now()

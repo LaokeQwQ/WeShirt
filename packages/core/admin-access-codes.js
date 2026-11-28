@@ -12,7 +12,7 @@ const fail = (code, message, status = 400) => { throw Object.assign(new Error(me
 const identity = Object.freeze({ role: 'admin', label: '临时管理员', buildings: [] })
 const publicRow = row => ({ id: row.id, name: row.name, note: row.note, prefix: row.prefix, suffix: row.suffix, createdAt: row.createdAt, expiresAt: row.expiresAt, revokedAt: row.revokedAt || null, role: 'admin', permissions: row.permissions })
 
-/** Every authorization read uses the durable, linearizable store, never Edge KV. */
+/** Read each authorization directly from the durable, linearizable store. */
 export function createAdminAccessCodes({ atomicStore, authSecret, now = Date.now } = {}) {
   const enabled = atomicStore?.consistency === 'linearizable' && atomicStore?.durable === true &&
     typeof atomicStore.get === 'function' && typeof atomicStore.compareAndSet === 'function' && String(authSecret || '').trim().length >= 16

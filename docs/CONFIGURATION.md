@@ -11,6 +11,7 @@
 | 配置 | 用途 |
 | --- | --- |
 | `AUTH_SECRET` / `ADMIN_TOKEN` | 登录签名与最高管理员入口 |
+| `SITE_STORE_URL` / `SITE_STORE_SECRET` | EdgeOne Pages 必需的 CloudBase 存储桥接地址与服务端凭据 |
 | `BUILDING_ID` / `BUILDING_NAME` | 看板存储分区及名称，与个人住宿楼偏好分开 |
 | `HAIER_MODE` | 默认 `mock`，真实数据使用 `real` |
 | `HAIER_URL` / `HAIER_POSITION_ID` | 上游接口与设备点位，按楼层、类别分页 |

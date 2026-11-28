@@ -114,7 +114,10 @@ export async function mergeUserActivity(store, fromId, toId, opts = {}) {
  */
 export async function findExistingUser(store, { dingUserId, unionId, mobile, excludeId } = {}) {
   const scanUsers = async (match, limit = 1000) => {
-    const entries = await store.list('user:').catch(() => [])
+    const entries = await store.list('user:').catch(error => {
+      if (error?.code === 'site_store_unavailable') throw error
+      return []
+    })
     const list = Array.isArray(entries) ? entries : []
     let scanned = 0
     for (const e of list) {

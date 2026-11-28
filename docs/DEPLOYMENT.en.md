@@ -10,10 +10,10 @@ This fully cloud-hosted SaaS setup avoids maintaining your own server and reduce
 | --- | --- |
 | EdgeOne Pages | Host the `dist/` frontend and static assets |
 | Edge Functions | Run `functions/api/[[default]].js` for Hono APIs, sync and notification decisions |
-| Bound persistent KV | Store users, tasks, site settings, queues, snapshots and operational state |
+| CloudBase PostgreSQL | Store users, tasks, site settings, queues, snapshots and operational state |
 | CloudBase scheduled function | Trigger sync, or fetch complete snapshots through a separate network route and forward them, so checks continue without visitors |
 
-This setup does not use a CloudBase database. Edge server code handles notification decisions, fault confirmation and status normalization. Platform and upstream failures can still affect availability; managed hosting does not remove interruption risk.
+Edge server code handles notification decisions, fault confirmation and status normalization. Platform and upstream failures can affect availability.
 
 Select **`master` as the EdgeOne Pages production branch**. Use `dev` only for previews, and promote changes through a `dev` → `master` pull request.
 
@@ -25,7 +25,9 @@ Existing Upload projects can continue using CLI uploads. Check out the promoted 
 
 Inject server variables through the platform's supported function configuration. At minimum, set `AUTH_SECRET` and `ADMIN_TOKEN` as described in [Configuration](CONFIGURATION.en.md). Leave `VITE_API_BASE` empty for same-origin production. Use a stable custom HTTPS domain and update DingTalk callbacks.
 
-Create and bind persistent KV storage, preferably as `LAUNDRY_KV`. The entry supports `context.env` and platform global bindings. Run the admin storage diagnostic and verify newly saved data across requests. An in-memory fallback without KV is for debugging only.
+Apply `cloudbase/migrations/20261128134500_site_store.sql` in CloudBase PostgreSQL. Run `npm run build:site-store` and install production dependencies in `.cloudbase-build/weshirt-site-store/`. Deploy that directory as a Node Event function with entrypoint `index.main` in the same environment. Set `CLOUDBASE_ENV_ID` and a separate random `SITE_STORE_SECRET` in the cloud function. Configure its HTTPS endpoint as `SITE_STORE_URL` and use the same `SITE_STORE_SECRET` in Edge Functions. Run the authenticated `/api/debug/storage` twice and verify `store.kind` is `cloudbase-postgres` and `persistent` is `true`. Keep the bridge credential server-side. Missing configuration returns a traceable 503.
+
+When upgrading an existing site, freeze old API writes and let in-flight requests finish. Export the source data, import it into PostgreSQL, then verify the records and critical APIs before resuming traffic. Use separate storage for production and previews. A deployment with `SITE_STORE_MIGRATION_MODE=freeze` returns 503. Omit the setting during normal operation.
 
 ### 2. CloudBase sync trigger
 

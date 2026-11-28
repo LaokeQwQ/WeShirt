@@ -68,12 +68,12 @@ export function randomCode(len = 6)              // 数字字符串
 export function pick(obj, keys)
 ```
 
-### 2.2 `packages/core/store.js`（Agent Backend）
+### 2.2 业务存储
 
 ```js
-export function createMemoryStore()
-export function createFileStore(dir)   // JSON 落盘，节流写盘
-export function createEdgeKVStore(kv)  // EdgeOne KV binding 适配
+export function createMemoryStore()  // packages/core/store.js，测试
+export function createFileStore(dir) // packages/core/store-node.js，Node 本地部署
+export function createRemoteSiteStore({ url, secret, fetch }) // packages/core/site-store.js，EdgeOne Pages
 // 统一接口（所有实现）：
 //   await store.get(key, fallback = null)   // 值为任意 JSON
 //   await store.put(key, value)             // 覆盖写
@@ -215,9 +215,7 @@ export function createWebPush(env)
 `components/Avatar.vue` 用 SVG 程序化绘制。后端存 emoji 的历史数据会在读取时
 由 `normalizeAvatar()` 稳定映射到某个 key，保证同一用户头像不会乱跳。
 
-`GET /api/debug/storage` 用来确认线上是否真的绑定了 KV。`persistent:false` 意味着
-数据只活在一个请求里（表现为「刚写的东西下次读不到」），需要在控制台给项目绑定 KV 命名空间。
-线上已绑定，正常响应是 `store.kind = "kv"`、`name = "globalThis.LAUNDRY_KV"`、`persistent = true`。
+`GET /api/debug/storage` 用来确认 CloudBase PostgreSQL 的记录可跨请求读取。首次无探针时 `persistent` 为 `false`。再次请求后 `store.kind` 为 `cloudbase-postgres`、`persistent` 为 `true`。存储请求失败时返回带事件 ID 的 503。
 
 `POST /api/admin/purge-test` 是一次性运维接口，**只删明显是测试的数据**：文案命中
 `回归测试|本地测试|线上测试|持久化验证` 的留言、昵称命中测试名单的用户所产出的占用/排队/任务，
@@ -300,21 +298,21 @@ notices:{building} [ { id, title, body, at, pin } ]
 
 - `server/app.js`：Hono app，挂载以上全部路由与定时同步函数 `runSync(env)`（纯函数，可被 cron 与手动接口复用）
 - `server/index.js`：`@hono/node-server` 起服务 + `setInterval` 每 60s 调 `runSync` + FileStore
-- `functions/[[default]].js`：`export function onRequest(context)` → 首次请求时初始化 EdgeKVStore 并 `app.fetch(context.request)`
+- `functions/api/[[default]].js`：`onRequest(context)` 首次请求时初始化 CloudBase PostgreSQL 的服务端桥接，再将请求交给 Hono。
 - `functions/api/cron/sync.js`：`export function onScheduled(context)` → 调 `runSync`
 - EdgeOne 环境变量通过 `context.env` 传入，与 Node 的 `process.env` 合并成统一 `env` 对象
 
 ## 2026-11-09：住宿楼偏好、设备类型与通知行为
 
 - 用户资料新增 `dormBuilding: null | "guiyuan" | "liuyuan" | "meiyuan" | "zhuyuan"`，依次表示桂园、柳园、梅园、竹园。`POST /api/user/profile` 接受该字段；未知值返回 400，未登录返回 401，不能写入临时重建用户。其他资料修改保留此偏好。
-- `BUILDING_ID` / `machines:b1` 仍是既有看板分区，住宿楼偏好用于筛选全校快照，不据此创造新的 KV 分区。首次选择保存在本机，登录用户同时保存到个人资料；设置页可切换。桂园复用已确认的 3D 机位，其他楼使用列表，避免虚构物理布局。
+- `BUILDING_ID` / `machines:b1` 仍是既有看板分区，住宿楼偏好用于筛选全校快照。首次选择保存在本机，登录用户同时保存到个人资料。设置页可切换。桂园复用已确认的 3D 机位，其他楼使用列表。
 - 看板机器增加可信 `kind: "washer" | "dryer"`。后台机位绑定的 D 编号决定烘干类型，不能只按名称或客户端声明判断。烘干登记允许 10–180 整数分钟；洗衣仍为 30/42/50/70 分钟。
 - 自动群播报关闭：状态变化、疑似跳闸、催取衣均不再向群发送。个人通知遵守 `notifyOn`，保留主动查询回复及管理员显式通道测试。明文未认证回调不得认领或完成他人任务。
 - 查询保留完整上次成功快照，部分上游请求失败不发布残缺新快照；统一前端公开看板查询及短缓存/在途去重，保留后台故障修正与估时语义。
 
 ## 2026-11-09 第二轮：楼栋看板与遥测
 
-- `GET /api/machines?dorm=guiyuan|liuyuan|meiyuan|zhuyuan` 在服务端按住宿楼筛选，返回 `{ board, mapping }`；`board.dormBuilding` 为所选编码，统计只计当前楼。省略 dorm 仍供后台取完整快照，非法值返回400。`building`仍是旧KV分区；不能将住宿楼code当作KV分区。
+- `GET /api/machines?dorm=guiyuan|liuyuan|meiyuan|zhuyuan` 在服务端按住宿楼筛选，返回 `{ board, mapping }`。`board.dormBuilding` 为所选编码，统计只计当前楼。省略 `dorm` 可供后台取完整快照，非法值返回 400。`building` 是看板的存储分区，`dorm` 是楼栋筛选条件。
 - 机器返回 `dormBuilding`、`kind`、`slot`、`displayName`；人工桂园机位绑定优先，其次设备明确住宿楼，最后名称归属；无法确认归属的设备不混入任意楼。`GET /api/admin/status` 增加 `dormBuildings:[{code,name,total,idle,occupied,faulty,unknown}]`。
 - `POST /api/telemetry` 公开接收 `{events:[{name,route,dorm,...白名单数值/枚举}]}`，每批最多20、正文16KiB；仅接受 page_view / api_request / web_vital / client_error / room_performance / room_interaction / dorm_select。服务端去掉任意额外字段，时间以服务端为准，不存用户ID、IP、凭据、查询参数、消息正文或错误堆栈。
 - 遥测按天/楼栋聚合，最多保存14天，单日事件数有上限；浏览器批量发送并限制队列，失败不影响主业务。尊重浏览器Do Not Track及本机关闭设置。

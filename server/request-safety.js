@@ -30,6 +30,7 @@ export function recordRequestFailure(c, error) {
   const categories = {
     edge_kv_read_failed: 'edge_kv_read_failed',
     machine_store_unavailable: 'machine_store_unavailable',
+    site_store_unavailable: 'site_store_unavailable',
   }
   const types = { TypeError: 'invalid_data_type', SyntaxError: 'invalid_data_format', TimeoutError: 'timeout', AbortError: 'aborted' }
   const category = Object.hasOwn(categories, error?.code) ? categories[error.code] :
@@ -92,8 +93,9 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
     recordRequestFailure(c, _error)
     const id = c.get('eventId') || eventId()
     c.set('eventId', id)
-    const unavailable=_error?.code==='machine_store_unavailable',status=unavailable?503:500
-    return json({ error: { code: unavailable?'machine_store_unavailable':'internal', message: '服务暂时不可用，请稍后重试', eventId: id, status } }, status, { 'X-Event-ID': id, 'Cache-Control': 'no-store' })
+    const unavailable = ['machine_store_unavailable', 'site_store_unavailable'].includes(_error?.code)
+    const status = unavailable ? 503 : 500
+    return json({ error: { code: unavailable ? _error.code : 'internal', message: '服务暂时不可用，请稍后重试', eventId: id, status } }, status, { 'X-Event-ID': id, 'Cache-Control': 'no-store' })
   })
   app.use('/api/*', async (c, next) => {
     c.set('eventId', eventId())
@@ -172,7 +174,8 @@ export function registerRequestSafety(app, { store, authenticate, now = () => Da
       } finally { pending.delete(flightKey); decision.leader.resolve(snapshot) }
     } catch (error) {
       recordRequestFailure(c, error)
-      c.res = json({ error: { code: 'internal', message: '服务暂时不可用，请稍后重试' } }, 500)
+      const unavailable = error?.code === 'site_store_unavailable'
+      c.res = json({ error: { code: unavailable ? error.code : 'internal', message: '服务暂时不可用，请稍后重试' } }, unavailable ? 503 : 500)
     } finally { await finalize(c, store) }
   })
 }
