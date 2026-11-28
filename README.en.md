@@ -31,11 +31,11 @@ Machine status comes from Haile Life. Estimates help with planning; check the ma
 
 The recommended **Tencent CloudBase + Tencent EdgeOne Pages** setup gives your laundry room a fully cloud-hosted SaaS site, with no server of your own to maintain.
 
-<img src="docs/assets/cloud.en.svg" alt="CloudBase triggers sync; EdgeOne Pages hosts the frontend, APIs and persistent KV; browsers access the site." width="100%" />
+<img src="docs/assets/cloud.en.svg" alt="CloudBase schedules sync and stores application data. EdgeOne Pages hosts the frontend and APIs." width="100%" />
 
-EdgeOne Pages hosts the frontend, Edge APIs and persistent KV. CloudBase schedules sync and can also fetch complete machine snapshots through a separate network route, then pass them to the same processing flow. Checks continue without an open page. This setup does not use a CloudBase database.
+EdgeOne Pages hosts the frontend and APIs. CloudBase PostgreSQL stores accounts, tasks and machine status. CloudBase schedules sync and can fetch complete machine snapshots through a separate network route, then send them to the API. Checks continue without an open page.
 
-Use `master` for production, `npm ci && npm run build` as the build command, and `dist` as the output directory. Follow the [deployment guide](docs/DEPLOYMENT.en.md) for KV, login and scheduled sync.
+Use `master` for production, `npm ci && npm run build` as the build command, and `dist` as the output directory. The [deployment guide](docs/DEPLOYMENT.en.md) covers database, login and scheduled sync configuration.
 
 ## Try it locally
 
@@ -70,7 +70,7 @@ In PowerShell, copy the configuration with `Copy-Item .env.example .env`. Real m
 | Document | Contents |
 | --- | --- |
 | [Configuration](docs/CONFIGURATION.en.md) | Data sources, dorms, login, notifications and site settings |
-| [Deployment](docs/DEPLOYMENT.en.md) | EdgeOne Pages, CloudBase, KV and optional Node hosting |
+| [Deployment](docs/DEPLOYMENT.en.md) | EdgeOne Pages, CloudBase PostgreSQL and optional Node hosting |
 | [Development](docs/DEVELOPMENT.en.md) | Local work, verification and `dev` → `master` releases |
 | [Privacy and usage](docs/PRIVACY.en.md) | Public information, stored data and user preferences |
 | [Sync and networking](docs/EGRESS.en.md) | Scheduled sync and upstream troubleshooting |

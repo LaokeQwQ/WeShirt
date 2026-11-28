@@ -10,10 +10,10 @@
 | --- | --- |
 | EdgeOne Pages | 托管 `dist/` 前端与静态资源 |
 | Edge Functions | 运行 `functions/api/[[default]].js`，承载 Hono API、同步和通知判定 |
-| 绑定的持久化 KV | 保存用户、任务、站点配置、队列、快照与运营状态 |
+| CloudBase PostgreSQL | 保存用户、任务、站点配置、队列、快照与运营状态 |
 | CloudBase 定时函数 | 触发同步，或通过独立出口抓取完整快照后回传，保证无人访问时仍有检查机会 |
 
-此方案没有使用 CloudBase 数据库。通知判定、故障复核与状态归一化由 Edge 服务端统一处理。平台或上游故障仍可能影响可用性，托管不意味着没有中断风险。
+通知判定、故障复核与状态归一化由 Edge 服务端统一处理。平台或上游故障仍可能影响可用性。
 
 ### 1. 构建与 API
 
@@ -23,7 +23,9 @@
 
 通过部署平台支持的函数环境配置注入服务端变量，至少填写 `AUTH_SECRET` 与 `ADMIN_TOKEN`，长度要求见 [配置](CONFIGURATION.md)。生产同域访问时 `VITE_API_BASE` 留空。使用自定义 HTTPS 域名，并同步配置钉钉回调。
 
-创建持久化 KV 并绑定到项目，推荐变量名 `LAUNDRY_KV`。入口兼容 `context.env` 与平台全局绑定。登录后台运行存储自检，确认连续请求可读取刚保存的数据；无 KV 的内存回退仅用于调试。
+在 CloudBase PostgreSQL 中应用 `cloudbase/migrations/20261128134500_site_store.sql`。执行 `npm run build:site-store`，在 `.cloudbase-build/weshirt-site-store/` 安装生产依赖后，将该目录部署为同一环境的 Node Event 函数，入口为 `index.main`。为函数配置 `CLOUDBASE_ENV_ID` 和独立随机的 `SITE_STORE_SECRET`。在 Edge Functions 配置桥接 HTTPS 地址 `SITE_STORE_URL` 和同一份 `SITE_STORE_SECRET`。登录后台连续两次运行 `/api/debug/storage`，确认 `store.kind` 为 `cloudbase-postgres` 且 `persistent` 为 `true`。桥接凭据仅限服务端，配置缺失时 API 返回可追踪的 503。
+
+从旧版升级时，先冻结全部旧 API 写入并等待在途请求结束，然后导出旧存储，导入 PostgreSQL，核对记录和关键业务接口后恢复流量。生产与预览分别使用独立存储。冻结部署通过 `SITE_STORE_MIGRATION_MODE=freeze` 返回 503，正常部署省略此变量。
 
 ### 2. CloudBase 同步触发器
 

@@ -1,5 +1,35 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createPagesHandler } from '../functions/api/[[default]].js'
+
+const storageEnv = {
+  SITE_STORE_URL: 'https://storage.example/api/site-store',
+  SITE_STORE_SECRET: 'site-store-test-secret-at-least-32-characters',
+  HAIER_MODE: 'mock', BUILDING_ID: 'b1',
+}
+
+function createBridge(rows, beforeGet = async () => {}) {
+  return createPagesHandler({ fetch: async (url, options) => {
+    assert.equal(String(url), storageEnv.SITE_STORE_URL)
+    assert.equal(new Headers(options.headers).get('authorization'), 'Bearer ' + storageEnv.SITE_STORE_SECRET)
+    const { op, key, value, prefix } = JSON.parse(options.body)
+    let result
+    if (op === 'get') {
+      await beforeGet(key)
+      result = rows.has(key) ? { found: true, value: rows.get(key) } : { found: false }
+    } else if (op === 'put') {
+      rows.set(key, value)
+      result = true
+    } else if (op === 'delete') {
+      result = rows.delete(key)
+    } else if (op === 'list') {
+      result = { rows: [...rows].filter(([name]) => name.startsWith(prefix)).map(([key, value]) => ({ key, value })), next: null }
+    } else {
+      assert.fail('Unexpected bridge operation')
+    }
+    return Response.json({ protocolVersion: 1, ok: true, result })
+  } })
+}
 
 test('Pages returns the existing public board while retaining unfinished sync in waitUntil', async () => {
   let release
@@ -7,32 +37,25 @@ test('Pages returns the existing public board while retaining unfinished sync in
   let syncStarted
   const started = new Promise(resolve => { syncStarted = resolve })
   const rows = new Map([
-    ['machines:b1', JSON.stringify({ board: { updatedAt: new Date().toISOString(), floors: [{ code: '1F', machines: [
+    ['machines:b1', { board: { updatedAt: new Date().toISOString(), floors: [{ code: '1F', machines: [
       { id: 'old-machine', name: '一号机', state: 'idle', dormBuilding: 'guiyuan' },
       { id: 'outside-machine', name: '其他楼栋洗衣机', state: 'idle', dormBuilding: 'liuyuan' },
-    ] }] } })],
-    ['meta:sync', JSON.stringify({ lastAttemptAt: 0 })],
-    ['occupancy:b1', JSON.stringify({ 'outside-machine': { userId: 'outside-owner' } })],
+    ] }] } }],
+    ['meta:sync', { lastAttemptAt: 0 }],
+    ['occupancy:b1', { 'outside-machine': { userId: 'outside-owner' } }],
   ])
   let blockedSync = false
   const reads = []
-  const kv = {
-    async get(key) {
-      reads.push(key)
-      if (key === 'meta:haierAccounts') { blockedSync = true; syncStarted(); await blocked }
-      return rows.get(key) ?? null
-    },
-    async put(key, value) { rows.set(key, value) },
-    async delete(key) { rows.delete(key) },
-    async list({ prefix = '' } = {}) { return { keys: [...rows.keys()].filter(key => key.startsWith(prefix)), complete: true } },
-  }
+  const onRequest = createBridge(rows, async key => {
+    reads.push(key)
+    if (key === 'meta:haierAccounts') { blockedSync = true; syncStarted(); await blocked }
+  })
   const tasks = []
   const context = {
-    env: { LAUNDRY_KV: kv, HAIER_MODE: 'mock', BUILDING_ID: 'b1', AUTH_SECRET: 'edge-task-fixture-secret-long-enough' },
+    env: { ...storageEnv, AUTH_SECRET: 'edge-task-fixture-secret-long-enough' },
     request: new Request('https://site.example/api/machines?dorm=guiyuan'),
     waitUntil(task) { assert.equal(this, context); tasks.push(task) },
   }
-  const { onRequest } = await import('../functions/api/[[default]].js?task-lifetime')
   let timer, startedTimer
   try {
     const response = await Promise.race([
@@ -61,23 +84,16 @@ test('Pages can report a traced unavailable board while first synchronization is
   let release
   const blocked = new Promise(resolve => { release = resolve })
   const reads = []
-  const kv = {
-    async get(key) {
-      reads.push(key)
-      if (key === 'meta:haierAccounts') await blocked
-      return null
-    },
-    async put() {},
-    async delete() {},
-    async list() { return { keys: [], complete: true } },
-  }
+  const onRequest = createBridge(new Map(), async key => {
+    reads.push(key)
+    if (key === 'meta:haierAccounts') await blocked
+  })
   const tasks = []
   const context = {
-    env: { LAUNDRY_KV: kv, HAIER_MODE: 'mock', BUILDING_ID: 'b1', SYNC_WAIT_MS: '10' },
+    env: { ...storageEnv, SYNC_WAIT_MS: '10' },
     request: new Request('https://site.example/api/machines?dorm=guiyuan'),
     waitUntil(task) { tasks.push(task) },
   }
-  const { onRequest } = await import('../functions/api/[[default]].js?initial-no-snapshot')
   try {
     const response = await onRequest(context)
     const { error } = await response.json()
@@ -92,24 +108,18 @@ test('Pages can report a traced unavailable board while first synchronization is
   }
 })
 
-test('transient edge board read failure can reuse a same-dorm public catalogue with unverified states', async () => {
+test('transient CloudBase board read failure can reuse a same-dorm public catalogue with unverified states', async () => {
   const at = new Date().toISOString()
   let fail = false
   const rows = new Map([
-    ['machines:b1', JSON.stringify({ board: { updatedAt: at, floors: [{ code: '1F', machines: [
+    ['machines:b1', { board: { updatedAt: at, floors: [{ code: '1F', machines: [
       { id: 'm', name: '一号机', state: 'idle', dormBuilding: 'guiyuan', privateField: 'fixture-private' },
-    ] }] } })],
-    ['meta:sync', JSON.stringify({ lastAttemptAt: Date.now() })],
+    ] }] } }],
+    ['meta:sync', { lastAttemptAt: Date.now() }],
   ])
-  const kv = {
-    async get(key) { if (fail && key === 'machines:b1') throw Error('binding unavailable'); return rows.get(key) ?? null },
-    async put(key, value) { rows.set(key, value) },
-    async delete(key) { rows.delete(key) },
-    async list() { return { keys: [], complete: true } },
-  }
-  const { onRequest } = await import('../functions/api/[[default]].js?restricted-board-fallback')
+  const onRequest = createBridge(rows, async key => { if (fail && key === 'machines:b1') throw Error('bridge unavailable') })
   const read = (dorm, headers) => onRequest({
-    env: { LAUNDRY_KV: kv, BUILDING_ID: 'b1', HAIER_MODE: 'mock' },
+    env: storageEnv,
     request: new Request('https://site.example/api/machines?dorm=' + dorm, { headers }),
     waitUntil() {},
   })
@@ -125,4 +135,49 @@ test('transient edge board read failure can reuse a same-dorm public catalogue w
   assert.doesNotMatch(JSON.stringify(output), /fixture-private/)
   assert.equal((await read('liuyuan')).status, 503)
   assert.equal((await read('guiyuan', { authorization: 'Bearer test' })).status, 503)
+})
+
+test('Pages rejects missing CloudBase configuration without using a KV binding', async () => {
+  let touched = false
+  const unsupportedStore = {
+    async get() { touched = true }, async put() { touched = true }, async delete() { touched = true },
+  }
+  const onRequest = createPagesHandler({ fetch: async () => { touched = true } })
+  const response = await onRequest({ env: { LAUNDRY_KV: unsupportedStore }, request: new Request('https://site.example/api/health') })
+  assert.equal(response.status, 503)
+  const { error } = await response.json()
+  assert.equal(error.code, 'site_store_unavailable')
+  assert.equal(error.eventId, response.headers.get('x-event-id'))
+  assert.equal(touched, false)
+})
+
+test('Pages freezes all API routes without contacting storage', async () => {
+  let contacted = false
+  const onRequest = createPagesHandler({ fetch: async () => { contacted = true } })
+  const env = { ...storageEnv, SITE_STORE_MIGRATION_MODE: 'freeze' }
+  for (const [path, method] of [['/api/health', 'GET'], ['/api/machines', 'GET'], ['/api/cron/ingest', 'POST'], ['/api/tasks', 'DELETE']]) {
+    const response = await onRequest({ env, request: new Request('https://site.example' + path, { method }) })
+    assert.equal(response.status, 503)
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    assert.equal(response.headers.get('retry-after'), '15')
+    const { error } = await response.json()
+    assert.equal(error.code, 'site_store_migrating')
+    assert.equal(error.eventId, response.headers.get('x-event-id'))
+  }
+  assert.equal(contacted, false)
+})
+
+test('storage probe reads from CloudBase across independent Pages runtimes', async () => {
+  const rows = new Map()
+  const env = { ...storageEnv, ADMIN_TOKEN: 'admin-test-token-at-least-32-characters' }
+  const request = () => ({ env, request: new Request('https://site.example/api/debug/storage', { headers: { 'X-Admin-Token': env.ADMIN_TOKEN } }) })
+  const first = await createBridge(rows)(request())
+  assert.equal(first.status, 200)
+  assert.equal((await first.json()).persistent, false)
+  const second = await createBridge(rows)(request())
+  const diagnostic = await second.json()
+  assert.equal(second.status, 200)
+  assert.equal(diagnostic.store.kind, 'cloudbase-postgres')
+  assert.equal(diagnostic.persistent, true)
+  assert.equal(diagnostic.hits, 2)
 })

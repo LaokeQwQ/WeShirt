@@ -11,8 +11,7 @@ const capacity=()=>{throw Object.assign(new Error('机器数据容量已满，�
 const expected=error=>['bad_param','forbidden','unauthorized','not_found','too_large','too_many','machine_store_unavailable','machine_store_capacity'].includes(error?.code)&&[400,401,403,404,409,413,429,503].includes(error.status)
 const ready=store=>store?.consistency==='linearizable'&&store?.durable===true&&typeof store.get==='function'&&typeof store.compareAndSet==='function'
 
-/** Only explicit mock environments and genuine in-process fixtures may use
- * this adapter. A production bridge failure cannot fall back to Edge KV. */
+/** Only explicit mock environments and genuine in-process fixtures use this adapter. */
 export function createProcessMachineAtomicStore(){
   const records=new Map()
   return {consistency:'linearizable',durable:true,

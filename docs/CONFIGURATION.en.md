@@ -11,6 +11,7 @@ Keep credentials on the server. `VITE_*` values are included in browser builds a
 | Setting | Purpose |
 | --- | --- |
 | `AUTH_SECRET` / `ADMIN_TOKEN` | Login signing and bootstrap super-admin access |
+| `SITE_STORE_URL` / `SITE_STORE_SECRET` | CloudBase storage bridge endpoint and server credential required by EdgeOne Pages |
 | `BUILDING_ID` / `BUILDING_NAME` | Board storage partition and name, separate from a user's dorm preference |
 | `HAIER_MODE` | `mock` by default; `real` for live data |
 | `HAIER_URL` / `HAIER_POSITION_ID` | Upstream endpoint and machine location, paginated by floor and category |

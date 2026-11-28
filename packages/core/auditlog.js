@@ -5,9 +5,9 @@
 // 线上排查基本靠猜。
 //
 // 存储：按天分桶 auditlog:YYYY-MM-DD（北京时间），每天最多 MAX_PER_DAY 条环形截断。
-// 这样既能按日期范围读，也避免单个 key 无限膨胀（KV 没有 TTL，膨胀了很难查）。
+// 按日期分桶以限制单条记录大小，过期数据由日志清理任务删除。
 //
-// 同一 store 实例内的桶更新串行；多实例 Edge KV 的最终一致性仍由存储层决定。
+// 同一 store 实例内的桶更新串行。
 
 import { withOperationLock } from './operations.js'
 
