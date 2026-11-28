@@ -41,7 +41,7 @@ test('channel catalog is public, puts current dorm second, honors dynamic buildi
   assert.equal((await call('/api/messages?channel=public&machineId=g1')).status, 400)
 })
 
-test('public and building channels isolate posts/replies and legacy dorm/machine/default queries remain compatible', async () => {
+test('public, building and machine discussions have separate lists, summaries, and read receipts', async () => {
   const { call, advance, store } = await fixture()
   const pub = await post(call, { channel: 'public', text: '公共留言' })
   assert.equal(pub.status, 200)
@@ -60,13 +60,24 @@ test('public and building channels isolate posts/replies and legacy dorm/machine
   assert.equal(reply.status, 200)
   assert.equal(reply.data.message.machineId, null)
   assert.equal((await call('/api/messages?channel=public')).data.pagination.total, 2)
-  assert.equal((await call('/api/messages?dorm=guiyuan')).data.pagination.total, 1)
+  assert.equal(own.status, 200)
+  assert.equal((await call('/api/messages?dorm=guiyuan')).data.pagination.total, 0)
   assert.equal((await call('/api/messages?machineId=g1')).data.pagination.total, 1)
-  assert.equal((await call('/api/messages')).data.pagination.total, 3, 'default listing still enforces public plus own channel')
-  assert.equal((await call('/api/messages', { user: 'admin' })).data.pagination.total, 4)
+  assert.equal((await call('/api/messages')).data.pagination.total, 2)
+  assert.equal((await call('/api/messages', { user: 'admin' })).data.pagination.total, 3)
   assert.equal((await call('/api/messages?channel=public&limit=1')).data.pagination.hasMore, true)
-  await store.put('messages:b1', [{ id: 'old', userId: 'a', machineId: 'g1', text: '迁移旧留言', at: new Date(AT).toISOString() }])
-  assert.equal((await call('/api/messages?channel=guiyuan')).data.messages[0].id, 'old')
+  await store.put('messages:b1', [{ id: 'ordinary', userId: 'a', channel: 'guiyuan', text: '楼栋聊天', at: new Date(AT).toISOString() },
+    { id: 'old', userId: 'a', machineId: 'g1', text: '迁移旧留言', at: new Date(AT).toISOString() }])
+  assert.equal((await call('/api/messages?channel=guiyuan')).data.messages[0].id, 'ordinary')
+  assert.equal((await call('/api/messages?channel=guiyuan&machineId=g1')).data.messages[0].id, 'old')
+  const catalog = await call('/api/messages/channels', { user: 'admin' })
+  const ownChannel = catalog.data.channels.find(c => c.code === 'guiyuan')
+  assert.equal(ownChannel.summary.messageId, 'ordinary')
+  assert.equal(ownChannel.unreadCount, 1)
+  assert.equal((await call('/api/messages/read', { user: 'admin', method: 'POST', body: { channel: 'guiyuan', machineId: 'g1', messageIds: ['ordinary'] } })).status, 404)
+  const seen = await call('/api/messages/read', { user: 'admin', method: 'POST', body: { channel: 'guiyuan', machineId: 'g1', messageIds: ['old'] } })
+  assert.equal(seen.data.unreadCount, 1)
+  assert.equal((await post(call, { channel: 'guiyuan', machineId: 'g1', replyTo: 'ordinary', text: '跨留言板' })).status, 400)
 })
 
 test('current author profile and server identity are displayed; ordinary users never receive target IDs', async () => {

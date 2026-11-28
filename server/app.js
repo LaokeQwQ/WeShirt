@@ -1105,7 +1105,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
     })
   )
 
-  const requestReadStore=c=>['GET','HEAD'].includes(c.req.method)&&c.req.path.startsWith('/api/messages')?communitySnapshot(c,store).store:store
+  const isPickupRequest = c => c.req.method === 'POST' && /^\/api\/tasks\/[^/]+\/take$/.test(c.req.path)
+  const requestReadStore=c=>isPickupRequest(c)||['GET','HEAD'].includes(c.req.method)&&c.req.path.startsWith('/api/messages')?communitySnapshot(c,store).store:store
   const authenticateRequest=async c=>{const uid=await bearerUser(c,env);return uid?requestReadStore(c).get('user:'+uid,null):null}
   app.use('/api/*',async(c,next)=>{
     await next()
@@ -1128,7 +1129,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
   // Registration takes its lock inside the handler, after validation and
   // read-only setup. Other task mutations retain their existing shared lock.
   app.use('/api/tasks/*', async (c, next) => {
-    if (c.req.path === '/api/tasks' || !['POST', 'PATCH', 'DELETE'].includes(c.req.method)) return next()
+    if (c.req.path === '/api/tasks' || isPickupRequest(c) || !['POST', 'PATCH', 'DELETE'].includes(c.req.method)) return next()
     return withTaskMutation(store, env.BUILDING_ID, next)
   })
   app.use('/api/user/*',async(c,next)=>{
@@ -1145,11 +1146,15 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
   app.use('/api/*', async (c, next) => {
     const { method, path } = c.req
     const read = method === 'GET' || method === 'HEAD'
-    if ((read && staticRuntimeReads.has(path)) ||
+    if (isPickupRequest(c) || (read && staticRuntimeReads.has(path)) ||
         (method === 'POST' && nativeAuthWrites.has(path)) ||
         ((read || method === 'PUT') && /^\/api\/mobile\/installations\/[^/]+$/.test(path))) return next()
     const source = requestReadStore(c)
     const site = getSiteConfig(source)
+    if (read && path.startsWith('/api/messages')) {
+      c.set('communitySiteSnapshot', await site)
+      return next()
+    }
     const [snapshot, runtime] = await Promise.all([site, loadSiteRuntime(source, baseEnv, site)])
     if (source !== store) c.set('communitySiteSnapshot', snapshot)
     env = { ...runtime, SITE_BUILDINGS: snapshot.buildings }
@@ -1918,44 +1923,43 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
   // 确认已取衣：把任务标成完成，并清掉这台机器的占用登记
   // （和删除的区别：保留一条「已完成」记录，用户能看到自己什么时候取的）
   app.post('/api/tasks/:id/take', async (c) => {
-    try {
-      const userId = await bearerUser(c, env)
-      if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
-      const id = c.req.param('id')
-      const taskKey = `tasks:${userId}`
-      const list = await store.get(taskKey, [])
+    const userId = await bearerUser(c, baseEnv)
+    if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
+    const user = await requestReadStore(c).get(`user:${userId}`, null)
+    if (!user || user.disabled || user.blocked) return apiErr('forbidden', '当前账号无法确认取衣', 403)
+    const id = c.req.param('id')
+    const buildingId = baseEnv.BUILDING_ID || 'b1'
+    const taskKey = `tasks:${userId}`
+    const occupancyKey = `occupancy:${buildingId}`
+    const receipt = await withTaskMutation(store, buildingId, async () => {
+      const [list, occupancy] = await Promise.all([store.get(taskKey, []), store.get(occupancyKey, {})])
       const records = Array.isArray(list) ? list : []
       const existing = records.find((record) => record?.id === id)
-      if (!existing) return apiErr('not_found', '任务不存在或已删除', 404)
+      if (!existing) return null
 
       const changed = !existing.done || !existing.takenAt
       const task = changed ? { ...existing, done: true, takenAt: existing.takenAt || nowISO() } : existing
       if (changed) await store.put(taskKey, records.map((record) => record === existing ? task : record))
 
       // A retry can release the original occupancy after a partial write.
-      let released = false
-      if (task.machineId) {
-        const occupancyKey = `occupancy:${env.BUILDING_ID || 'b1'}`
-        const occupancy = await store.get(occupancyKey, {})
-        if (ownsTaskOccupancy(occupancy?.[task.machineId], task, userId)) {
-          const next = { ...occupancy }
-          delete next[task.machineId]
-          await store.put(occupancyKey, next)
-          released = true
-        }
+      const released = task.machineId && ownsTaskOccupancy(occupancy?.[task.machineId], task, userId)
+      if (released) {
+        const next = { ...occupancy }
+        delete next[task.machineId]
+        await store.put(occupancyKey, next)
       }
-
-      if (changed || released) await persistAudit(c, audit(store, {
+      return { task, changed: changed || released }
+    })
+    if (!receipt) return apiErr('not_found', '任务不存在或已删除', 404)
+    const { task } = receipt
+    if (receipt.changed) await persistAudit(c, audit(store, {
         type: 'task',
         action: '确认已取衣',
         actorId: userId,
         target: task.machineName || task.machineId,
         detail: { taskId: task.id, endAt: task.endAt },
-      }))
-      return json({ ok: true, task })
-    } catch (e) {
-      return apiErr('internal', '服务暂时不可用，请稍后重试', 500)
-    }
+    }))
+    return json({ ok: true, task })
   })
 
   // 登记任务（鉴权）

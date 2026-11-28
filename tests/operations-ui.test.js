@@ -282,3 +282,51 @@ test('目录头像摘要不依赖机器接口，旧账号目录响应不能覆�
   assert.equal(panel.channelRows.value[0].unreadCount,4)
   assert.match(panel.channelsError.value,/保留当前目录/)
 })
+
+test('频道首次加载和错误不会误报为空，真实空列表只在读取成功后显示', async () => {
+  let directory = deferred(), page = deferred()
+  const dorm = reactive({ code: 'guiyuan', buildings: [] })
+  const route = reactive({ query: {} })
+  const panel = evaluate(sources.messages, { ...messageBase, useRoute: () => route, useRouter: () => ({ push() {}, replace() {} }),
+    useDormStore: () => dorm, useUserStore: () => loggedInUser(),
+    api: path => path === '/api/messages/channels' ? directory.promise : path.includes('/notices') ? Promise.resolve({ notices: [] }) : page.promise,
+  }, '({ channels, channelsError, channelPreview, loadChannels, load, messages, messagesPlaceholder, error })')
+  assert.equal(panel.channelPreview(panel.channels.value[0]), '正在读取最新消息…')
+  const initialDirectory = panel.loadChannels()
+  directory.reject(new Error('offline'))
+  await initialDirectory
+  assert.equal(panel.channelPreview(panel.channels.value[0]), '暂时无法读取最新消息')
+
+  directory = deferred()
+  const loadedDirectory = panel.loadChannels()
+  directory.resolve({ channels: [{ code: 'public', name: '公共频道' }] })
+  await loadedDirectory
+  assert.match(panel.channelPreview(panel.channels.value[0]), /暂无消息/)
+  route.query = { channel: 'public' }
+  await nextTick()
+  assert.equal(panel.messagesPlaceholder.value, '正在加载消息…')
+  const invalid = panel.load()
+  page.resolve({})
+  await invalid
+  assert.equal(panel.messagesPlaceholder.value, '')
+  assert.match(panel.error.value, /未返回/)
+
+  page = deferred()
+  const confirmedEmpty = panel.load()
+  assert.equal(panel.messagesPlaceholder.value, '正在加载消息…')
+  page.resolve({ messages: [] })
+  await confirmedEmpty
+  assert.match(panel.messagesPlaceholder.value, /还没有留言/)
+
+  page = deferred()
+  const populated = panel.load()
+  page.resolve({ messages: [{ id: 'current' }] })
+  await populated
+  page = deferred()
+  const refreshing = panel.load()
+  assert.equal(panel.messagesPlaceholder.value, '')
+  assert.equal(panel.messages.value[0].id, 'current')
+  page.reject(new Error('offline'))
+  await refreshing
+  assert.equal(panel.messages.value[0].id, 'current')
+})

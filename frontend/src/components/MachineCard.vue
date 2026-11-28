@@ -1,11 +1,18 @@
 <template>
   <article class="machine-card" :class="'is-' + status.cls">
-    <button class="mc-open" type="button" @click="open = true" :aria-label="`查看${machine.displayName || machine.name || '机器'}详情`">
-      <span class="mc-device" aria-hidden="true"><svg viewBox="0 0 40 48"><rect x="3" y="2" width="34" height="44" rx="5"/><path d="M3 12h34M8 7h8"/><circle cx="20" cy="28" r="11"/><path d="M13 29c4-6 10 6 14-1"/><circle cx="29" cy="7" r="1"/></svg><span v-if="slot" class="mc-slot">{{ slot }}</span></span>
-      <span class="mc-body"><span class="mc-kind">{{ machine.kind === 'dryer' ? '烘干机' : '洗衣机' }}</span><strong class="mc-name">{{ machine.displayName || machine.remarkName || machine.name || machine.id }}</strong><small v-if="machine.originalName && machine.originalName !== (machine.displayName || machine.remarkName || machine.name)" class="mc-original">{{ machine.originalName }}</small><span class="mc-time">{{ detail }}</span></span>
-      <span class="mc-state" :class="'state-' + status.cls"><i aria-hidden="true"></i>{{ status.text }}</span>
+    <button class="mc-open" type="button" @click="open = true" :aria-label="`查看${machine.displayName || machine.remarkName || machine.name || '机器'}详情，${status.text}，${detail}`">
+      <span class="mc-meta">
+        <span>{{ machine.kind === 'dryer' ? '烘干机' : '洗衣机' }}</span>
+        <span v-if="slot" class="mc-slot">{{ slot }}</span>
+      </span>
+      <strong class="mc-name">{{ machine.displayName || machine.remarkName || machine.name || machine.id }}</strong>
+      <small v-if="machine.originalName && machine.originalName !== (machine.displayName || machine.remarkName || machine.name)" class="mc-original">{{ machine.originalName }}</small>
+      <span class="mc-foot">
+        <span class="mc-state" :class="'state-' + status.cls"><i aria-hidden="true"></i>{{ status.text }}</span>
+        <span v-if="machine.state !== 'idle' || machine.registrationPending || machine.suspectedUncollected" class="mc-time">{{ detail }}</span>
+      </span>
     </button>
-    <button class="mc-favorite" type="button" :aria-label="`${favorite ? '取消收藏' : '收藏'}${machine.displayName || machine.name || '机器'}`" :aria-pressed="favorite" :disabled="favoriteSaving || !userStore.ready" @click="toggleFavorite"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/></svg></button>
+    <button class="mc-favorite" type="button" :aria-label="`${favorite ? '取消收藏' : '收藏'}${machine.displayName || machine.name || '机器'}`" :aria-pressed="favorite" :disabled="favoriteSaving || !userStore.ready" @click="toggleFavorite"><van-icon :name="favorite ? 'star' : 'star-o'" aria-hidden="true" /></button>
   </article>
   <van-popup v-model:show="open" position="bottom" round closeable><section class="machine-detail"><h2><span v-if="slot" class="mc-slot">{{ slot }}</span>{{ machine.displayName || machine.remarkName || machine.name }}</h2><p v-if="machine.originalName && machine.originalName !== (machine.displayName || machine.remarkName || machine.name)" class="mc-original">原名：{{ machine.originalName }}</p><p :class="'state-' + status.cls">{{ status.text }} · {{ detail }}</p><p v-if="machine.suspectedUncollected" class="text-dim">根据登记时间推测，衣物是否仍在桶内请到现场确认。</p><CareRecord :record="care" /><van-button block type="primary" :disabled="!userStore.ready || ['faulty','unknown'].includes(machine.state)" @click="register">{{ machine.state === 'idle' ? '开始使用并登记' : '登记这台机器的洗衣' }}</van-button><van-button block plain :loading="favoriteSaving" :disabled="!userStore.ready" @click="toggleFavorite">{{favorite?'取消收藏':'收藏为常用机器'}}</van-button><p v-if="!userStore.ready" class="text-dim">账号恢复后即可登记、收藏和排队。</p><QueuePanel v-if="userStore.ready" :machine="machine" :dorm="dorm.code" /><SocialInbox v-if="userStore.ready && occupantId" :to-user-id="occupantId" :machine-id="String(machine.id)" /><van-button block plain @click="$router.push({path:'/board',query:{channel:dorm.code,machine:machine.id}})">查看这台机器的留言</van-button><MachineFeedback v-if="userStore.ready" :machine-id="String(machine.id)" :name="machine.displayName || machine.remarkName || machine.name" /></section></van-popup>
 </template>
@@ -35,5 +42,94 @@ watch(open, async (value) => { occupantId.value = ''; care.value = null; if (!va
 function register() { if(!userStore.ready)return;open.value = false; router.push({path:'/task',query:{machine:props.machine.id}}) }
 </script>
 <style scoped>
-.machine-card{position:relative;border-radius:16px;background:var(--bg-card);border:1px solid var(--border);color:var(--text);min-width:0;overflow:hidden}.mc-open{display:grid;grid-template-columns:48px minmax(0,1fr) auto;align-items:center;gap:14px;width:100%;min-height:112px;padding:14px 56px 14px 14px;background:transparent;border:0;color:inherit;text-align:left;cursor:pointer;font:inherit}.mc-open:focus-visible,.mc-favorite:focus-visible{outline:2px solid var(--primary);outline-offset:-3px}.mc-device{position:relative;display:grid;place-items:center;align-self:center;width:44px;height:60px;color:var(--text-dim)}.mc-device>svg{width:36px;height:44px;fill:none;stroke:currentColor;stroke-width:1.4}.mc-slot{display:inline-grid;place-items:center;min-width:23px;min-height:20px;padding:0 5px;border-radius:6px;background:color-mix(in srgb,var(--primary) 13%,var(--bg-card));color:var(--primary);font-size:11px;font-weight:750;font-variant-numeric:tabular-nums;white-space:nowrap}.mc-device>.mc-slot{position:absolute;bottom:-5px}.mc-body{display:grid;min-width:0;gap:4px}.mc-kind{font-size:11px;color:var(--text-dim);line-height:1.4}.mc-name{font-size:16px;font-weight:650;line-height:1.5;overflow-wrap:anywhere}.mc-original{font-size:11px;color:var(--text-dim);line-height:1.5;overflow-wrap:anywhere}.mc-time{font-size:12px;line-height:1.6;color:var(--text-dim);overflow-wrap:anywhere}.mc-state{display:inline-flex;align-items:center;gap:6px;justify-self:end;max-width:110px;font-size:12px;line-height:1.5;font-weight:600;text-align:right;overflow-wrap:anywhere}.mc-state i{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}.mc-favorite{position:absolute;right:8px;top:50%;transform:translateY(-50%);width:44px;height:44px;display:grid;place-items:center;background:transparent;border:0;border-radius:12px;color:var(--text-dim);cursor:pointer}.mc-favorite svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6}.mc-favorite[aria-pressed=true]{color:#d6a34e}.mc-favorite[aria-pressed=true] svg{fill:currentColor}.mc-favorite:disabled{opacity:.5;cursor:wait}.is-idle .mc-device{color:var(--st-idle)}.machine-detail{max-height:85dvh;overflow-y:auto;overscroll-behavior:contain;box-sizing:border-box;padding:24px 18px calc(30px + env(safe-area-inset-bottom));background:var(--bg-card);color:var(--text)}.machine-detail h2{font-size:19px;margin-right:24px;line-height:1.5;overflow-wrap:anywhere}.machine-detail>.van-button{margin-top:12px;white-space:normal;min-height:44px;height:auto;padding-block:10px}@media(max-width:350px){.mc-open{grid-template-columns:40px minmax(0,1fr);gap:8px 12px;padding:15px 54px 15px 12px;min-height:116px}.mc-device{grid-row:1/3;width:40px}.mc-body{grid-column:2}.mc-state{grid-column:2;justify-self:start;max-width:100%;font-size:12px}.mc-name{font-size:15px}.mc-device>svg{width:32px}.mc-favorite{right:5px}}@media(min-width:720px){.mc-open{padding-block:20px;min-height:126px}}
+.machine-card {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-card);
+  color: var(--text);
+}
+.mc-open {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  min-height: 124px;
+  padding: 12px;
+  gap: 4px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.mc-open:focus-visible, .mc-favorite:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.mc-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-height: 24px;
+  max-width: calc(100% - 32px);
+  gap: 4px 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.mc-slot {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  min-height: 19px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--primary) 13%, var(--bg-card));
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mc-name { width: 100%; font-size: 16px; font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
+.mc-original { width: 100%; color: var(--text-dim); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.mc-open .mc-original { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-foot { display: flex; width: 100%; align-items: baseline; flex-wrap: wrap; margin-top: auto; padding-top: 6px; gap: 3px 8px; }
+.mc-state { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 650; line-height: 1.5; }
+.mc-state i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.mc-time { min-width: 0; color: var(--text-dim); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.mc-favorite {
+  position: absolute;
+  inset: 0 1px auto auto;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 20px;
+}
+.mc-favorite[aria-pressed=true] { color: #d6a34e; }
+.mc-favorite:disabled { opacity: .5; cursor: wait; }
+.machine-detail {
+  max-height: 85dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+  padding: 24px 18px calc(30px + env(safe-area-inset-bottom));
+  background: var(--bg-card);
+  color: var(--text);
+}
+.machine-detail h2 { display: flex; align-items: baseline; gap: 8px; font-size: 19px; margin-right: 24px; line-height: 1.5; overflow-wrap: anywhere; }
+.machine-detail > .van-button { margin-top: 12px; white-space: normal; min-height: 44px; height: auto; padding-block: 10px; }
+@media (max-width: 350px) {
+  .mc-open { padding-inline: 9px; }
+  .mc-name { font-size: 15px; }
+}
 </style>
