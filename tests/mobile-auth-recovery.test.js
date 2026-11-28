@@ -117,7 +117,7 @@ test('exchange errors produce fixed stage and category in event-linked audit wit
     ['exchange_challenge_read', 'mobile_store_unavailable'],
     ['exchange_challenge_consume', 'mobile_store_unavailable'],
     ['exchange_identity', 'mobile_auth_unavailable'],
-    ['exchange_account', 'edge_kv_read_failed'],
+    ['exchange_account', 'site_store_unavailable'],
     ['exchange_session_save', 'mobile_store_unavailable'],
   ]) {
     const f = await fixture(), row = await f.createChallenge(), originalGet = f.atomicStore.get, originalCas = f.atomicStore.compareAndSet, originalUserGet = f.store.get
@@ -131,7 +131,7 @@ test('exchange errors produce fixed stage and category in event-linked audit wit
     }
     if (stage === 'exchange_identity') f.options.identityProvider.exchange = async () => { throw Error('private-provider-body-and-secret') }
     if (stage === 'exchange_account') f.store.get = async (...args) => {
-      if (args[0].startsWith('userByUnionId:')) throw Object.assign(Error('private-provider-body-and-secret'), { code: 'edge_kv_read_failed' })
+      if (args[0].startsWith('userByUnionId:')) throw Object.assign(Error('private-provider-body-and-secret'), { code: 'site_store_unavailable' })
       return originalUserGet(...args)
     }
     const result = await authApp(f).request('/api/mobile/auth/exchange', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(exchangeBody(row)) })

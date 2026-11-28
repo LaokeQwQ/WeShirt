@@ -27,7 +27,7 @@ Inject server variables through the platform's supported function configuration.
 
 Apply `cloudbase/migrations/20261128134500_site_store.sql` in CloudBase PostgreSQL. Run `npm run build:site-store` and install production dependencies in `.cloudbase-build/weshirt-site-store/`. Deploy that directory as a Node Event function with entrypoint `index.main` in the same environment. Set `CLOUDBASE_ENV_ID` and a separate random `SITE_STORE_SECRET` in the cloud function. Configure its HTTPS endpoint as `SITE_STORE_URL` and use the same `SITE_STORE_SECRET` in Edge Functions. Run the authenticated `/api/debug/storage` twice and verify `store.kind` is `cloudbase-postgres` and `persistent` is `true`. Keep the bridge credential server-side. Missing configuration returns a traceable 503.
 
-When upgrading an existing site, freeze old API writes and let in-flight requests finish. Export the source data, import it into PostgreSQL, then verify the records and critical APIs before resuming traffic. Use separate storage for production and previews. A deployment with `SITE_STORE_MIGRATION_MODE=freeze` returns 503. Omit the setting during normal operation.
+When upgrading an existing site, schedule a maintenance window. Suspend writes and let in-flight requests complete before exporting data. After importing into PostgreSQL, verify the records and critical APIs before resuming traffic. Use separate storage for production and previews.
 
 ### 2. CloudBase sync trigger
 

@@ -25,7 +25,7 @@
 
 在 CloudBase PostgreSQL 中应用 `cloudbase/migrations/20261128134500_site_store.sql`。执行 `npm run build:site-store`，在 `.cloudbase-build/weshirt-site-store/` 安装生产依赖后，将该目录部署为同一环境的 Node Event 函数，入口为 `index.main`。为函数配置 `CLOUDBASE_ENV_ID` 和独立随机的 `SITE_STORE_SECRET`。在 Edge Functions 配置桥接 HTTPS 地址 `SITE_STORE_URL` 和同一份 `SITE_STORE_SECRET`。登录后台连续两次运行 `/api/debug/storage`，确认 `store.kind` 为 `cloudbase-postgres` 且 `persistent` 为 `true`。桥接凭据仅限服务端，配置缺失时 API 返回可追踪的 503。
 
-从旧版升级时，先冻结全部旧 API 写入并等待在途请求结束，然后导出旧存储，导入 PostgreSQL，核对记录和关键业务接口后恢复流量。生产与预览分别使用独立存储。冻结部署通过 `SITE_STORE_MIGRATION_MODE=freeze` 返回 503，正常部署省略此变量。
+从旧版升级时，安排维护窗口并暂停旧 API 写入，等在途请求结束后导出数据。导入 PostgreSQL 后核对记录和关键业务接口，再恢复流量。生产与预览分别使用独立存储。
 
 ### 2. CloudBase 同步触发器
 

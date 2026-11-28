@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createApp, runSync } from '../server/app.js'
-import { createMemoryStore, createEdgeKVStore } from '../packages/core/store.js'
+import { createMemoryStore } from '../packages/core/store.js'
+import { createRemoteSiteStore } from '../packages/core/site-store.js'
 import { runOperations } from '../packages/core/operations.js'
 
 const env = { AUTH_SECRET: 'snapshot-freshness-test-secret-at-least-32', BUILDING_ID: 'b1', HAIER_MODE: 'mock' }
@@ -69,10 +70,18 @@ test('public board has server freshness and prevents browser/CDN stale caching w
   assert.equal(data.freshness.eventId, 'evt_123456789012345678901234')
 })
 
-test('a second warm edge reader immediately observes task, queue and occupancy writes from another runtime', async () => {
+test('a second warm edge reader observes task, queue and occupancy writes through CloudBase', async () => {
   const values = new Map()
-  const binding = { get: async key => values.get(key) ?? null, put: async (key, value) => { values.set(key, value) } }
-  const writer = createEdgeKVStore(binding), reader = createEdgeKVStore(binding)
+  const connect = () => createRemoteSiteStore({
+    url: 'https://storage.example/site-store', secret: 'storage-freshness-test-secret-at-least-32',
+    fetch: async (_url, options) => {
+      const { op, key, value } = JSON.parse(options.body)
+      if (op === 'put') values.set(key, value)
+      const result = op === 'put' ? true : { found: values.has(key), value: values.get(key) }
+      return Response.json({ protocolVersion: 1, ok: true, result })
+    },
+  })
+  const writer = connect(), reader = connect()
   for (const key of ['tasks:member', 'occupancy:b1', 'queue:b1', 'faults:b1']) {
     await writer.put(key, { revision: 1 }); await reader.get(key)
     await writer.put(key, { revision: 2 })

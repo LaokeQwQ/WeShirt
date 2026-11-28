@@ -1817,7 +1817,7 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       )
     } catch (e) {
       recordRequestFailure(c, e)
-      if (e?.code === 'site_store_unavailable' || e?.code === 'edge_kv_read_failed') {
+      if (e?.code === 'site_store_unavailable') {
         const now = Date.now()
         const recent = board => {
           const age = now - Date.parse(board?.updatedAt || '')

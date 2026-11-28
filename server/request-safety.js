@@ -28,7 +28,6 @@ function responseFrom(snapshot) {
 
 export function recordRequestFailure(c, error) {
   const categories = {
-    edge_kv_read_failed: 'edge_kv_read_failed',
     machine_store_unavailable: 'machine_store_unavailable',
     site_store_unavailable: 'site_store_unavailable',
   }
