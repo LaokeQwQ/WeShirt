@@ -148,8 +148,11 @@ export function ingestRows(machines) {
     const categoryCode = normalizeMachineCategory(machine.categoryCode)
     const cleanLabel=value=>typeof value==='string'?value.replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,100):''
     const originalName=cleanLabel(machine.originalName),remarkName=cleanLabel(machine.remarkName)
+    const cycleId = typeof machine.cycleOrder === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(machine.cycleOrder) ? machine.cycleOrder : null
+    const startAt = Date.parse(machine.platformStartedAt || '')
     return { id, name: String(machine.name ?? '').slice(0, 64), floorCode: String(machine.floorCode ?? '').slice(0, 8), state, finishTime, ...(categoryCode ? { categoryCode } : {}),
       ...(originalName&&originalName!==machine.name?{originalName}:{}),...(remarkName?{remarkName}:{}),
+      ...(cycleId ? { cycleId } : {}), ...(Number.isFinite(startAt) ? { startTime: new Date(startAt).toISOString() } : {}),
       ...(machine.queryFailed===true?{queryFailed:true,queryStatus:Number.isInteger(machine.queryStatus)?machine.queryStatus:0}:{}) }
   })
 }

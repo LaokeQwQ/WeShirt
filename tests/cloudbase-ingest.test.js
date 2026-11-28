@@ -45,6 +45,15 @@ test('cloud ingestion preserves original and remark labels plus query-failure pr
  assert.equal(rows[0].originalName,'原名');assert.equal(rows[0].remarkName,'一楼备注');assert.equal(rows[0].queryStatus,405)
 })
 
+test('cloud ingestion forwards only validated optional cycle evidence', () => {
+  const safe = ingestRows([{ id: 'fixture', rawState: 2, cycleOrder: 'fixture-order', platformStartedAt: '2026-11-09T08:00:00.000Z' }])[0]
+  assert.equal(safe.cycleId, 'fixture-order')
+  assert.equal(safe.startTime, '2026-11-09T08:00:00.000Z')
+  const unsafe = ingestRows([{ id: 'fixture', rawState: 2, cycleOrder: 'payload with unsupported characters', platformStartedAt: 'invalid' }])[0]
+  assert.equal(Object.hasOwn(unsafe, 'cycleId'), false)
+  assert.equal(Object.hasOwn(unsafe, 'startTime'), false)
+})
+
 test('complete real core pagination is ingested with raw state and ISO finish time; credentials stay upstream', async () => {
   const originalFetch = globalThis.fetch
   const mock = fixture({ handle: ({ url, body }) => {
