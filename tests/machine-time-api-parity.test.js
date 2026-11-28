@@ -16,7 +16,7 @@ async function fixture(t){
  await store.put('mapping:b1',{mapping:{'1':'m'}})
  await store.put('machines:b1',{board:{buildingId:'b1',updatedAt:iso(T),floors:[{code:'1F',machines:[{id:'m',name:'原洗衣机名',state:'occupied',upstreamState:'occupied',rawState:2,finishAt:iso(T+6*M)}]}]}})
  await store.put('tasks:owner',[{id:'old',machineId:'m',machineName:'登记机器',startAt:iso(T-M),endAt:iso(T+3*M)}])
- await store.put('occupancy:b1',{m:{userId:'owner',taskId:'old'}})
+ await store.put('occupancy:b1',{m:{userId:'owner',taskId:'old',startAt:iso(T-M),endAt:iso(T+3*M)}})
  const app=createApp({store,env}),token=await issueToken('owner',env.AUTH_SECRET)
  const get=async(path,admin=false)=>{const response=await app.request(path,{headers:admin?{'x-admin-token':env.ADMIN_TOKEN}:{authorization:'Bearer '+token}});const data=await response.json();assert.equal(response.status,200,JSON.stringify(data));return data}
  return {store,get,env}
@@ -34,6 +34,9 @@ test('tasks, public machine board and admin use one calibrated platform deadline
   assert.equal(admin.finishAt,task.endAt);assert.equal(admin.leftMin,task.leftMin)
   assert.equal(machine.platformFinishAt,iso(T+6*M));assert.equal(admin.platformFinishAt,machine.platformFinishAt)
   assert.equal(task.registrationEndAt,iso(T+3*M))
+  assert.equal(task.currentTask,true)
+  assert.equal(task.machineState,'occupied')
+  assert.equal(task.timingObservedAt,machine.timeObservedAt)
  }
  await updateCalibrationSettings(store,'b1',()=>({document:{machines:{m:{offsetMinutes:-2}}}}))
  assert.equal((await get('/api/tasks')).tasks[0].leftMin,4)
@@ -48,8 +51,39 @@ test('a previous task cannot inherit a new occupancy deadline after another regi
  const tasks=(await get('/api/tasks')).tasks
  assert.equal(tasks.find(x=>x.id==='old').endAt,iso(T+3*M));assert.equal(tasks.find(x=>x.id==='old').timingSource,'user_report')
  assert.equal(tasks.find(x=>x.id==='new').endAt,iso(T+6*M));assert.equal(tasks.find(x=>x.id==='new').timingSource,'upstream')
+ assert.equal(tasks.find(x=>x.id==='old').currentTask,false)
+ assert.equal(tasks.find(x=>x.id==='old').timingObservedAt,null)
+ assert.equal(tasks.find(x=>x.id==='new').currentTask,true)
  await store.put('occupancy:b1',{m:{userId:'someone_else',taskId:'other'}})
  assert.equal((await get('/api/tasks')).tasks.find(x=>x.id==='new').endAt,iso(T+30*M))
+})
+
+test('a cycle that runs past the local registration time adopts the longer refreshed platform deadline',async t=>{
+ const {store,get}=await fixture(t)
+ t.mock.timers.setTime(T+9*M)
+ await store.put('meta:sync',{lastAttemptAt:T+9*M})
+ const earlier=(await get('/api/tasks')).tasks[0]
+ assert.equal(earlier.leftMin,0)
+ const entry=await store.get('machines:b1')
+ entry.board.updatedAt=iso(T+9*M)
+ entry.board.floors[0].machines[0].finishAt=iso(T+35*M)
+ await store.put('machines:b1',entry)
+ const machine=(await get('/api/machines')).board.floors[0].machines[0]
+ const next=(await get('/api/tasks')).tasks[0]
+ assert.equal(next.leftMin,26)
+ assert.equal(next.endAt,machine.finishAt)
+ assert.equal(next.timingObservedAt,machine.timeObservedAt)
+ assert.equal(next.completionConfirmed,false)
+ assert.equal(next.takeState,'waiting')
+ assert.equal((await get('/api/occupancy')).occupancy.m.suspectedUncollected,false)
+ await store.put('occupancy:b1',{m:{userId:'owner'}})
+ const legacy=(await get('/api/tasks')).tasks[0]
+ assert.equal(legacy.currentTask,false)
+ assert.equal(legacy.timingObservedAt,null)
+ Object.assign(entry.board.floors[0].machines[0],{state:'idle',upstreamState:'idle',rawState:1,finishAt:null})
+ await store.put('machines:b1',entry)
+ await store.put('occupancy:b1',{m:{userId:'owner',taskId:'old',endAt:iso(T+3*M)}})
+ assert.equal((await get('/api/occupancy')).occupancy.m.suspectedUncollected,true)
 })
 
 test('a new registration on an idle platform remains pending while a confirmed real finish beats a late local registration timer',async t=>{

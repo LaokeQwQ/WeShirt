@@ -5,6 +5,8 @@ import { DORM_BUILDINGS, normalizeDormBuilding } from '../packages/core/building
 import { getUserPermissions } from '../packages/core/permissions.js'
 import { applyRegisteredAvailability } from '../packages/core/availability.js'
 import { taskLifecycle } from '../packages/core/task-retention.js'
+import { verifyRequestMobileAccess } from '../packages/core/auth.js'
+import { recordRequestFailure } from './request-safety.js'
 
 export { createMobileAuth }
 const idOK = value => typeof value === 'string' && /^[A-Za-z0-9_-]{16,80}$/.test(value)
@@ -19,6 +21,7 @@ export function registerMobileRoutes(app, { store, env = {}, authenticate, getBo
     catch (error) {
       const diagnostic = mobileAuthFailureDiagnostics(error)
       if (diagnostic) { c.set('authStage', diagnostic.stage); c.set('failureCategory', diagnostic.category) }
+      else if (!(error instanceof MobileError)) recordRequestFailure(c, error)
       const known = error instanceof MobileError
       return c.json({ error: { code: known ? error.code : error?.code === 'body_too_large' ? 'too_large' : 'mobile_unavailable', message: known ? error.message : '移动服务暂不可用，请稍后重试' } }, known ? error.status : error?.code === 'body_too_large' ? 413 : 503, { 'Cache-Control': 'no-store' })
     }
@@ -43,8 +46,8 @@ export function registerMobileRoutes(app, { store, env = {}, authenticate, getBo
     const user = await userContext(c), installationId = c.req.param('installationId')
     if (!idOK(installationId)) fail('bad_param', '设备编号无效', 400)
     const bearer = (c.req.header('authorization') || '').match(/^Bearer\s+(ma1\..+)$/i)
-    const mobileSession = bearer ? await auth.verifyAccessContext(bearer[1]) : null
-    if (bearer && (!mobileSession || mobileSession.installationId !== installationId)) fail('installation_not_owned', '此登录会话不能修改其他设备', 403)
+    const mobileSession = bearer ? await verifyRequestMobileAccess(c, auth) : null
+    if (bearer && (!mobileSession || mobileSession.userId !== user.id || mobileSession.installationId !== installationId)) fail('installation_not_owned', '此登录会话不能修改其他设备', 403)
     if (!auth.atomicReady) fail('mobile_push_not_configured', '原生推送尚未完成配置', 503)
     const key = 'mobile:installation:' + installationId, row = await atomicStore.get(key)
     if (row?.value.userId && row.value.userId !== user.id) fail('installation_not_owned', '此设备绑定不属于当前账号', 403)

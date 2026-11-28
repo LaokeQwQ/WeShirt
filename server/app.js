@@ -37,6 +37,7 @@ import { registerClientPushTestRoute } from './client-push-test.js'
 import { registerAnnouncementRoutes } from './announcements.js'
 import { registerAssistantRoutes, pruneAssistantStorage } from './assistant.js'
 import { registerSiteRoutes,checkSiteAdmin,getSiteConfig,loadSiteRuntime } from './site.js'
+import { upstreamQueryFailure } from '../packages/core/upstream-query.js'
 import { registerSocialRoutes } from './social.js'
 import { registerOperationsRoutes } from './operations.js'
 import { registerFavoriteRoutes } from './favorites.js'
@@ -1073,7 +1074,23 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
   })
   const isHighest = async (c) => !c.get('temporaryAdminAccess') && (await checkSuperAdmin(c, env) || (await getUserIdentity(store, await bearerUser(c, env))).role === 'super')
   const baseEnv={...env}
-  app.use('/api/*',async(c,next)=>{const source=requestReadStore(c),site=await getSiteConfig(source);if(source!==store)c.set('communitySiteSnapshot',site);env={...await loadSiteRuntime(source,baseEnv),SITE_BUILDINGS:site.buildings};await next()})
+  // These handlers use deployment configuration or read the site themselves.
+  // They do not depend on mutable machine settings or web DingTalk credentials.
+  const staticRuntimeReads = new Set(['/api/health', '/api/site', '/api/mobile/config', '/api/auth/me', '/api/user/permissions', '/api/assistant/history'])
+  const nativeAuthWrites = new Set(['/api/mobile/auth/challenge', '/api/mobile/auth/exchange', '/api/mobile/auth/refresh', '/api/mobile/auth/logout'])
+  app.use('/api/*', async (c, next) => {
+    const { method, path } = c.req
+    const read = method === 'GET' || method === 'HEAD'
+    if ((read && staticRuntimeReads.has(path)) ||
+        (method === 'POST' && nativeAuthWrites.has(path)) ||
+        ((read || method === 'PUT') && /^\/api\/mobile\/installations\/[^/]+$/.test(path))) return next()
+    const source = requestReadStore(c)
+    const site = getSiteConfig(source)
+    const [snapshot, runtime] = await Promise.all([site, loadSiteRuntime(source, baseEnv, site)])
+    if (source !== store) c.set('communitySiteSnapshot', snapshot)
+    env = { ...runtime, SITE_BUILDINGS: snapshot.buildings }
+    await next()
+  })
 
 
   // 看板数据超过这个时间就顺手刷一次，避免「后台每分钟才同步」造成的延迟。
@@ -1724,17 +1741,19 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const userId = await bearerUser(c, env)
       if (!userId) return apiErr('unauthorized', '登录过期了，刷新一下', 401)
       const bid = env.BUILDING_ID || 'b1'
-      const [list, savedMapping, cachedBoard, calibration] = await Promise.all([
+      const [list, savedMapping, cachedBoard, calibration, taskOccupancy, health] = await Promise.all([
         pruneUserTasks(store, env.BUILDING_ID, userId),
         store.get(`mapping:${env.BUILDING_ID || 'b1'}`, null),
         store.get(`machines:${env.BUILDING_ID || 'b1'}`, null),
         readCalibrationSettings(store,bid),
+        store.get(`occupancy:${bid}`, {}),
+        store.get(`operations:health:${bid}`, {}),
       ])
       // A post-registration reload must return the saved task immediately;
       // stale upstream synchronization and notification delivery run separately.
       kickSync(c, cachedBoard)
-      const taskOccupancy = await store.get(`occupancy:${bid}`, {})
-      const registeredBoard = applyRegisteredAvailability(cachedBoard?.board, { occupancy:taskOccupancy, tasksByUser:new Map([[userId,list]]) })
+      const healthyBoard = cachedBoard?.board && applyMachineHealth(cachedBoard.board, health)
+      const registeredBoard = applyRegisteredAvailability(healthyBoard, { occupancy:taskOccupancy, tasksByUser:new Map([[userId,list]]) })
       const calibratedBoard = projectCalibratedBoard(registeredBoard, calibration, { mapping: savedMapping?.mapping || {} })
       const boardMachines = calibratedBoard?.floors?.flatMap((f) => f.machines) || []
       const now = nowISO()
@@ -1742,7 +1761,11 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const tasks = await Promise.all(
         (Array.isArray(list) ? list : []).map(async (t) => {
           const machine = boardMachines.find(m => String(m.id) === String(t.machineId))
-          const currentTask = !t.done && ownsTaskOccupancy(taskOccupancy?.[t.machineId], t, userId)
+          const holder = taskOccupancy?.[t.machineId]
+          const currentTask = !t.done && !t.takenAt && ownsTaskOccupancy(holder, t, userId)
+          // Old occupancy rows without a cycle ID or start time are tolerated by
+          // the server, but can't authorize using a newer public clock on clients.
+          const matchedCycle = currentTask && Boolean(holder.taskId || (holder.startAt && t.startAt))
           const time = resolveMachineTime(currentTask ? machine || {} : {}, { task: t, now: nowMs, snapshotAt: calibratedBoard?.updatedAt })
           const endAt = time.deadline || t.endAt
           const endMs = Date.parse(endAt || '')
@@ -1755,6 +1778,8 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
             machineName: t.machineName,
             kind: machineKind(boardMachines.find((m) => String(m.id) === String(t.machineId)) || { id: t.machineId, name: t.machineName, kind: t.kind }, savedMapping?.mapping || {}),
             mode:t.mode||'duration', minutes:t.minutes, timingSource:time.source, estimated:time.source!=='upstream',
+            currentTask:matchedCycle, machineState:matchedCycle ? machine?.state || 'unknown' : 'unknown',
+            timingObservedAt:matchedCycle && machine ? time.observedAt : null,
             timeStale:time.stale, completionConfirmed:confirmed, platformFinishAt:time.platformFinishAt,
             timeOffsetMinutes:time.timeOffsetMinutes, registrationEndAt:t.endAt,
             ...(t.program==='self_clean'?{program:'self_clean'}:{}),
@@ -2148,16 +2173,20 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
       const dorm=c.req.query('dorm')||''
       if(dorm&&!normalizeDormBuilding(dorm,env.SITE_BUILDINGS))return apiErr('bad_param','住宿楼无效')
       const [occ,entry,mapping]=await Promise.all([store.get(`occupancy:${buildingId}`, {}),store.get(`machines:${buildingId}`,null),store.get(`mapping:${buildingId}`,null)])
-      const machineDorms=new Map((entry?.board?.floors||[]).flatMap(floor=>floor.machines||[]).map(machine=>[String(machine.id),resolveMachineDorm(machine,mapping?.mapping||{},env.SITE_BUILDINGS)]))
+      const machines = new Map((entry?.board?.floors || []).flatMap(floor => floor.machines || []).map(machine => [String(machine.id), machine]))
       const occMap = occ && typeof occ === 'object' ? { ...occ } : {}
       const now = Date.now()
+      const snapshotAt = Date.parse(entry?.board?.updatedAt || '')
+      const freshBoard = snapshotAt <= now + 30_000 && now - snapshotAt < 180_000 &&
+        upstreamQueryFailure(entry?.board) === null
       const out = {}
       const machineFilter = c.req.query('machineId') || ''
       const taskCache = new Map()
       const removals = new Map()
       for (const [machineId, o] of Object.entries(occMap)) {
         if (machineFilter && machineId !== machineFilter) continue
-        const machineDorm=machineDorms.get(machineId)
+        const machine = machines.get(machineId)
+        const machineDorm = machine ? resolveMachineDorm(machine, mapping?.mapping || {}, env.SITE_BUILDINGS) : undefined
         if(dorm&&machineDorm!==dorm||env.SITE_BUILDINGS.some(building=>building.code===machineDorm&&building.enabled===false))continue
         // 到点自动过期
         if (!o || !o.endAt || new Date(o.endAt).getTime() < now - DAY_MS) {
@@ -2169,9 +2198,11 @@ export function createApp({ store, env, mobile = {}, moderation: moderationOptio
         const tasks=taskCache.get(o.userId)
         const task=(Array.isArray(tasks)?tasks:[]).find((t)=>t.id===o.taskId || (!o.taskId && t.machineId===machineId && t.startAt===o.startAt))
         if(task?.done || task?.takenAt){delete occMap[machineId];removals.set(machineId,o);continue}
+        const idle = machine?.state === 'idle' && (machine.upstreamState || machine.state) === 'idle'
+        const fresh = freshBoard && !machine?.health?.stale && !machine?.health?.suspectedFault && upstreamQueryFailure(machine) === null
         out[machineId] = {
           userId: o.userId,
-          suspectedUncollected: Boolean(task && Date.parse(task.endAt)<now-300000),
+          suspectedUncollected: Boolean(task && idle && fresh && Date.parse(task.endAt) <= now - 300_000),
           care: task ? { ...taskDetailsView(task), source: 'user_report' } : null,
           nick: maskNick(o.nick),
           avatar: o.avatar || '',

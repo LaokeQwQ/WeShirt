@@ -62,6 +62,37 @@ test('未捕获异常和手动internal500均泛化，诊断文本不进入响应
   assert.equal(JSON.stringify(await store.list('')).includes(secret), false)
 })
 
+test('Edge returns the traced error before its audit write completes', async t => {
+  const store = createMemoryStore()
+  const put = store.put
+  let release
+  const held = new Promise(resolve => { release = resolve })
+  t.after(release)
+  store.put = async (key, value) => { if (key.startsWith('auditlog:')) await held; return put(key, value) }
+  const app = new Hono()
+  registerRequestSafety(app, { store })
+  app.post('/api/mobile/auth/challenge', c => c.json({ error: { code: 'mobile_busy' } }, 503))
+  const tasks = []
+  let timer
+  try {
+    const response = await Promise.race([
+      app.fetch(new Request('https://example.test/api/mobile/auth/challenge', { method: 'POST' }), undefined, { waitUntil: task => tasks.push(task) }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('audit delayed error response')), 1000) }),
+    ])
+    const { error } = await response.json()
+    assert.equal(response.status, 503)
+    assert.equal(error.code, 'mobile_busy')
+    assert.match(error.eventId, /^evt_[a-f0-9]{24}$/)
+    assert.equal(error.eventId, response.headers.get('X-Event-ID'))
+    assert.equal(tasks.length, 1)
+    assert.deepEqual(await store.list('auditlog:'), [])
+    release()
+    await tasks[0]
+    const [saved] = (await store.list('auditlog:')).flatMap(row => row.value)
+    assert.equal(saved.detail.eventId, error.eventId)
+  } finally { clearTimeout(timer) }
+})
+
 test('同uid/method/path/key并发仅执行一次，后续跨app重放；不同body冲突409', async () => {
   let count = 0, enter, release
   const entered = new Promise((resolve) => { enter = resolve })

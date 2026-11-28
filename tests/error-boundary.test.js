@@ -78,7 +78,7 @@ for (const scenario of [
 test('未被路由捕获的运行时配置异常也走同一固定错误边界', async (t) => {
   const f = await fixture(t)
   f.failures.add('meta:dingtalk')
-  const result = await f.call('/api/health')
+  const result = await f.call('/api/dingtalk/login-url')
   assert.ok(f.hits.get('meta:dingtalk'))
   await assertFailure(f, result)
 })

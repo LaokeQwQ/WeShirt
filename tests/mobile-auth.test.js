@@ -131,6 +131,27 @@ test('native installation updates are bound to the login installation and an old
   assert.deepEqual((await f.atomicStore.get('mobile:installation-index:u_native')).value.installations, [])
 })
 
+test('native installation checks ownership using one fresh session verification per request', async () => {
+  const f = await setup(), session = await f.session()
+  const sessionKey = 'mobile:session:' + session.accessToken.split('.')[1]
+  const originalGet = f.atomicStore.get
+  let sessionReads = 0
+  f.atomicStore.get = async key => {
+    if (key === sessionKey) sessionReads++
+    return originalGet(key)
+  }
+  const app = createApp({ store: f.store, env, mobile: { atomicStore: f.atomicStore, identityProvider: f.identityProvider } })
+  const request = id => app.request('/api/mobile/installations/' + id, { headers: { authorization: 'Bearer ' + session.accessToken } })
+  assert.equal((await request(install)).status, 200)
+  assert.equal(sessionReads, 1)
+  assert.equal((await request('installation_other_1234')).status, 403)
+  assert.equal(sessionReads, 2)
+  await f.auth.logout({ installationId: install, refreshToken: session.refreshToken })
+  const afterLogout = sessionReads
+  assert.equal((await request(install)).status, 401)
+  assert.equal(sessionReads, afterLogout + 1)
+})
+
 test('expired logout returns a credential error instead of attempting a store write with expired TTL', async () => {
   let at = Date.now()
   const f = await setup({ now: () => at }), session = await f.session()
@@ -164,6 +185,48 @@ test('mobile routes use standard event IDs, accept native sessions on existing A
   assert.equal(bad.status, 401); assert.equal(data.error.status, 401); assert.equal(data.error.eventId, bad.headers.get('X-Event-ID'))
   assert.equal(JSON.stringify(await f.store.list('audit:')).includes(session.refreshToken), false)
 })
+
+test('native login, profile and permissions do not wait on unrelated site runtime settings', async () => {
+  const f = await setup()
+  const blocked = new Set(['meta:site', 'meta:dingtalk'])
+  const reads = []
+  const store = { ...f.store, async get(key, fallback) {
+    reads.push(key)
+    if (blocked.has(key)) throw Object.assign(new Error('temporary runtime store outage'), { code: 'edge_kv_read_failed' })
+    return f.store.get(key, fallback)
+  } }
+  const app = createApp({ store, env, mobile: { atomicStore: f.atomicStore, identityProvider: f.identityProvider } })
+  const get = (path, token) => app.request(path, { headers: token ? { authorization: 'Bearer ' + token } : {} })
+  const post = (path, body) => app.request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  assert.equal((await get('/api/health')).status, 200)
+  const config = await get('/api/mobile/config')
+  assert.equal(config.headers.get('cache-control'), 'no-store')
+  assert.equal((await config.json()).auth.enabled, true)
+  const challenge = await post('/api/mobile/auth/challenge', { installationId: install, state, codeChallenge: await mobileDigest(verifier), platform: 'android', packageName: MOBILE_PACKAGE })
+  assert.equal(challenge.status, 200)
+  const exchange = await post('/api/mobile/auth/exchange', { challengeId: (await challenge.json()).challengeId, state, codeVerifier: verifier, authCode: 'sdk-test-code' })
+  assert.equal(exchange.status, 200)
+  const session = await exchange.json()
+  const me = await get('/api/auth/me', session.accessToken)
+  assert.equal(me.status, 200)
+  assert.equal((await me.json()).user.id, 'u_native')
+  assert.equal(reads.some(key => blocked.has(key)), false)
+
+  blocked.delete('meta:site')
+  const perms = await get('/api/user/permissions', session.accessToken)
+  assert.equal(perms.status, 200)
+  assert.ok((await perms.json()).permissions)
+  assert.deepEqual(reads.filter(key => key === 'meta:site' || key === 'meta:dingtalk'), ['meta:site'])
+  assert.equal((await get('/api/site')).status, 200)
+  assert.deepEqual(reads.filter(key => key === 'meta:site' || key === 'meta:dingtalk'), ['meta:site', 'meta:site'])
+  const refresh = await post('/api/mobile/auth/refresh', { installationId: install, refreshToken: session.refreshToken })
+  assert.equal(refresh.status, 200)
+  const refreshed = await refresh.json()
+  assert.equal((await post('/api/mobile/auth/logout', { installationId: install, refreshToken: refreshed.refreshToken })).status, 200)
+  assert.equal((await get('/api/auth/me', refreshed.accessToken)).status, 401)
+  assert.equal(reads.includes('meta:dingtalk'), false)
+})
+
 test('default native provider exchanges new SDK codes with dedicated credentials and verified identity only', async t => {
   const f = await setup(), originalFetch = globalThis.fetch, calls = []
   t.after(() => { globalThis.fetch = originalFetch })

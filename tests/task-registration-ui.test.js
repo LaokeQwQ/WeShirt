@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises'
 import { ref, computed, watch, reactive, nextTick } from 'vue'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
 import * as policy from '../frontend/src/taskRegistration.js'
+import { newerRunningMachine, taskTimingConflict } from '../frontend/src/taskTiming.js'
+import { splitTaskHistory } from '../packages/core/task-retention.js'
 
 const { WASHER_PROGRAMS, machineRemainingMinutes, registrationSnapshot, registrationDescription, registrationBody, createUserActionConfirmation } = policy
 const after = (min) => new Date(Date.now() + min * 60000).toISOString()
@@ -113,7 +115,7 @@ test('登记、3D、巡检与机器卡片修改后Vue脚本和模板均可编译
 
 function taskPanel({ confirm, api } = {}) {
   const user = reactive({ user: { id: 'u' }, ensureAuth: async () => {} })
-  return evaluate(sources.Task, { ...policy, ref, computed, watch, onMounted() {}, onUnmounted() {}, useRoute: () => ({ query: {} }), useRouter: () => ({ push() {}, replace() {} }), useUserStore: () => user, useDormStore: () => ({ code: 'example', buildings: [] }), filterDormFloors: board => board?.floors || [], showToast() {}, showConfirmDialog: confirm || (async () => {}), api: api || (async () => ({ tasks: [] })), NEED_LOGIN: 'login', loadBoard: async () => ({ board: { floors: [] } }) }, '({ board, selected, mode, minutes, note, selfCleaned, selectProgram, submit, submitting, stateTextOf })')
+  return evaluate(sources.Task, { ...policy, newerRunningMachine, taskTimingConflict, splitTaskHistory, ref, computed, watch, document: { visibilityState: 'visible' }, onMounted() {}, onUnmounted() {}, useRoute: () => ({ query: {} }), useRouter: () => ({ push() {}, replace() {} }), useUserStore: () => user, useDormStore: () => ({ code: 'example', buildings: [] }), filterDormFloors: board => board?.floors || [], showToast() {}, showConfirmDialog: confirm || (async () => {}), api: api || (async () => ({ tasks: [] })), NEED_LOGIN: 'login', loadBoard: async () => ({ board: { floors: [] } }) }, '({ board, selected, mode, minutes, note, selfCleaned, selectProgram, submit, submitting, stateTextOf, canTake, reminderSource, take, tasks, now })')
 }
 
 test('真实Task提交先确认：取消保留备注/标记且不调用API；明确桶自洁只写一次6分钟', async () => {
@@ -161,6 +163,65 @@ test('Task到期仅声称登记计时到点；公共卡片优先展示登记来�
   props.machine = washer({ state: 'occupied', estimated: true, registrationPending: true, availabilityLabel: '用户已登记，等待设备状态更新' })
   assert.equal(card.status.value.text, '用户已登记，等待设备状态更新')
   assert.doesNotMatch(card.detail.value, /可前往现场使用|运行中/)
+})
+
+test('热水洗平台延长余时后任务面板立即采用同一截止时间并去掉过早的取衣操作', async () => {
+  const newer = {
+    updatedAt: after(0),
+    floors: [{ machines: [washer({ finishAt: after(26), timeSource: 'upstream' })] }],
+  }
+  const task = {
+    id: 'active', machineId: 'washer', currentTask: true, mode: 'duration',
+    timingObservedAt: after(-1), endAt: after(-1), startAt: after(-20), takeState: 'pending',
+  }
+  const confirmation = deferred()
+  const takeConfirmation = deferred()
+  let reads = 0
+  let writes = 0
+  const panel = taskPanel({
+    confirm: () => takeConfirmation.promise,
+    api: async (_, opts) => {
+      if (opts?.method === 'POST') { writes++; return {} }
+      reads++
+      return confirmation.promise
+    },
+  })
+  panel.tasks.value = [task]
+  assert.match(panel.stateTextOf(task), /登记计时结束/)
+  assert.equal(panel.canTake(task), true)
+  const taking = panel.take(task)
+  panel.board.value = newer
+  panel.now.value = Date.parse(newer.updatedAt)
+  assert.equal(panel.stateTextOf(task), '平台剩余 26 分')
+  assert.equal(panel.reminderSource(task), '按最新平台时间同步')
+  assert.equal(panel.canTake(task), false)
+  takeConfirmation.resolve()
+  await taking
+  assert.equal(writes, 0)
+  await nextTick()
+  assert.equal(reads, 1)
+  confirmation.resolve({ tasks: [{ ...task, takeState: 'waiting', timingSource: 'upstream',
+    timingObservedAt: newer.updatedAt, endAt: newer.floors[0].machines[0].finishAt }] })
+  await confirmation.promise
+  await nextTick()
+  assert.equal(panel.stateTextOf(panel.tasks.value[0]), '平台剩余 26 分')
+})
+
+test('公共看板不能为旧任务、已取任务或已确认结束的任务借用另一轮机器时间', () => {
+  const now = Date.now()
+  const board = { updatedAt: after(0) }
+  const machine = washer({ timeSource: 'upstream' })
+  const task = { currentTask: true, timingObservedAt: after(-1), machineId: machine.id }
+  for (const override of [
+    { currentTask: false }, { completionConfirmed: true }, { takeState: 'taken' }, { archived: true },
+    { done: true }, { timingObservedAt: board.updatedAt }, { machineId: 'other-washer' },
+  ]) assert.equal(newerRunningMachine({ ...task, ...override }, machine, board, now), null)
+  for (const override of [{ state: 'idle' }, { timeStale: true }, { registrationPending: true }]) {
+    assert.equal(newerRunningMachine(task, { ...machine, ...override }, board, now), null)
+  }
+  const runningWithoutDeadline = newerRunningMachine(task, { ...machine, finishAt: null }, board, now)
+  assert.equal(Number.isFinite(runningWithoutDeadline.end), false)
+  assert.equal(taskTimingConflict({ ...task, takeState: 'pending' }, runningWithoutDeadline), true)
 })
 
 test('公共机器卡片在账号恢复期间不登记或收藏，验证就绪后恢复操作', async () => {

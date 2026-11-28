@@ -157,6 +157,22 @@ test('history is own-only, input context keeps recent rounds within the budget a
   assert.equal(await store.get('assistant:usage:u_a', null), null)
 })
 
+test('reading history filters expired data without depending on a storage write', async () => {
+  const { req, store } = await fixture()
+  const expired = { role: 'user', content: 'expired', at: '2000-01-01T00:00:00.000Z' }
+  const recent = { role: 'assistant', content: 'current', at: new Date().toISOString() }
+  await store.put('assistant:history:u_a', [expired, recent])
+  const put = store.put
+  store.put = async () => { throw new Error('write unavailable') }
+  try {
+    const response = await req('/api/assistant/history')
+    assert.equal(response.status, 200)
+    assert.deepEqual(response.data.messages, [recent])
+  } finally { store.put = put }
+  assert.equal((await pruneAssistantStorage(store)).pruned, 1)
+  assert.deepEqual(await store.get('assistant:history:u_a'), [recent])
+})
+
 test('MCP initializes and advertises a single readonly tool independent of LLM configuration', async () => {
   const { req } = await fixture({ env: {} })
   const initialized = await req('/api/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } } })
